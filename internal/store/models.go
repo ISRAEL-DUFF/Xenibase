@@ -67,6 +67,7 @@ type ApiToken struct {
 	CreatedVia       string
 	ExpiryNotifiedAt *time.Time
 	CreatedAt        time.Time
+	OauthClientID    *uuid.UUID
 }
 
 type AuditLog struct {
@@ -709,6 +710,34 @@ type Node struct {
 	PlacementGroup        *string
 }
 
+type OauthClient struct {
+	ID               uuid.UUID
+	ClientID         string
+	Name             string
+	ClientSecretHash *string
+	RedirectUris     []string
+	ScopesAllowed    []string
+	CreatedBy        *uuid.UUID
+	CreatedAt        time.Time
+	DisabledAt       *time.Time
+}
+
+type OauthCode struct {
+	CodeHash      string
+	ClientID      string
+	UserID        uuid.UUID
+	OrgID         uuid.UUID
+	ProjectIds    []uuid.UUID
+	Scopes        []string
+	ExpiresInDays *int32
+	RedirectUri   string
+	CodeChallenge string
+	TokenID       *uuid.UUID
+	ExpiresAt     time.Time
+	UsedAt        *time.Time
+	CreatedAt     time.Time
+}
+
 type Operation struct {
 	ID         uuid.UUID
 	Kind       string
@@ -941,6 +970,7 @@ type Project struct {
 	DataResidency       bool
 	ForwardRegion       *string
 	ForwardUntil        *time.Time
+	IntegratorRoles     []string
 }
 
 type ProjectApiKey struct {

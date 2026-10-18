@@ -501,6 +501,8 @@ func Instance(ctx context.Context, db store.DBTX, ps *provision.Service, inst st
 		if p.LegacyOwnerRole != nil {
 			v1Roles = append(v1Roles, *p.LegacyOwnerRole)
 		}
+		// Integrator roles the platform admin created for the project.
+		v1Roles = append(v1Roles, p.IntegratorRoles...)
 	}
 	fs, err := Roles(ctx, admin, tenants)
 	if err != nil {

@@ -1059,6 +1059,42 @@ paths:
                 $ref: "#/components/schemas/Operation"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/admin/projects/{project_id}/roles:
+    post:
+      operationId: createIntegratorRoles
+      summary: Create integrator roles on a dedicated project's instance (platform admin)
+      description: |
+        Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+        NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+        each to the project's owner role WITH ADMIN OPTION, so the owner
+        can grant and manage them, for integrators whose migrations expect
+        them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+        the project, so moves recreate them and the demotion check names
+        them. Dedicated projects only (`409 conflict` otherwise). Needs a
+        recent re-authentication.
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntegratorRolesRequest"
+      responses:
+        "200":
+          description: The project's integrator roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntegratorRoles"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/moves:
     get:
       operationId: listProjectMoves
@@ -2821,6 +2857,61 @@ paths:
                 $ref: "#/components/schemas/StorageTestResult"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/admin/oauth/clients:
+    get:
+      operationId: listOAuthClients
+      summary: The third-party apps registered on this server
+      tags: [admin]
+      responses:
+        "200":
+          description: Clients.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClientList"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createOAuthClient
+      summary: Register a third-party app (OAuth client)
+      description: |
+        Redirect URIs must be absolute `https://` URLs without a fragment
+        (`http://localhost` and `http://127.0.0.1` are allowed for
+        development); the authorize request must match one exactly. A
+        confidential client (the default) gets a secret, shown once.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOAuthClientRequest"
+      responses:
+        "201":
+          description: Registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClientCreated"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/admin/oauth/clients/{client_id}:
+    delete:
+      operationId: disableOAuthClient
+      summary: Disable a third-party app
+      description: The app can no longer ask for consent or exchange codes, and every token it was issued is revoked.
+      tags: [admin]
+      parameters:
+        - name: client_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Disabled.
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/admin/storage-targets:
     get:
       operationId: listPlatformStorageTargets
@@ -3119,6 +3210,148 @@ paths:
           description: Denied.
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/oauth/authorize:
+    get:
+      operationId: getOAuthAuthorization
+      summary: What a third-party app asks for, for the consent page
+      description: |
+        The first step of an app's OAuth 2.0 authorization code flow (RFC
+        6749 s4.1, PKCE required, RFC 7636). The consent page at
+        `/oauth/authorize` calls this with the app's query, and shows the
+        app's name, the scopes it asks for, and the organisations the user
+        may grant for, each with its projects. A bad `client_id` or
+        `redirect_uri` is a 400 and nothing is redirected (s4.1.2.1).
+      tags: [oauth]
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: scope
+          in: query
+          required: false
+          description: Space-separated `read`, `write`, `admin`; the app's allowed scopes by default.
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+        - name: code_challenge
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code_challenge_method
+          in: query
+          required: true
+          description: Only `S256` is accepted.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The request, for the consent page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthAuthorizeInfo"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: decideOAuthAuthorization
+      summary: Approve or deny an app's request
+      description: |
+        Approving stores a single-use authorization code (10 minutes) for
+        the chosen organisation, scopes (narrowed from the request, never
+        widened), projects and expiry, and answers with the app's redirect
+        URI carrying `code` and `state`. Denying answers with the redirect
+        carrying `error=access_denied`. The browser then goes there.
+      tags: [oauth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthDecision"
+      responses:
+        "200":
+          description: Where to send the browser.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthRedirect"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/oauth/token:
+    post:
+      operationId: exchangeOAuthToken
+      summary: Exchange an authorization code for an API token
+      description: |
+        RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+        the `code`, the same `redirect_uri`, the `client_id`, the
+        `client_secret` (confidential clients; also accepted as HTTP Basic
+        auth) and the `code_verifier`. Form-encoded or JSON. A code works
+        once: a second exchange fails with `invalid_grant` and revokes the
+        token the first one issued (s4.1.2). The answer is an ordinary
+        Xenibase API token (`xb_…`) for the user in the organisation they
+        chose, with the granted scopes, projects and expiry. Errors are in
+        OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+        `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+        an address tries too often.
+      tags: [oauth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/OAuthTokenRequest"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthTokenRequest"
+      responses:
+        "200":
+          description: The token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthTokenResponse"
+        default:
+          $ref: "#/components/responses/OAuthError"
+  /api/v1/oauth/revoke:
+    post:
+      operationId: revokeOAuthToken
+      summary: An app revokes a token it was issued
+      description: |
+        RFC 7009: the client authenticates (`client_id` and `client_secret`
+        in the body or as HTTP Basic auth) and names the token. Answers 200
+        whether or not the token was still valid, or was ever this app's.
+        Revoking elsewhere (Account, the organisation's tokens) has the
+        same effect: the token answers `401 invalid_token` from then on.
+      tags: [oauth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/OAuthRevokeRequest"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthRevokeRequest"
+      responses:
+        "200":
+          description: Revoked, or nothing to revoke.
+        default:
+          $ref: "#/components/responses/OAuthError"
   /api/v1/admin/settings/tokens:
     get:
       operationId: getTokenSettings
@@ -8623,6 +8856,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    OAuthError:
+      description: An OAuth 2.0 error (RFC 6749 s5.2).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OAuthError"
   schemas:
     Health:
       type: object
@@ -14403,7 +14642,11 @@ components:
           format: date-time
         created_via:
           type: string
-          enum: [ui, device, api]
+          enum: [ui, device, api, oauth]
+        oauth_client_name:
+          type: string
+          nullable: true
+          description: The third-party app the token was issued to through OAuth, if any.
         status:
           type: string
           enum: [active, expired, revoked]
@@ -14532,6 +14775,256 @@ components:
           type: integer
           minimum: 1
           maximum: 365
+    OAuthClient:
+      type: object
+      required: [id, client_id, name, confidential, redirect_uris, scopes_allowed, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        client_id:
+          type: string
+        name:
+          type: string
+        confidential:
+          type: boolean
+          description: Whether the client has a secret.
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        scopes_allowed:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenScope"
+        created_at:
+          type: string
+          format: date-time
+        disabled_at:
+          type: string
+          format: date-time
+          nullable: true
+    OAuthClientList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OAuthClient"
+    CreateOAuthClientRequest:
+      type: object
+      required: [name, redirect_uris]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          description: Shown on the consent page and on the tokens it is issued.
+        redirect_uris:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+        scopes_allowed:
+          type: array
+          description: The most the app may ask for; default read and write.
+          items:
+            $ref: "#/components/schemas/TokenScope"
+        confidential:
+          type: boolean
+          default: true
+          description: false registers a public client (no secret; PKCE alone).
+    OAuthClientCreated:
+      type: object
+      required: [client]
+      properties:
+        client:
+          $ref: "#/components/schemas/OAuthClient"
+        client_secret:
+          type: string
+          description: The secret (`xbc_…`), shown only once; absent for a public client.
+    OAuthGrantProject:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+    OAuthGrantOrg:
+      type: object
+      required: [id, name, personal, projects]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        personal:
+          type: boolean
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/OAuthGrantProject"
+    OAuthAuthorizeInfo:
+      type: object
+      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations]
+      properties:
+        client_id:
+          type: string
+        client_name:
+          type: string
+        redirect_uri:
+          type: string
+        state:
+          type: string
+        scopes:
+          type: array
+          description: What the app asked for; the user may narrow them.
+          items:
+            $ref: "#/components/schemas/TokenScope"
+        code_challenge:
+          type: string
+        code_challenge_method:
+          type: string
+        organisations:
+          type: array
+          description: The organisations the user may grant for, with the projects they could restrict the token to.
+          items:
+            $ref: "#/components/schemas/OAuthGrantOrg"
+    OAuthDecision:
+      type: object
+      required: [client_id, redirect_uri, code_challenge, code_challenge_method, approve]
+      properties:
+        client_id:
+          type: string
+        redirect_uri:
+          type: string
+        state:
+          type: string
+        code_challenge:
+          type: string
+        code_challenge_method:
+          type: string
+        approve:
+          type: boolean
+        scopes:
+          type: array
+          description: Within what the app asked for; the request's scopes by default.
+          items:
+            $ref: "#/components/schemas/TokenScope"
+        org_id:
+          type: string
+          format: uuid
+        project_ids:
+          type: array
+          nullable: true
+          items:
+            type: string
+            format: uuid
+        expires_in_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+    OAuthRedirect:
+      type: object
+      required: [redirect_to]
+      properties:
+        redirect_to:
+          type: string
+          description: The app's redirect URI with `code` and `state`, or `error`.
+    OAuthTokenRequest:
+      type: object
+      required: [grant_type, code, redirect_uri, client_id, code_verifier]
+      properties:
+        grant_type:
+          type: string
+          enum: [authorization_code]
+        code:
+          type: string
+        redirect_uri:
+          type: string
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        code_verifier:
+          type: string
+    OAuthTokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, scope, org_id, token_id]
+      properties:
+        access_token:
+          type: string
+          description: The API token (`xb_…`), shown only once.
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Seconds until the token expires.
+        scope:
+          type: string
+          description: Space-separated granted scopes.
+        org_id:
+          type: string
+          format: uuid
+        project_ids:
+          type: array
+          nullable: true
+          description: The projects the token is restricted to; null for every project the user can access.
+          items:
+            type: string
+            format: uuid
+        token_id:
+          type: string
+          format: uuid
+    OAuthRevokeRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+        client_id:
+          type: string
+        client_secret:
+          type: string
+    OAuthError:
+      type: object
+      required: [error, error_description]
+      properties:
+        error:
+          type: string
+          enum: [invalid_request, invalid_client, invalid_grant, unsupported_grant_type, slow_down, server_error]
+        error_description:
+          type: string
+    IntegratorRolesRequest:
+      type: object
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: Role names matching `^[a-z][a-z0-9_]{2,62}$`.
+          items:
+            type: string
+    IntegratorRoles:
+      type: object
+      required: [roles, created]
+      properties:
+        roles:
+          type: array
+          description: Every integrator role recorded on the project.
+          items:
+            type: string
+        created:
+          type: array
+          description: The ones this call created (the rest already existed).
+          items:
+            type: string
     TokenGrant:
       type: object
       description: The API token a request was made with.

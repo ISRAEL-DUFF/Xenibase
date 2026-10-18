@@ -12,6 +12,26 @@ bundle share one version (spec §11.5).
 - **Backups to S3 and R2 work again.** The agent and Postgres images, built on the official `postgres` image, had no CA certificates, so every upload failed with "x509: certificate signed by unknown authority" (it also affected WAL-G archiving from dedicated instances). Both images now install `ca-certificates`, and the build fails if they are missing. `./upgrade.sh` rebuilds them; recreate dedicated instances' containers to pick up the new Postgres image.
 - The storefront guide says how a webhook behaves across environments (one public URL each, where the secret goes).
 
+### Added
+- **OAuth for third-party apps.** An app registered by a platform admin
+  (`POST /api/v1/admin/oauth/clients`) can send a user to `/oauth/authorize`,
+  where they consent per organisation: narrow the scopes, restrict projects,
+  choose the expiry, approve or deny. The app exchanges the single-use code
+  (10 minutes, PKCE S256 required of every client) at `POST /api/v1/oauth/token`
+  for an ordinary API token, and can give it back at `POST /api/v1/oauth/revoke`.
+  Tokens issued this way show under **Account → Connected apps** with the app's
+  name (`oauth_client_name`, `created_via: oauth`) and **Disconnect** revokes
+  them; a second use of a code revokes the token it issued; disabling the app
+  revokes everything it holds. Consents, issues and revocations are audited.
+  Taskiem is the first such app. See `docs/oauth-apps.md`.
+- **Integrator roles on dedicated instances.** `POST /api/v1/admin/projects/{project_id}/roles`
+  (platform admin, step-up auth) creates the named `NOLOGIN` roles on a
+  dedicated project's instance and grants them to the owner role
+  `WITH ADMIN OPTION`, for integrators whose migrations expect them (Taskiem's
+  `taskiem_app` and `taskiem_dispatch`). The roles are recorded on the project,
+  recreated by moves, named by the demotion check and expected by the
+  isolation audit. Shared projects answer `409 conflict`.
+
 ## v4.2.2
 
 ### Fixed

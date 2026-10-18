@@ -268,6 +268,12 @@ var auditActions = map[string]string{
 	"POST /api/v1/auth/device":                                   "",
 	"POST /api/v1/auth/device/token":                             "",
 	"POST /api/v1/auth/device/approve":                           "token.device_approve",
+	"POST /api/v1/oauth/authorize":                               "oauth.authorize",
+	"POST /api/v1/oauth/token":                                   "oauth.token_issue",
+	"POST /api/v1/oauth/revoke":                                  "oauth.token_revoke",
+	"POST /api/v1/admin/oauth/clients":                           "admin.oauth_client.create",
+	"DELETE /api/v1/admin/oauth/clients/{client_id}":             "admin.oauth_client.disable",
+	"POST /api/v1/admin/projects/{project_id}/roles":             "admin.project.integrator_roles",
 	"PUT /api/v1/admin/settings/tokens":                          "admin.settings.tokens",
 	"POST /api/v1/projects/{id}/tables/{schema}/{table}/changes": "project.rows.save",
 	"POST /api/v1/projects/{id}/schema/apply":                    "project.schema.change",
@@ -380,6 +386,9 @@ var csrfExempt = map[string]bool{
 	"POST /api/v1/agent/register":    true,
 	"POST /api/v1/auth/device":       true,
 	"POST /api/v1/auth/device/token": true,
+	// Third-party apps authenticate with their client secret and PKCE.
+	"POST /api/v1/oauth/token":  true,
+	"POST /api/v1/oauth/revoke": true,
 	// Signed by the provider; no cookies.
 	"POST /api/v1/payments/webhooks/{provider}": true,
 	"POST /api/v1/support/inbound/email":        true,
@@ -417,6 +426,9 @@ var reauthRequired = map[string]bool{
 	"POST /api/v1/admin/orgs/{org}/break-glass":              true,
 	"POST /api/v1/admin/orgs/{org}/suspend":                  true,
 	"GET /api/v1/projects/{id}/backup-key/download":          true,
+	// Handing a third-party app a token, and creating roles on an instance.
+	"POST /api/v1/oauth/authorize":                   true,
+	"POST /api/v1/admin/projects/{project_id}/roles": true,
 	// POST /api/v1/backups/{id}/restore checks it for mode in_place only.
 }
 

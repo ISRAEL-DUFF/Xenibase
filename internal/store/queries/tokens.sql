@@ -1,6 +1,6 @@
 -- name: InsertAPIToken :one
-INSERT INTO api_tokens (user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, created_via)
-VALUES (@user_id, @org_id, @name, @token_hash, @prefix, @scopes::text[], sqlc.narg(project_ids)::uuid[], @expires_at, @created_via)
+INSERT INTO api_tokens (user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, created_via, oauth_client_id)
+VALUES (@user_id, @org_id, @name, @token_hash, @prefix, @scopes::text[], sqlc.narg(project_ids)::uuid[], @expires_at, @created_via, sqlc.narg(oauth_client_id))
 RETURNING *;
 
 -- name: GetTokenForAuth :one
@@ -19,14 +19,16 @@ WHERE id = @id AND org_id = @org_id AND (last_used_at IS NULL OR last_used_at < 
 
 -- name: ListUserTokens :many
 -- tenant: system - a user's own tokens, across their organisations.
-SELECT t.*, o.name AS org_name
+SELECT t.*, o.name AS org_name, c.name AS oauth_client_name
 FROM api_tokens t JOIN organizations o ON o.id = t.org_id
+LEFT JOIN oauth_clients c ON c.id = t.oauth_client_id
 WHERE t.user_id = @user_id
 ORDER BY t.revoked_at IS NOT NULL, t.created_at DESC;
 
 -- name: ListOrgTokens :many
-SELECT t.*, u.email AS user_email, u.name AS user_name
+SELECT t.*, u.email AS user_email, u.name AS user_name, c.name AS oauth_client_name
 FROM api_tokens t JOIN users u ON u.id = t.user_id
+LEFT JOIN oauth_clients c ON c.id = t.oauth_client_id
 WHERE t.org_id = @org_id
 ORDER BY t.revoked_at IS NOT NULL, t.created_at DESC;
 

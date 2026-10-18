@@ -258,10 +258,24 @@ func (s *Service) preflight(ctx context.Context, p store.Project, o DemoteOption
 	if err != nil {
 		return plan, err
 	}
-	if len(custom) > 0 {
+	var integrator []string
+	custom = slices.DeleteFunc(custom, func(r string) bool {
+		if slices.Contains(p.IntegratorRoles, r) {
+			integrator = append(integrator, r)
+			return true
+		}
+		return false
+	})
+	switch {
+	case len(integrator) > 0:
+		// Created by the platform admin for an integrator (Taskiem): the
+		// shared tier has no such roles, and the integrator needs them.
+		add(CheckRoles, CheckBlocked, "integrator %s %s exist for this dedicated instance and can't exist on the shared tier; the integration that uses %s needs a dedicated project",
+			plural(len(integrator), "role", "roles"), strings.Join(integrator, ", "), plural(len(integrator), "it", "them"))
+	case len(custom) > 0:
 		add(CheckRoles, CheckBlocked, "custom %s %s can't move to the shared tier; remove %s first",
 			plural(len(custom), "role", "roles"), strings.Join(custom, ", "), plural(len(custom), "it", "them"))
-	} else {
+	default:
 		add(CheckRoles, CheckOK, "no roles beyond the project's own and its members' logins")
 	}
 

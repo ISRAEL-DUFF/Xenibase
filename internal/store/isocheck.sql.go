@@ -13,7 +13,7 @@ import (
 )
 
 const instanceProjects = `-- name: InstanceProjects :many
-SELECT p.id, p.db_name, p.owner_role, p.legacy_owner_role, p.storage_state, o.status AS org_status
+SELECT p.id, p.db_name, p.owner_role, p.legacy_owner_role, p.integrator_roles, p.storage_state, o.status AS org_status
 FROM projects p JOIN organizations o ON o.id = p.org_id
 WHERE p.instance_id = $1 AND p.deleted_at IS NULL AND p.status NOT IN ('provisioning', 'deleting', 'error')
 ORDER BY p.db_name
@@ -24,6 +24,7 @@ type InstanceProjectsRow struct {
 	DbName          string
 	OwnerRole       string
 	LegacyOwnerRole *string
+	IntegratorRoles []string
 	StorageState    string
 	OrgStatus       string
 }
@@ -44,6 +45,7 @@ func (q *Queries) InstanceProjects(ctx context.Context, instanceID uuid.UUID) ([
 			&i.DbName,
 			&i.OwnerRole,
 			&i.LegacyOwnerRole,
+			&i.IntegratorRoles,
 			&i.StorageState,
 			&i.OrgStatus,
 		); err != nil {

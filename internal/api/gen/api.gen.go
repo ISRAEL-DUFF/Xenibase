@@ -18,6 +18,7 @@ import (
 const (
 	APITokenCreatedViaApi    APITokenCreatedVia = "api"
 	APITokenCreatedViaDevice APITokenCreatedVia = "device"
+	APITokenCreatedViaOauth  APITokenCreatedVia = "oauth"
 	APITokenCreatedViaUi     APITokenCreatedVia = "ui"
 )
 
@@ -27,6 +28,8 @@ func (e APITokenCreatedVia) Valid() bool {
 	case APITokenCreatedViaApi:
 		return true
 	case APITokenCreatedViaDevice:
+		return true
+	case APITokenCreatedViaOauth:
 		return true
 	case APITokenCreatedViaUi:
 		return true
@@ -1781,6 +1784,66 @@ func (e NodeLifecycle) Valid() bool {
 	case NodeLifecycleDraining:
 		return true
 	case NodeLifecycleProvisioning:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OAuthErrorError.
+const (
+	InvalidClient        OAuthErrorError = "invalid_client"
+	InvalidGrant         OAuthErrorError = "invalid_grant"
+	InvalidRequest       OAuthErrorError = "invalid_request"
+	ServerError          OAuthErrorError = "server_error"
+	SlowDown             OAuthErrorError = "slow_down"
+	UnsupportedGrantType OAuthErrorError = "unsupported_grant_type"
+)
+
+// Valid indicates whether the value is a known member of the OAuthErrorError enum.
+func (e OAuthErrorError) Valid() bool {
+	switch e {
+	case InvalidClient:
+		return true
+	case InvalidGrant:
+		return true
+	case InvalidRequest:
+		return true
+	case ServerError:
+		return true
+	case SlowDown:
+		return true
+	case UnsupportedGrantType:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OAuthTokenRequestGrantType.
+const (
+	AuthorizationCode OAuthTokenRequestGrantType = "authorization_code"
+)
+
+// Valid indicates whether the value is a known member of the OAuthTokenRequestGrantType enum.
+func (e OAuthTokenRequestGrantType) Valid() bool {
+	switch e {
+	case AuthorizationCode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OAuthTokenResponseTokenType.
+const (
+	Bearer OAuthTokenResponseTokenType = "Bearer"
+)
+
+// Valid indicates whether the value is a known member of the OAuthTokenResponseTokenType enum.
+func (e OAuthTokenResponseTokenType) Valid() bool {
+	switch e {
+	case Bearer:
 		return true
 	default:
 		return false
@@ -3968,8 +4031,11 @@ type APIToken struct {
 	LastUsedAt *time.Time         `json:"last_used_at,omitempty"`
 	LastUsedIp *string            `json:"last_used_ip,omitempty"`
 	Name       string             `json:"name"`
-	OrgId      openapi_types.UUID `json:"org_id"`
-	OrgName    *string            `json:"org_name,omitempty"`
+
+	// OauthClientName The third-party app the token was issued to through OAuth, if any.
+	OauthClientName *string            `json:"oauth_client_name,omitempty"`
+	OrgId           openapi_types.UUID `json:"org_id"`
+	OrgName         *string            `json:"org_name,omitempty"`
 
 	// Prefix The token's first characters, for recognising it.
 	Prefix string `json:"prefix"`
@@ -5380,6 +5446,19 @@ type CreateNodeRequest struct {
 // CreateNodeRequestRole pooler: an edge pooler host (both PgBouncers and keepalived), never given a database. edge: runs xenibase-edge only, its cost split by backend services' use (V4.1 §11).
 type CreateNodeRequestRole string
 
+// CreateOAuthClientRequest defines model for CreateOAuthClientRequest.
+type CreateOAuthClientRequest struct {
+	// Confidential false registers a public client (no secret; PKCE alone).
+	Confidential *bool `json:"confidential,omitempty"`
+
+	// Name Shown on the consent page and on the tokens it is issued.
+	Name         string   `json:"name"`
+	RedirectUris []string `json:"redirect_uris"`
+
+	// ScopesAllowed The most the app may ask for; default read and write.
+	ScopesAllowed *[]TokenScope `json:"scopes_allowed,omitempty"`
+}
+
 // CreateOrgRequest defines model for CreateOrgRequest.
 type CreateOrgRequest struct {
 	Name string `json:"name"`
@@ -6367,6 +6446,21 @@ type InstanceUpdated struct {
 	Plan      *ResizePlan     `json:"plan,omitempty"`
 }
 
+// IntegratorRoles defines model for IntegratorRoles.
+type IntegratorRoles struct {
+	// Created The ones this call created (the rest already existed).
+	Created []string `json:"created"`
+
+	// Roles Every integrator role recorded on the project.
+	Roles []string `json:"roles"`
+}
+
+// IntegratorRolesRequest defines model for IntegratorRolesRequest.
+type IntegratorRolesRequest struct {
+	// Roles Role names matching `^[a-z][a-z0-9_]{2,62}$`.
+	Roles []string `json:"roles"`
+}
+
 // Invitation defines model for Invitation.
 type Invitation struct {
 	CreatedAt time.Time          `json:"created_at"`
@@ -7099,6 +7193,135 @@ type NoopParams struct {
 	FailAttempts *int `json:"fail_attempts,omitempty"`
 	Steps        *int `json:"steps,omitempty"`
 }
+
+// OAuthAuthorizeInfo defines model for OAuthAuthorizeInfo.
+type OAuthAuthorizeInfo struct {
+	ClientId            string `json:"client_id"`
+	ClientName          string `json:"client_name"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
+
+	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
+	Organisations []OAuthGrantOrg `json:"organisations"`
+	RedirectUri   string          `json:"redirect_uri"`
+
+	// Scopes What the app asked for; the user may narrow them.
+	Scopes []TokenScope `json:"scopes"`
+	State  *string      `json:"state,omitempty"`
+}
+
+// OAuthClient defines model for OAuthClient.
+type OAuthClient struct {
+	ClientId string `json:"client_id"`
+
+	// Confidential Whether the client has a secret.
+	Confidential  bool               `json:"confidential"`
+	CreatedAt     time.Time          `json:"created_at"`
+	DisabledAt    *time.Time         `json:"disabled_at,omitempty"`
+	Id            openapi_types.UUID `json:"id"`
+	Name          string             `json:"name"`
+	RedirectUris  []string           `json:"redirect_uris"`
+	ScopesAllowed []TokenScope       `json:"scopes_allowed"`
+}
+
+// OAuthClientCreated defines model for OAuthClientCreated.
+type OAuthClientCreated struct {
+	Client OAuthClient `json:"client"`
+
+	// ClientSecret The secret (`xbc_…`), shown only once; absent for a public client.
+	ClientSecret *string `json:"client_secret,omitempty"`
+}
+
+// OAuthClientList defines model for OAuthClientList.
+type OAuthClientList struct {
+	Items []OAuthClient `json:"items"`
+}
+
+// OAuthDecision defines model for OAuthDecision.
+type OAuthDecision struct {
+	Approve             bool                  `json:"approve"`
+	ClientId            string                `json:"client_id"`
+	CodeChallenge       string                `json:"code_challenge"`
+	CodeChallengeMethod string                `json:"code_challenge_method"`
+	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
+	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri         string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for; the request's scopes by default.
+	Scopes *[]TokenScope `json:"scopes,omitempty"`
+	State  *string       `json:"state,omitempty"`
+}
+
+// OAuthError defines model for OAuthError.
+type OAuthError struct {
+	Error            OAuthErrorError `json:"error"`
+	ErrorDescription string          `json:"error_description"`
+}
+
+// OAuthErrorError defines model for OAuthError.Error.
+type OAuthErrorError string
+
+// OAuthGrantOrg defines model for OAuthGrantOrg.
+type OAuthGrantOrg struct {
+	Id       openapi_types.UUID  `json:"id"`
+	Name     string              `json:"name"`
+	Personal bool                `json:"personal"`
+	Projects []OAuthGrantProject `json:"projects"`
+}
+
+// OAuthGrantProject defines model for OAuthGrantProject.
+type OAuthGrantProject struct {
+	Id   openapi_types.UUID `json:"id"`
+	Name string             `json:"name"`
+}
+
+// OAuthRedirect defines model for OAuthRedirect.
+type OAuthRedirect struct {
+	// RedirectTo The app's redirect URI with `code` and `state`, or `error`.
+	RedirectTo string `json:"redirect_to"`
+}
+
+// OAuthRevokeRequest defines model for OAuthRevokeRequest.
+type OAuthRevokeRequest struct {
+	ClientId     *string `json:"client_id,omitempty"`
+	ClientSecret *string `json:"client_secret,omitempty"`
+	Token        string  `json:"token"`
+}
+
+// OAuthTokenRequest defines model for OAuthTokenRequest.
+type OAuthTokenRequest struct {
+	ClientId     string                     `json:"client_id"`
+	ClientSecret *string                    `json:"client_secret,omitempty"`
+	Code         string                     `json:"code"`
+	CodeVerifier string                     `json:"code_verifier"`
+	GrantType    OAuthTokenRequestGrantType `json:"grant_type"`
+	RedirectUri  string                     `json:"redirect_uri"`
+}
+
+// OAuthTokenRequestGrantType defines model for OAuthTokenRequest.GrantType.
+type OAuthTokenRequestGrantType string
+
+// OAuthTokenResponse defines model for OAuthTokenResponse.
+type OAuthTokenResponse struct {
+	// AccessToken The API token (`xb_…`), shown only once.
+	AccessToken string `json:"access_token"`
+
+	// ExpiresIn Seconds until the token expires.
+	ExpiresIn int                `json:"expires_in"`
+	OrgId     openapi_types.UUID `json:"org_id"`
+
+	// ProjectIds The projects the token is restricted to; null for every project the user can access.
+	ProjectIds *[]openapi_types.UUID `json:"project_ids,omitempty"`
+
+	// Scope Space-separated granted scopes.
+	Scope     string                      `json:"scope"`
+	TokenId   openapi_types.UUID          `json:"token_id"`
+	TokenType OAuthTokenResponseTokenType `json:"token_type"`
+}
+
+// OAuthTokenResponseTokenType defines model for OAuthTokenResponse.TokenType.
+type OAuthTokenResponseTokenType string
 
 // Operation defines model for Operation.
 type Operation struct {
@@ -10278,6 +10501,20 @@ type GetNodeMetricsParams struct {
 // GetNodeMetricsParamsRange defines parameters for GetNodeMetrics.
 type GetNodeMetricsParamsRange string
 
+// GetOAuthAuthorizationParams defines parameters for GetOAuthAuthorization.
+type GetOAuthAuthorizationParams struct {
+	ClientId    string `form:"client_id" json:"client_id"`
+	RedirectUri string `form:"redirect_uri" json:"redirect_uri"`
+
+	// Scope Space-separated `read`, `write`, `admin`; the app's allowed scopes by default.
+	Scope         *string `form:"scope,omitempty" json:"scope,omitempty"`
+	State         *string `form:"state,omitempty" json:"state,omitempty"`
+	CodeChallenge string  `form:"code_challenge" json:"code_challenge"`
+
+	// CodeChallengeMethod Only `S256` is accepted.
+	CodeChallengeMethod string `form:"code_challenge_method" json:"code_challenge_method"`
+}
+
 // ListOperationsParams defines parameters for ListOperations.
 type ListOperationsParams struct {
 	// Org The organisation to list; your personal organisation when omitted.
@@ -10686,6 +10923,9 @@ type PreviewMaintenanceAnnouncementJSONRequestBody = MaintenancePreviewRequest
 // PutMaintenanceWindowJSONRequestBody defines body for PutMaintenanceWindow for application/json ContentType.
 type PutMaintenanceWindowJSONRequestBody = MaintenanceWindow
 
+// CreateOAuthClientJSONRequestBody defines body for CreateOAuthClient for application/json ContentType.
+type CreateOAuthClientJSONRequestBody = CreateOAuthClientRequest
+
 // AdminUpdateOrgJSONRequestBody defines body for AdminUpdateOrg for application/json ContentType.
 type AdminUpdateOrgJSONRequestBody = AdminUpdateOrgRequest
 
@@ -10739,6 +10979,9 @@ type PreviewPriceBookJSONRequestBody PreviewPriceBookJSONBody
 
 // MoveProjectJSONRequestBody defines body for MoveProject for application/json ContentType.
 type MoveProjectJSONRequestBody = MoveProjectRequest
+
+// CreateIntegratorRolesJSONRequestBody defines body for CreateIntegratorRoles for application/json ContentType.
+type CreateIntegratorRolesJSONRequestBody = IntegratorRolesRequest
 
 // AdminRunReconciliationJSONRequestBody defines body for AdminRunReconciliation for application/json ContentType.
 type AdminRunReconciliationJSONRequestBody AdminRunReconciliationJSONBody
@@ -10880,6 +11123,21 @@ type SetNodeCostJSONRequestBody = NodeCost
 
 // CreateSharedClusterJSONRequestBody defines body for CreateSharedCluster for application/json ContentType.
 type CreateSharedClusterJSONRequestBody = SharedClusterRequest
+
+// DecideOAuthAuthorizationJSONRequestBody defines body for DecideOAuthAuthorization for application/json ContentType.
+type DecideOAuthAuthorizationJSONRequestBody = OAuthDecision
+
+// RevokeOAuthTokenJSONRequestBody defines body for RevokeOAuthToken for application/json ContentType.
+type RevokeOAuthTokenJSONRequestBody = OAuthRevokeRequest
+
+// RevokeOAuthTokenFormdataRequestBody defines body for RevokeOAuthToken for application/x-www-form-urlencoded ContentType.
+type RevokeOAuthTokenFormdataRequestBody = OAuthRevokeRequest
+
+// ExchangeOAuthTokenJSONRequestBody defines body for ExchangeOAuthToken for application/json ContentType.
+type ExchangeOAuthTokenJSONRequestBody = OAuthTokenRequest
+
+// ExchangeOAuthTokenFormdataRequestBody defines body for ExchangeOAuthToken for application/x-www-form-urlencoded ContentType.
+type ExchangeOAuthTokenFormdataRequestBody = OAuthTokenRequest
 
 // CreateOrgJSONRequestBody defines body for CreateOrg for application/json ContentType.
 type CreateOrgJSONRequestBody = CreateOrgRequest
@@ -11294,6 +11552,15 @@ type ServerInterface interface {
 	// PutMaintenanceWindow Change the weekly maintenance window (UTC)
 	// (PUT /api/v1/admin/maintenance/window)
 	PutMaintenanceWindow(w http.ResponseWriter, r *http.Request)
+	// ListOAuthClients The third-party apps registered on this server
+	// (GET /api/v1/admin/oauth/clients)
+	ListOAuthClients(w http.ResponseWriter, r *http.Request)
+	// CreateOAuthClient Register a third-party app (OAuth client)
+	// (POST /api/v1/admin/oauth/clients)
+	CreateOAuthClient(w http.ResponseWriter, r *http.Request)
+	// DisableOAuthClient Disable a third-party app
+	// (DELETE /api/v1/admin/oauth/clients/{client_id})
+	DisableOAuthClient(w http.ResponseWriter, r *http.Request, clientId string)
 	// AdminListOrgs Every organisation with plan, counts, size, and status (platform admin)
 	// (GET /api/v1/admin/orgs)
 	AdminListOrgs(w http.ResponseWriter, r *http.Request, params AdminListOrgsParams)
@@ -11387,6 +11654,9 @@ type ServerInterface interface {
 	// MoveProject Move a project to another node (platform admin, V3 §2.3)
 	// (POST /api/v1/admin/projects/{project_id}/move)
 	MoveProject(w http.ResponseWriter, r *http.Request, projectId openapi_types.UUID)
+	// CreateIntegratorRoles Create integrator roles on a dedicated project's instance (platform admin)
+	// (POST /api/v1/admin/projects/{project_id}/roles)
+	CreateIntegratorRoles(w http.ResponseWriter, r *http.Request, projectId openapi_types.UUID)
 	// AdminLastReconciliation The latest reconciliation against each provider
 	// (GET /api/v1/admin/reconciliation)
 	AdminLastReconciliation(w http.ResponseWriter, r *http.Request)
@@ -11663,6 +11933,18 @@ type ServerInterface interface {
 	// CreateSharedCluster Run a shared cluster on this node (multi-node shared placement)
 	// (POST /api/v1/nodes/{id}/shared-cluster)
 	CreateSharedCluster(w http.ResponseWriter, r *http.Request, id NodeID)
+	// GetOAuthAuthorization What a third-party app asks for, for the consent page
+	// (GET /api/v1/oauth/authorize)
+	GetOAuthAuthorization(w http.ResponseWriter, r *http.Request, params GetOAuthAuthorizationParams)
+	// DecideOAuthAuthorization Approve or deny an app's request
+	// (POST /api/v1/oauth/authorize)
+	DecideOAuthAuthorization(w http.ResponseWriter, r *http.Request)
+	// RevokeOAuthToken An app revokes a token it was issued
+	// (POST /api/v1/oauth/revoke)
+	RevokeOAuthToken(w http.ResponseWriter, r *http.Request)
+	// ExchangeOAuthToken Exchange an authorization code for an API token
+	// (POST /api/v1/oauth/token)
+	ExchangeOAuthToken(w http.ResponseWriter, r *http.Request)
 	// ListOperations List operations, newest first
 	// (GET /api/v1/operations)
 	ListOperations(w http.ResponseWriter, r *http.Request, params ListOperationsParams)
@@ -12650,6 +12932,24 @@ func (_ Unimplemented) PutMaintenanceWindow(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// ListOAuthClients The third-party apps registered on this server
+// (GET /api/v1/admin/oauth/clients)
+func (_ Unimplemented) ListOAuthClients(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// CreateOAuthClient Register a third-party app (OAuth client)
+// (POST /api/v1/admin/oauth/clients)
+func (_ Unimplemented) CreateOAuthClient(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// DisableOAuthClient Disable a third-party app
+// (DELETE /api/v1/admin/oauth/clients/{client_id})
+func (_ Unimplemented) DisableOAuthClient(w http.ResponseWriter, r *http.Request, clientId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // AdminListOrgs Every organisation with plan, counts, size, and status (platform admin)
 // (GET /api/v1/admin/orgs)
 func (_ Unimplemented) AdminListOrgs(w http.ResponseWriter, r *http.Request, params AdminListOrgsParams) {
@@ -12833,6 +13133,12 @@ func (_ Unimplemented) PublishPriceBook(w http.ResponseWriter, r *http.Request, 
 // MoveProject Move a project to another node (platform admin, V3 §2.3)
 // (POST /api/v1/admin/projects/{project_id}/move)
 func (_ Unimplemented) MoveProject(w http.ResponseWriter, r *http.Request, projectId openapi_types.UUID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// CreateIntegratorRoles Create integrator roles on a dedicated project's instance (platform admin)
+// (POST /api/v1/admin/projects/{project_id}/roles)
+func (_ Unimplemented) CreateIntegratorRoles(w http.ResponseWriter, r *http.Request, projectId openapi_types.UUID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -13385,6 +13691,30 @@ func (_ Unimplemented) CreateNodeRegistrationToken(w http.ResponseWriter, r *htt
 // CreateSharedCluster Run a shared cluster on this node (multi-node shared placement)
 // (POST /api/v1/nodes/{id}/shared-cluster)
 func (_ Unimplemented) CreateSharedCluster(w http.ResponseWriter, r *http.Request, id NodeID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetOAuthAuthorization What a third-party app asks for, for the consent page
+// (GET /api/v1/oauth/authorize)
+func (_ Unimplemented) GetOAuthAuthorization(w http.ResponseWriter, r *http.Request, params GetOAuthAuthorizationParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// DecideOAuthAuthorization Approve or deny an app's request
+// (POST /api/v1/oauth/authorize)
+func (_ Unimplemented) DecideOAuthAuthorization(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// RevokeOAuthToken An app revokes a token it was issued
+// (POST /api/v1/oauth/revoke)
+func (_ Unimplemented) RevokeOAuthToken(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ExchangeOAuthToken Exchange an authorization code for an API token
+// (POST /api/v1/oauth/token)
+func (_ Unimplemented) ExchangeOAuthToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -15894,6 +16224,60 @@ func (siw *ServerInterfaceWrapper) PutMaintenanceWindow(w http.ResponseWriter, r
 	handler.ServeHTTP(w, r)
 }
 
+// ListOAuthClients operation middleware
+func (siw *ServerInterfaceWrapper) ListOAuthClients(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListOAuthClients(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateOAuthClient operation middleware
+func (siw *ServerInterfaceWrapper) CreateOAuthClient(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateOAuthClient(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DisableOAuthClient operation middleware
+func (siw *ServerInterfaceWrapper) DisableOAuthClient(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "client_id" -------------
+	var clientId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "client_id", chi.URLParam(r, "client_id"), &clientId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DisableOAuthClient(w, r, clientId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // AdminListOrgs operation middleware
 func (siw *ServerInterfaceWrapper) AdminListOrgs(w http.ResponseWriter, r *http.Request) {
 
@@ -16666,6 +17050,32 @@ func (siw *ServerInterfaceWrapper) MoveProject(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.MoveProject(w, r, projectId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateIntegratorRoles operation middleware
+func (siw *ServerInterfaceWrapper) CreateIntegratorRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "project_id" -------------
+	var projectId openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "project_id", chi.URLParam(r, "project_id"), &projectId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "project_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateIntegratorRoles(w, r, projectId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -18661,6 +19071,146 @@ func (siw *ServerInterfaceWrapper) CreateSharedCluster(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CreateSharedCluster(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetOAuthAuthorization operation middleware
+func (siw *ServerInterfaceWrapper) GetOAuthAuthorization(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetOAuthAuthorizationParams
+
+	// ------------- Required query parameter "client_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "client_id", r.URL.Query(), &params.ClientId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "client_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "redirect_uri" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "redirect_uri", r.URL.Query(), &params.RedirectUri, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "redirect_uri"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "redirect_uri", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "scope" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "scope", r.URL.Query(), &params.Scope, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "scope"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "scope", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "code_challenge" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "code_challenge", r.URL.Query(), &params.CodeChallenge, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "code_challenge"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "code_challenge", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "code_challenge_method" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "code_challenge_method", r.URL.Query(), &params.CodeChallengeMethod, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "code_challenge_method"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "code_challenge_method", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetOAuthAuthorization(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DecideOAuthAuthorization operation middleware
+func (siw *ServerInterfaceWrapper) DecideOAuthAuthorization(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DecideOAuthAuthorization(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RevokeOAuthToken operation middleware
+func (siw *ServerInterfaceWrapper) RevokeOAuthToken(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeOAuthToken(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ExchangeOAuthToken operation middleware
+func (siw *ServerInterfaceWrapper) ExchangeOAuthToken(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ExchangeOAuthToken(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -26088,6 +26638,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/v1/admin/projects/{project_id}/move", wrapper.MoveProject)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/admin/projects/{project_id}/roles", wrapper.CreateIntegratorRoles)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/projects/{id}/moves", wrapper.ListProjectMoves)
 	})
 	r.Group(func(r chi.Router) {
@@ -26328,6 +26881,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/v1/storage-targets/test", wrapper.TestStorageTarget)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/admin/oauth/clients", wrapper.ListOAuthClients)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/admin/oauth/clients", wrapper.CreateOAuthClient)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/admin/oauth/clients/{client_id}", wrapper.DisableOAuthClient)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/admin/storage-targets", wrapper.ListPlatformStorageTargets)
 	})
 	r.Group(func(r chi.Router) {
@@ -26371,6 +26933,18 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/auth/device/approve", wrapper.ApproveDeviceLogin)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/oauth/authorize", wrapper.GetOAuthAuthorization)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/oauth/authorize", wrapper.DecideOAuthAuthorization)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/oauth/token", wrapper.ExchangeOAuthToken)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/oauth/revoke", wrapper.RevokeOAuthToken)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/admin/settings/tokens", wrapper.GetTokenSettings)

@@ -218,8 +218,9 @@ rate above.
   project_resuming` (`Retry-After: 10`) or `503 project_restoring`
   (`Retry-After: 60`) and wake it; retry after the delay. Reads still
   answer.
-- Every error is `{"error":{"code":"…","message":"…"}}`; the full list,
-  with which codes are worth retrying, is in [errors.md](errors.md).
+- Every error is `{"code":"…","message":"…"}` (the management API's flat
+  shape; the data API wraps it in `error`); the full list, with which
+  codes are worth retrying, is in [errors.md](errors.md).
 
 ## Scheduled jobs
 

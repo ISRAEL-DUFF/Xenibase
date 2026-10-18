@@ -605,6 +605,8 @@ var specMatrix = map[authz.Action][]string{
 		// §7.2 "Users manage their own tokens", §7.1 device-login approval
 		"GET /api/v1/tokens", "POST /api/v1/tokens", "DELETE /api/v1/tokens/{token_id}",
 		"GET /api/v1/auth/device/requests/{user_code}", "POST /api/v1/auth/device/approve",
+		// OAuth for third-party apps: consenting is the user's own act
+		"GET /api/v1/oauth/authorize", "POST /api/v1/oauth/authorize",
 	},
 	// §2.4: the platform admin's
 	// V3 §7.1 "Support staff role ... can see the support console and org metadata"
@@ -668,6 +670,10 @@ var specMatrix = map[authz.Action][]string{
 		"POST /api/v1/admin/instances/{instance_id}/minor-upgrade",
 		// §7.2 "The platform admin can set a platform-wide maximum"
 		"GET /api/v1/admin/settings/tokens", "PUT /api/v1/admin/settings/tokens",
+		// OAuth for third-party apps: the platform admin registers clients
+		"GET /api/v1/admin/oauth/clients", "POST /api/v1/admin/oauth/clients", "DELETE /api/v1/admin/oauth/clients/{client_id}",
+		// Integrator roles on a dedicated instance: the platform's superuser creates them
+		"POST /api/v1/admin/projects/{project_id}/roles",
 		// V2 §6 "Platform targets (managed by the platform admin)"
 		"GET /api/v1/admin/storage-targets", "POST /api/v1/admin/storage-targets",
 		"GET /api/v1/admin/storage-targets/{target_id}", "PATCH /api/v1/admin/storage-targets/{target_id}",

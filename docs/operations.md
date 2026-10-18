@@ -271,6 +271,14 @@ someone revokes theirs. You can't see other people's tokens, and a
 platform admin's own tokens can't manage the platform: use the browser
 for that.
 
+Third-party apps that connect organisations through OAuth
+([OAuth for third-party apps](oauth-apps.md)) are registered by a platform
+admin with `POST /api/v1/admin/oauth/clients` from a browser session (there
+is no page for it yet); `GET` lists them and `DELETE …/{client_id}`
+disables one, revoking every token it holds. A consent produces an ordinary
+token, so the token rules above apply to it; users disconnect an app under
+**Account → Connected apps**.
+
 ## Capacity
 
 - The shared cluster's tuning is in `compose.yaml` (`SHARED_PG_SHARED_BUFFERS`,

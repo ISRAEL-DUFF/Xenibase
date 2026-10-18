@@ -171,6 +171,8 @@ Deleting your organisation never deletes what is in your own bucket.
 - [The CLI and API tokens](cli.md): `xenibase login`, tokens scoped to one
   organisation (read, write or admin, optionally to some projects), and
   branches in CI.
+- [Connected apps](cli.md#connected-apps): connect an organisation to a
+  third-party app with your consent, and disconnect it from Account.
 
 ## Query insights
 

@@ -1,4 +1,5 @@
 import type { components } from "./schema";
+import type { OAuthAuthorizeSearch } from "../lib/oauth";
 
 type S = components["schemas"];
 export type Version = S["Version"];
@@ -186,6 +187,8 @@ export type PoolerHosts = S["PoolerHosts"];
 export type TokenScope = S["TokenScope"];
 export type CreatedToken = S["CreatedToken"];
 export type DeviceRequest = S["DeviceRequest"];
+export type OAuthAuthorizeInfo = S["OAuthAuthorizeInfo"];
+export type OAuthClient = S["OAuthClient"];
 export type ApiErrorBody = S["Error"];
 export type SessionState = S["SessionState"];
 export type Project = S["Project"];
@@ -542,6 +545,16 @@ export const api = {
     ),
   approveDevice: (b: S["DeviceApproveRequest"]) =>
     request<APIToken | undefined>("POST", "/api/v1/auth/device/approve", b),
+  oauthAuthorization: (p: OAuthAuthorizeSearch) =>
+    getJSON<OAuthAuthorizeInfo>(`/api/v1/oauth/authorize${qs(p)}`),
+  decideOAuth: (b: S["OAuthDecision"]) =>
+    request<S["OAuthRedirect"]>("POST", "/api/v1/oauth/authorize", b),
+  oauthClients: () =>
+    getJSON<S["OAuthClientList"]>("/api/v1/admin/oauth/clients"),
+  createOAuthClient: (b: S["CreateOAuthClientRequest"]) =>
+    request<S["OAuthClientCreated"]>("POST", "/api/v1/admin/oauth/clients", b),
+  disableOAuthClient: (clientId: string) =>
+    request<void>("DELETE", `/api/v1/admin/oauth/clients/${encodeURIComponent(clientId)}`),
   tokenSettings: () =>
     getJSON<S["TokenSettings"]>("/api/v1/admin/settings/tokens"),
   putTokenSettings: (b: S["TokenSettings"]) =>

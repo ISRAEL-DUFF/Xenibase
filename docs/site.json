@@ -2,7 +2,7 @@
   "title": "Xenibase",
   "repo": "https://github.com/ISRAEL-DUFF/Xenibase/blob/main",
   "sections": [
-    {"title": "Get started", "pages": ["index.md", "user-guide.md", "cli.md"]},
+    {"title": "Get started", "pages": ["index.md", "user-guide.md", "cli.md", "oauth-apps.md"]},
     {"title": "Build apps", "pages": ["backend-services.md", "errors.md", "integrations/README.md", "sdk/javascript.md", "sdk/go.md", "sdk/dart.md"]},
     {"title": "Guides", "pages": ["guides/storefront.md", "guides/nextjs.md", "guides/react-native.md", "guides/flutter.md", "examples/flutter-auth/README.md"]},
     {"title": "Migrate", "pages": ["migrate-from-supabase.md", "supabase-client-mapping.md", "guides/import-docker-vps-db.md"]},

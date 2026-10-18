@@ -23,6 +23,10 @@ LIMIT @max_rows;
 -- tenant: system - provisioning workers and the poolers, or a project the request already authorized.
 UPDATE projects SET status = @status WHERE id = @id;
 
+-- name: SetProjectIntegratorRoles :exec
+-- tenant: system - the platform admin's integrator-role bootstrap on a dedicated instance.
+UPDATE projects SET integrator_roles = sqlc.narg(integrator_roles)::text[] WHERE id = @id;
+
 -- name: SetProjectVerifier :exec
 -- tenant: system - provisioning workers and the poolers, or a project the request already authorized.
 UPDATE projects SET scram_verifier = @scram_verifier WHERE id = @id;

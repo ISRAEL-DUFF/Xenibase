@@ -55,7 +55,7 @@ func (q *Queries) GetEditorPreferences(ctx context.Context, arg GetEditorPrefere
 }
 
 const getLiveProjectForUpdate = `-- name: GetLiveProjectForUpdate :one
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until FROM projects WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
 `
 
 // tenant: system - provisioning workers and the poolers, or a project the request already authorized.
@@ -106,12 +106,13 @@ func (q *Queries) GetLiveProjectForUpdate(ctx context.Context, id uuid.UUID) (Pr
 		&i.DataResidency,
 		&i.ForwardRegion,
 		&i.ForwardUntil,
+		&i.IntegratorRoles,
 	)
 	return i, err
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until FROM projects WHERE id = $1
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects WHERE id = $1
 `
 
 // tenant: system - provisioning workers and the poolers, or a project the request already authorized.
@@ -162,6 +163,7 @@ func (q *Queries) GetProject(ctx context.Context, id uuid.UUID) (Project, error)
 		&i.DataResidency,
 		&i.ForwardRegion,
 		&i.ForwardUntil,
+		&i.IntegratorRoles,
 	)
 	return i, err
 }
@@ -169,7 +171,7 @@ func (q *Queries) GetProject(ctx context.Context, id uuid.UUID) (Project, error)
 const insertProject = `-- name: InsertProject :one
 INSERT INTO projects (id, org_id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, description, created_by, region, data_residency)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'provisioning', $10, $11, $12, $13, $14)
-RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until
+RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles
 `
 
 type InsertProjectParams struct {
@@ -251,12 +253,13 @@ func (q *Queries) InsertProject(ctx context.Context, arg InsertProjectParams) (P
 		&i.DataResidency,
 		&i.ForwardRegion,
 		&i.ForwardUntil,
+		&i.IntegratorRoles,
 	)
 	return i, err
 }
 
 const listLiveProjects = `-- name: ListLiveProjects :many
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until FROM projects
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects
 WHERE deleted_at IS NULL
   AND ($1::text IS NULL OR status = $1)
 ORDER BY created_at DESC, id DESC
@@ -322,6 +325,7 @@ func (q *Queries) ListLiveProjects(ctx context.Context, arg ListLiveProjectsPara
 			&i.DataResidency,
 			&i.ForwardRegion,
 			&i.ForwardUntil,
+			&i.IntegratorRoles,
 		); err != nil {
 			return nil, err
 		}
@@ -402,7 +406,7 @@ func (q *Queries) PoolerRoutes(ctx context.Context) ([]PoolerRoutesRow, error) {
 }
 
 const projectsLegacyExpired = `-- name: ProjectsLegacyExpired :many
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until FROM projects
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects
 WHERE deleted_at IS NULL AND legacy_until IS NOT NULL AND legacy_until <= $1::timestamptz
 ORDER BY legacy_until
 `
@@ -461,6 +465,7 @@ func (q *Queries) ProjectsLegacyExpired(ctx context.Context, now time.Time) ([]P
 			&i.DataResidency,
 			&i.ForwardRegion,
 			&i.ForwardUntil,
+			&i.IntegratorRoles,
 		); err != nil {
 			return nil, err
 		}
@@ -473,7 +478,7 @@ func (q *Queries) ProjectsLegacyExpired(ctx context.Context, now time.Time) ([]P
 }
 
 const projectsToRename = `-- name: ProjectsToRename :many
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until FROM projects
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects
 WHERE deleted_at IS NULL AND status = 'active' AND db_name !~ '^p_[a-z2-7]{10}$'
 ORDER BY created_at
 `
@@ -533,6 +538,7 @@ func (q *Queries) ProjectsToRename(ctx context.Context) ([]Project, error) {
 			&i.DataResidency,
 			&i.ForwardRegion,
 			&i.ForwardUntil,
+			&i.IntegratorRoles,
 		); err != nil {
 			return nil, err
 		}
@@ -580,6 +586,21 @@ type SetProjectBackendNameParams struct {
 // tenant: system - provisioning workers and the poolers, or a project the request already authorized.
 func (q *Queries) SetProjectBackendName(ctx context.Context, arg SetProjectBackendNameParams) error {
 	_, err := q.db.Exec(ctx, setProjectBackendName, arg.DbName, arg.AliasDbName, arg.ID)
+	return err
+}
+
+const setProjectIntegratorRoles = `-- name: SetProjectIntegratorRoles :exec
+UPDATE projects SET integrator_roles = $1::text[] WHERE id = $2
+`
+
+type SetProjectIntegratorRolesParams struct {
+	IntegratorRoles []string
+	ID              uuid.UUID
+}
+
+// tenant: system - the platform admin's integrator-role bootstrap on a dedicated instance.
+func (q *Queries) SetProjectIntegratorRoles(ctx context.Context, arg SetProjectIntegratorRolesParams) error {
+	_, err := q.db.Exec(ctx, setProjectIntegratorRoles, arg.IntegratorRoles, arg.ID)
 	return err
 }
 
@@ -660,7 +681,7 @@ func (q *Queries) SwitchProjectCredentials(ctx context.Context, arg SwitchProjec
 const updateProjectMeta = `-- name: UpdateProjectMeta :one
 UPDATE projects SET name = $1, description = $2, settings = $3
 WHERE id = $4
-RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until
+RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles
 `
 
 type UpdateProjectMetaParams struct {
@@ -723,6 +744,7 @@ func (q *Queries) UpdateProjectMeta(ctx context.Context, arg UpdateProjectMetaPa
 		&i.DataResidency,
 		&i.ForwardRegion,
 		&i.ForwardUntil,
+		&i.IntegratorRoles,
 	)
 	return i, err
 }
