@@ -242,7 +242,9 @@ async function acceptInvitation(page: Page, link: string, name: string): Promise
   await page.getByTestId("accept-terms").check();
   await page.getByRole("button", { name: "Create account and join" }).click();
   // A new account signs in with its password alone: no authenticator is asked for.
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  // (Wait for the move to /projects: a heading named "Projects" also matches the invitation page.)
+  await expect(page).toHaveURL(/\/projects$/);
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
   // It turns two-factor on from Account → Security, as a user does.
   await page.goto("/account");
   await expect(page.getByText("Signing in needs only your password.")).toBeVisible();
