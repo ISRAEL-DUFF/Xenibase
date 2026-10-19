@@ -25,7 +25,7 @@ use a one-time password-manager share, and you confirm it by fingerprint.
 | P1-G2 | `Idempotency-Key` | **Done:** on every data API write, with a 24-hour window. |
 | C1 | Publish V3/V4 contracts | **Partly:** the data API, auth, storage and paused projects are published. There are no billing events. |
 | Q | 13 questions | Answered in section 3. |
-| P2-G1 | OAuth consent | **Not planned yet.** |
+| P2-G1 | OAuth consent | **Done (17 October 2026):** `docs/oauth-apps.md`. A platform admin registers Taskiem as an OAuth client; consent issues an ordinary project-restricted token. |
 | P3-G1/G2 | Data API; projects by token | **Both exist today.** |
 | P4 | Contract tests, operations events, dedicated instances | Section 4. |
 
@@ -230,9 +230,13 @@ its metadata.
   **Billing events:** Xenibase doesn't emit any yet (`docs/billing.md`
   describes invoices and dunning inside Xenibase). We'd like to work out
   the event list with you under P4.
-- **P2-G1:** There is no OAuth consent flow yet. Until there is,
-  customers paste a project-restricted token and the project's secret
-  key into your Connections page. We'll tell you when it is scheduled.
+- **P2-G1:** Done. `docs/oauth-apps.md`: authorization code with PKCE
+  (S256, required), a consent page where the person picks the
+  organisation, projects, scopes and expiry, and an exchange that issues
+  an ordinary API token (`created_via: oauth`, shown on the Account page
+  as a connected app, revocable there or through `POST /oauth/revoke`).
+  Register Taskiem's client with `POST /api/v1/admin/oauth/clients`.
+  Pasting a token still works.
 - **P3-G1:** It exists (P1-G1).
 - **P3-G2:** It exists. `POST /api/v1/projects` works with a token that
   has the `write` scope and is not restricted to projects, within the
@@ -249,9 +253,14 @@ its metadata.
   processes (dunning, onboarding, alerts) and agree the events after
   that. Nothing is emitted today.
 - **P4, Taskiem's database on a dedicated instance:**
-  - **Creating roles:** no. The project's roles are `NOSUPERUSER
-    NOCREATEDB NOCREATEROLE NOBYPASSRLS`, so you get the owner role
-    (plus personal logins and `_ro` roles Xenibase makes).
+  - **Creating roles:** not by the owner (its roles are `NOSUPERUSER
+    NOCREATEDB NOCREATEROLE NOBYPASSRLS`). Since 17 October 2026 a
+    platform admin can create NOLOGIN integrator roles on a **dedicated**
+    project for you (`POST /api/v1/admin/projects/{project_id}/roles`,
+    `{"roles": ["taskiem_app", "taskiem_dispatch"]}`), granted to the
+    owner `WITH ADMIN OPTION`; your migrations then find them and skip
+    creating them. Moves recreate them; the isolation audit expects them;
+    demotion to the shared tier stays refused while they exist.
   - **`SECURITY DEFINER` functions:** yes, as the owner.
   - **Forced row-level security:** yes, as the owner of the tables.
   - **`LISTEN/NOTIFY`:** yes, over a direct or session-pooler
@@ -260,8 +269,8 @@ its metadata.
   - **A migration user that owns the schema:** yes, the project's owner
     role owns everything it creates.
 
-  So the execution store looks feasible if it needs no extra roles. C11
-  can be restated as that check.
+  So the execution store is feasible on a dedicated project with the
+  roles made for you. C11 can be restated as that check.
 
 ## 5. Joint doc points
 

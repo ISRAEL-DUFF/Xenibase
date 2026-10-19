@@ -241,13 +241,26 @@ async function acceptInvitation(page: Page, link: string, name: string): Promise
   await page.getByLabel("Confirm password").fill(password);
   await page.getByTestId("accept-terms").check();
   await page.getByRole("button", { name: "Create account and join" }).click();
-  await expect(page.getByRole("heading", { name: "Set up two-factor authentication" })).toBeVisible();
-  const secret = (await page.getByTestId("totp-secret").textContent())!.trim();
-  await page.getByLabel("Code").fill(await freshTotp(secret));
-  await page.getByRole("button", { name: "Verify and continue" }).click();
-  await expect(page.getByTestId("recovery-codes")).toBeVisible();
-  await page.getByTestId("codes-saved").check();
-  await page.getByRole("button", { name: "Continue" }).click();
+  // A new account signs in with its password alone: no authenticator is asked for.
+  // (Wait for the move to /projects: a heading named "Projects" also matches the invitation page.)
+  await expect(page).toHaveURL(/\/projects$/);
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  // It turns two-factor on from Account → Security, as a user does.
+  await page.goto("/account");
+  await expect(page.getByText("Signing in needs only your password.")).toBeVisible();
+  await page.getByRole("button", { name: "Turn on" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Password").fill(password);
+  await dlg.getByRole("button", { name: "Continue" }).click();
+  await expect(dlg.getByAltText("TOTP QR code")).toBeVisible();
+  const secret = (await dlg.getByTestId("totp-secret").textContent())!.trim();
+  await dlg.getByLabel("Code").fill(await freshTotp(secret));
+  await dlg.getByRole("button", { name: "Verify and turn on" }).click();
+  await expect(dlg.getByTestId("recovery-codes")).toBeVisible();
+  await dlg.getByTestId("codes-saved").check();
+  await dlg.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByText("Signing in needs your password and a code.")).toBeVisible();
+  await page.goto("/projects");
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   return secret;
 }

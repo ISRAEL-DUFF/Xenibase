@@ -94,7 +94,9 @@ setup code in its log; `XENIBASE_SETUP_CODE` fixes it instead.
 ## Operator authentication
 
 One owner account (spec §7.2): an argon2id password plus a TOTP second
-factor that is enrolled before the account exists. Sessions live in the
+factor that is enrolled before the account exists. Other accounts sign in with
+a password and can turn on a TOTP second factor from Account → Security
+(platform staff cannot turn it off). Sessions live in the
 metadata DB (tokens hashed at rest) behind `HttpOnly`, `Secure`,
 `SameSite=Strict` cookies with a 12-hour idle timeout. Every mutating API
 call needs the double-submit CSRF token, and destructive ones (deleting a

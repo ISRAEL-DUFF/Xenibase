@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import { ApiRequestError, api, errorMessage, type BackupKeyInfo, type StorageRequest, type StorageTestResult } from "../api/client";
 import { formatBytes, formatDate, relativeTime } from "../lib/format";
 import { Alert, Badge, Button, CodeBlock, CopyField, Field, Input, Dialog, StatusBadge, Table, PanelSkeleton } from "./ui";
+import { useTwoFactor } from "../lib/twofactor";
 
 // ---- S3 storage ------------------------------------------------------------
 
@@ -341,6 +342,7 @@ function ConfirmKeyForm({ disabled, onConfirmed }: { disabled: boolean; onConfir
 
 function ExportKeyModal({ open, onClose, info }: { open: boolean; onClose: () => void; info: BackupKeyInfo }) {
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -349,7 +351,7 @@ function ExportKeyModal({ open, onClose, info }: { open: boolean; onClose: () =>
     setBusy(true);
     setErr(null);
     try {
-      await api.reauth({ password, code });
+      await api.reauth({ password, code: twoFactor ? code : undefined });
       const r = await api.exportBackupKey();
       downloadKey(r.key, info.fingerprint ?? "key");
       setPassword("");
@@ -368,13 +370,15 @@ function ExportKeyModal({ open, onClose, info }: { open: boolean; onClose: () =>
         <Field label="Your password">
           {(id) => <Input id={id} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />}
         </Field>
-        <Field label="Authenticator code">
+        {twoFactor && (
+<Field label="Authenticator code">
           {(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" />}
         </Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={!password || code.length < 6}>
+          <Button type="submit" variant="primary" busy={busy} disabled={!password || (twoFactor && code.length < 6)}>
             Download
           </Button>
         </div>

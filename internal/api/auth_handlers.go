@@ -61,6 +61,10 @@ func (s *Server) authError(w http.ResponseWriter, what string, err error) {
 		writeError(w, http.StatusForbidden, "bad_setup_code", err.Error())
 	case errors.Is(err, auth.ErrSetupDone):
 		writeError(w, http.StatusConflict, "setup_done", err.Error())
+	case errors.Is(err, auth.ErrTOTPRequired):
+		writeError(w, http.StatusForbidden, "totp_required", err.Error())
+	case errors.Is(err, auth.ErrTOTPOn), errors.Is(err, auth.ErrTOTPOff):
+		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, auth.ErrChallengeFailed):
 		writeError(w, http.StatusBadRequest, "challenge_failed", err.Error())
 	case errors.Is(err, auth.ErrSignupClosed), errors.Is(err, auth.ErrDomainNotAllowed):
@@ -209,15 +213,32 @@ func (s *Server) PostAuthLogin(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, "login", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, loginChallenge(ch))
+	out, err := s.loginResult(w, r, ch)
+	if err != nil {
+		s.authError(w, "login", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
-func loginChallenge(ch auth.Challenge) gen.LoginChallenge {
-	out := gen.LoginChallenge{ChallengeId: ch.Token}
+// loginResult is the answer to a correct password: the challenge for the code,
+// or, for an account without two-factor sign-in, the session itself.
+func (s *Server) loginResult(w http.ResponseWriter, r *http.Request, ch auth.Challenge) (gen.LoginChallenge, error) {
+	if !ch.NeedsCode {
+		in, err := s.auth.CompleteLogin(r.Context(), ch.Token, "", ipFrom(r.Context()), r.UserAgent())
+		if err != nil {
+			return gen.LoginChallenge{}, err
+		}
+		auditFrom(r.Context()).userID = &in.Session.UserID
+		s.setSessionCookie(w, in.Token)
+		st := s.sessionState(w, r, &in.Session)
+		return gen.LoginChallenge{Session: &st}, nil
+	}
+	out := gen.LoginChallenge{ChallengeId: &ch.Token}
 	if ch.Enroll != nil {
 		out.Enrollment = &gen.LoginEnrollment{ExpiresAt: ch.Enroll.Expires, TotpSecret: ch.Enroll.Secret, TotpUri: ch.Enroll.URI}
 	}
-	return out
+	return out, nil
 }
 
 // PostAuthTotp implements POST /api/v1/auth/totp.
@@ -259,7 +280,11 @@ func (s *Server) PostAuthReauth(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, "reauth", err)
 		return
 	}
-	if err := s.auth.Reauthenticate(r.Context(), sess, req.Password, req.Code); err != nil {
+	code := ""
+	if req.Code != nil {
+		code = *req.Code
+	}
+	if err := s.auth.Reauthenticate(r.Context(), sess, req.Password, code); err != nil {
 		s.authError(w, "reauth", err)
 		return
 	}

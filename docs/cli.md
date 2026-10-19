@@ -63,6 +63,22 @@ see and can revoke every token scoped to their organisation
 (**Organisation → API tokens**). You get an email when a token is
 created and a week before it expires.
 
+## Connected apps
+
+A third-party app (Taskiem is the first) can ask you to connect one of
+your organisations to it instead of you pasting a token into it. The app
+sends you to Xenibase's consent page, where you choose the organisation,
+see and narrow the scopes it asks for, can restrict it to some projects,
+and pick how long the access lasts; approving sends you back to the app.
+What the app gets is an ordinary token with exactly that: it never does
+more than you can, and it stops when you leave the organisation.
+
+Connected apps are listed under **Account → Connected apps** with the
+app's name, organisation, scopes and last use. **Disconnect** revokes the
+token and breaks the app's connection at once; organisation owners and
+admins can do the same from **Organisation → API tokens**. App developers
+start at [OAuth for third-party apps](oauth-apps.md).
+
 ## In CI
 
 Make a token for the job: `write` scope, restricted to the project it

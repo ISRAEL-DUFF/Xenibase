@@ -106,7 +106,7 @@ func (r *remoteTarget) signIn(t *testing.T) *remoteControl {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := c.Do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": ch.ChallengeId, "code": code}, &st); s != http.StatusOK || !st.Authenticated {
+	if s := c.Do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": *ch.ChallengeId, "code": code}, &st); s != http.StatusOK || !st.Authenticated {
 		t.Fatalf("TOTP for %s: %d", r.Email, s)
 	}
 	if st.CsrfToken != "" {

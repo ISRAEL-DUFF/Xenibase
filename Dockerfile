@@ -42,6 +42,13 @@ RUN CGO_ENABLED=0 go build -trimpath \
 # xenibase-agent runs next to Postgres and needs its client tools (spec §3.2):
 #   docker build --target agent -t xenibase-agent .
 FROM ${REGISTRY}postgres:18 AS agent
+# The official image ships no CA roots, and the agent uploads backups to S3
+# storage over HTTPS: without them every upload fails with "certificate signed by
+# unknown authority".
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -s /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/usr/local/bin/xenibase-agent /usr/local/bin/xenibase-agent
 RUN install -d -o postgres -g postgres -m 700 /var/lib/xenibase-agent
 USER postgres

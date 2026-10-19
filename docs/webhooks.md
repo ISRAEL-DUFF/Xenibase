@@ -2,7 +2,7 @@
 
 ## Webhooks
 
-A webhook POSTs the changes of chosen tables to a URL: Project →
+A webhook POSTs the changes of chosen tables to a URL: Database →
 Webhooks, `xenibase webhooks create`, or `POST /api/v1/projects/{id}/webhooks`.
 
 | Field | Notes |
@@ -218,12 +218,13 @@ rate above.
   project_resuming` (`Retry-After: 10`) or `503 project_restoring`
   (`Retry-After: 60`) and wake it; retry after the delay. Reads still
   answer.
-- Every error is `{"error":{"code":"…","message":"…"}}`; the full list,
-  with which codes are worth retrying, is in [errors.md](errors.md).
+- Every error is `{"code":"…","message":"…"}` (the management API's flat
+  shape; the data API wraps it in `error`); the full list, with which
+  codes are worth retrying, is in [errors.md](errors.md).
 
 ## Scheduled jobs
 
-A job runs SQL, or calls a URL, on a schedule: Project → Jobs,
+A job runs SQL, or calls a URL, on a schedule: Database → Scheduled jobs,
 `xenibase jobs create`, or `POST /api/v1/projects/{id}/jobs`.
 
 | Field | Notes |

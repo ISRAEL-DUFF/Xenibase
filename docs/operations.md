@@ -119,7 +119,9 @@ docker compose exec xenibase-server xenibase-server admin reset-password you@exa
 
 `promote` also approves, verifies and re-enables the account (it need not
 have an authenticator yet; its next sign-in sets one up). `reset-2fa` removes
-the authenticator and recovery codes, so the next sign-in sets up new ones.
+the authenticator and recovery codes: a platform admin sets up a new one at the
+next sign-in, and anyone else signs in with a password until they turn
+two-factor on again (Account → Security).
 `reset-password` prints a one-hour, single-use link for when email doesn't
 work. `demote` makes an admin an ordinary user, and still refuses to remove
 the last one. Each change is written to the platform audit log as done on the
@@ -268,6 +270,14 @@ tokens**; suspending an organisation disables its tokens, and removing
 someone revokes theirs. You can't see other people's tokens, and a
 platform admin's own tokens can't manage the platform: use the browser
 for that.
+
+Third-party apps that connect organisations through OAuth
+([OAuth for third-party apps](oauth-apps.md)) are registered by a platform
+admin with `POST /api/v1/admin/oauth/clients` from a browser session (there
+is no page for it yet); `GET` lists them and `DELETE …/{client_id}`
+disables one, revoking every token it holds. A consent produces an ordinary
+token, so the token rules above apply to it; users disconnect an app under
+**Account → Connected apps**.
 
 ## Capacity
 

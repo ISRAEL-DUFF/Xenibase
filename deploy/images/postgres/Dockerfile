@@ -10,9 +10,10 @@
 # python image of the same Debian release, copied in with a virtualenv of
 # pinned wheels from PyPI: again no system packages.
 #
-# hypopg (hypothetical indexes for query insights' estimates, V3 §8) is
-# the one package installed, from the PGDG repository the official image
-# already uses.
+# Two packages are installed from the Debian and PGDG repositories the official
+# image already uses: hypopg (hypothetical indexes for query insights' estimates,
+# V3 §8), and ca-certificates, because the official image ships no CA roots and
+# WAL-G reaches S3 storage over HTTPS.
 ARG REGISTRY=
 ARG PG_MAJOR=18
 
@@ -37,8 +38,9 @@ RUN --mount=type=secret,id=ca_bundle,required=false \
 FROM ${REGISTRY}postgres:${PG_MAJOR}
 ARG PG_MAJOR
 RUN apt-get update \
- && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-hypopg" \
+ && apt-get install -y --no-install-recommends ca-certificates "postgresql-${PG_MAJOR}-hypopg" \
  && rm -rf /var/lib/apt/lists/* \
+ && test -s /etc/ssl/certs/ca-certificates.crt \
  && test -f "/usr/share/postgresql/${PG_MAJOR}/extension/hypopg.control"
 COPY --from=walg /out-wal-g /usr/local/bin/wal-g
 COPY --from=patroni /usr/local/lib/python3.13 /usr/local/lib/python3.13

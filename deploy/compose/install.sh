@@ -71,6 +71,12 @@ commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" -t "${XENIBASE_IMAGE:-xenibase:local}" ../..
 # shellcheck disable=SC2086
 docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" --target agent -t "${XENIBASE_AGENT_IMAGE:-xenibase-agent:local}" ../..
+# The edge is built here too, once backend services are on: its image is local,
+# so without this an upgrade keeps running the old edge.
+if grep -qE '^COMPOSE_PROFILES=.*services' .env && [ -z "${XENIBASE_EDGE_IMAGE:-}" ]; then
+	# shellcheck disable=SC2086
+	docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" -f ../edge/Dockerfile -t xenibase-edge:local ../..
+fi
 docker compose up -d --no-build --wait
 # The poolers bind-mount single config files. A checkout replaces the file
 # (a new inode), so a running pooler keeps reading the old one, or a

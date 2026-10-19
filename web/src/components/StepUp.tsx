@@ -6,6 +6,7 @@ import {
   setReauthHandler,
 } from "../api/client";
 import { Alert, Button, Dialog, Field, Input } from "./ui";
+import { useTwoFactor } from "../lib/twofactor";
 
 /** Runs an action, asking for the password and a code first when the
  * server wants a fresh step-up (spending money, V2 §7.2). */
@@ -14,6 +15,7 @@ export function useStepUp(
 ) {
   const [pending, setPending] = useState<(() => Promise<unknown>) | null>(null);
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -34,7 +36,7 @@ export function useStepUp(
     setBusy(true);
     setErr(null);
     try {
-      await api.reauth({ password, code });
+      await api.reauth({ password, code: twoFactor ? code : undefined });
       await pending();
       setPending(null);
       setPassword("");
@@ -63,7 +65,8 @@ export function useStepUp(
             />
           )}
         </Field>
-        <Field label="Your authenticator code">
+        {twoFactor && (
+<Field label="Your authenticator code">
           {(id) => (
             <Input
               id={id}
@@ -73,6 +76,7 @@ export function useStepUp(
             />
           )}
         </Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <Button onClick={() => setPending(null)}>Cancel</Button>
@@ -80,7 +84,7 @@ export function useStepUp(
             type="submit"
             variant="primary"
             busy={busy}
-            disabled={!password || code.length < 6}
+            disabled={!password || (twoFactor && code.length < 6)}
           >
             Confirm
           </Button>
@@ -100,6 +104,7 @@ export function StepUpHost() {
   const resolve = useRef<((ok: boolean) => void) | null>(null);
   const [open, setOpen] = useState(false);
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -127,7 +132,7 @@ export function StepUpHost() {
     setBusy(true);
     setErr(null);
     try {
-      await api.reauth({ password, code });
+      await api.reauth({ password, code: twoFactor ? code : undefined });
       finish(true);
     } catch (e) {
       setErr(errorMessage(e));
@@ -157,7 +162,8 @@ export function StepUpHost() {
             />
           )}
         </Field>
-        <Field label="Your authenticator code">
+        {twoFactor && (
+<Field label="Your authenticator code">
           {(id) => (
             <Input
               id={id}
@@ -167,6 +173,7 @@ export function StepUpHost() {
             />
           )}
         </Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <Button onClick={() => finish(false)}>Cancel</Button>
@@ -174,7 +181,7 @@ export function StepUpHost() {
             type="submit"
             variant="primary"
             busy={busy}
-            disabled={!password || code.length < 6}
+            disabled={!password || (twoFactor && code.length < 6)}
           >
             Confirm
           </Button>

@@ -111,12 +111,81 @@ func (s *Server) GetRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, gen.RecoveryCodesStatus{Remaining: n})
 }
 
+// GetTotpStatus implements GET /api/v1/me/totp.
+func (s *Server) GetTotpStatus(w http.ResponseWriter, r *http.Request) {
+	sess, _ := sessionFrom(r.Context())
+	st, err := s.auth.TOTPStatus(r.Context(), sess.UserID)
+	if err != nil {
+		s.internalError(w, "two-factor status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gen.TotpStatus{Enabled: st.Enabled, Required: st.Required})
+}
+
+// SetupTotp implements POST /api/v1/me/totp/setup.
+func (s *Server) SetupTotp(w http.ResponseWriter, r *http.Request) {
+	var req gen.TotpSetupRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sess, _ := sessionFrom(r.Context())
+	if err := s.auth.Allow(ipString(r.Context())); err != nil {
+		s.authError(w, "two-factor setup", err)
+		return
+	}
+	enr, err := s.auth.BeginEnableTOTP(r.Context(), sess.UserID, req.Password)
+	if err != nil {
+		s.authError(w, "two-factor setup", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gen.TotpSetup{SetupToken: enr.Token, TotpSecret: enr.Secret, TotpUri: enr.URI, ExpiresAt: enr.Expires})
+}
+
+// EnableTotp implements POST /api/v1/me/totp/enable.
+func (s *Server) EnableTotp(w http.ResponseWriter, r *http.Request) {
+	var req gen.TotpEnableRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sess, _ := sessionFrom(r.Context())
+	if err := s.auth.Allow(ipString(r.Context())); err != nil {
+		s.authError(w, "enable two-factor", err)
+		return
+	}
+	codes, err := s.auth.EnableTOTP(r.Context(), sess.UserID, req.SetupToken, req.Code)
+	if err != nil {
+		s.authError(w, "enable two-factor", err)
+		return
+	}
+	auditFrom(r.Context()).set("two_factor", "on")
+	writeJSON(w, http.StatusOK, gen.RecoveryCodes{Codes: codes})
+}
+
+// DisableTotp implements POST /api/v1/me/totp/disable.
+func (s *Server) DisableTotp(w http.ResponseWriter, r *http.Request) {
+	var req gen.TotpDisableRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sess, _ := sessionFrom(r.Context())
+	if err := s.auth.Allow(ipString(r.Context())); err != nil {
+		s.authError(w, "disable two-factor", err)
+		return
+	}
+	if err := s.auth.DisableTOTP(r.Context(), sess.UserID, req.Password, req.Code); err != nil {
+		s.authError(w, "disable two-factor", err)
+		return
+	}
+	auditFrom(r.Context()).set("two_factor", "off")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // RegenerateRecoveryCodes implements POST /api/v1/me/recovery-codes.
 func (s *Server) RegenerateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	codes, err := s.auth.RegenerateRecoveryCodes(r.Context(), sess.UserID)
 	if err != nil {
-		s.internalError(w, "recovery codes", err)
+		s.authError(w, "recovery codes", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, gen.RecoveryCodes{Codes: codes})
@@ -245,8 +314,9 @@ func (s *Server) AcceptInvitation(w http.ResponseWriter, r *http.Request) {
 		// Straight on to enrolling the authenticator.
 		ch, err := s.auth.Login(r.Context(), u.Email, acc.Password)
 		if err == nil {
-			lc := loginChallenge(ch)
-			out.Login = &lc
+			if lc, err := s.loginResult(w, r, ch); err == nil {
+				out.Login = &lc
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

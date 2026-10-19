@@ -5,6 +5,33 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+## v4.2.3
+
+- **Upgrades rebuild the edge.** `install.sh` built the server and agent images but not the edge, so a deployment with backend services on kept running the old edge after `upgrade.sh` (v4.2.2's browser preflight fix never reached it). The edge is rebuilt on every install and upgrade while the `services` profile is on. If you upgraded to v4.2.2 and use backend services, upgrade again.
+- **Two-factor sign-in is off by default for ordinary accounts.** New accounts sign in with a password and turn on a TOTP second factor themselves, under Account → Security (password, QR code, first code, then recovery codes; turning it off asks for a password and a code, and both changes are emailed). Platform admins and support staff still must have it and cannot turn it off. Accounts that already enrolled keep it. Step-up confirmations (deleting a project, spending money) ask for the password alone when two-factor is off. A reset by an administrator now leaves an ordinary account on password sign-in instead of making it enrol again. API: `POST /auth/login` returns the session itself for an account without two-factor (`challenge_id` is then absent), `POST /auth/reauth` takes the code only when it is on, and `GET /me/totp`, `POST /me/totp/setup`, `/enable` and `/disable` are new.
+- **Backups to S3 and R2 work again.** The agent and Postgres images, built on the official `postgres` image, had no CA certificates, so every upload failed with "x509: certificate signed by unknown authority" (it also affected WAL-G archiving from dedicated instances). Both images now install `ca-certificates`, and the build fails if they are missing. `./upgrade.sh` rebuilds them; recreate dedicated instances' containers to pick up the new Postgres image.
+- The storefront guide says how a webhook behaves across environments (one public URL each, where the secret goes).
+
+### Added
+- **OAuth for third-party apps.** An app registered by a platform admin
+  (`POST /api/v1/admin/oauth/clients`) can send a user to `/oauth/authorize`,
+  where they consent per organisation: narrow the scopes, restrict projects,
+  choose the expiry, approve or deny. The app exchanges the single-use code
+  (10 minutes, PKCE S256 required of every client) at `POST /api/v1/oauth/token`
+  for an ordinary API token, and can give it back at `POST /api/v1/oauth/revoke`.
+  Tokens issued this way show under **Account → Connected apps** with the app's
+  name (`oauth_client_name`, `created_via: oauth`) and **Disconnect** revokes
+  them; a second use of a code revokes the token it issued; disabling the app
+  revokes everything it holds. Consents, issues and revocations are audited.
+  Taskiem is the first such app. See `docs/oauth-apps.md`.
+- **Integrator roles on dedicated instances.** `POST /api/v1/admin/projects/{project_id}/roles`
+  (platform admin, step-up auth) creates the named `NOLOGIN` roles on a
+  dedicated project's instance and grants them to the owner role
+  `WITH ADMIN OPTION`, for integrators whose migrations expect them (Taskiem's
+  `taskiem_app` and `taskiem_dispatch`). The roles are recorded on the project,
+  recreated by moves, named by the demotion check and expected by the
+  isolation audit. Shared projects answer `409 conflict`.
+
 ## v4.2.2
 
 ### Fixed

@@ -135,6 +135,13 @@ func (s *Service) RecoveryCodesLeft(ctx context.Context, userID uuid.UUID) (int,
 
 // RegenerateRecoveryCodes replaces a user's codes and returns the new ones.
 func (s *Service) RegenerateRecoveryCodes(ctx context.Context, userID uuid.UUID) ([]string, error) {
+	u, err := store.New(s.db).GetUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(u.TotpSecret) == 0 {
+		return nil, ErrTOTPOff
+	}
 	codes, blob, err := s.newRecoveryCodes(userID)
 	if err != nil {
 		return nil, err
@@ -663,7 +670,8 @@ func (s *Service) SetDisabled(ctx context.Context, id uuid.UUID, disabled bool) 
 
 // ResetTOTP removes a user's authenticator and recovery codes (after the
 // platform admin has confirmed who they are out of band). Their sessions
-// end, the next sign-in enrols a new authenticator, and they are emailed.
+// end, and they are emailed. Platform staff enrol a new authenticator at their
+// next sign-in; anyone else signs in with a password until they turn it on again.
 func (s *Service) ResetTOTP(ctx context.Context, id uuid.UUID) error {
 	q := store.New(s.db)
 	u, err := q.GetUser(ctx, id)
@@ -676,12 +684,16 @@ func (s *Service) ResetTOTP(ctx context.Context, id uuid.UUID) error {
 	if err := q.DeleteUserSessions(ctx, store.DeleteUserSessionsParams{UserID: id}); err != nil {
 		return err
 	}
+	again := "The next time you sign in, you'll be asked to set up your authenticator app again."
+	if !totpRequired(u.PlatformRole) {
+		again = "Signing in now needs only your password. You can turn two-factor sign-in back on under Account → Security."
+	}
 	if err := s.sendContent(ctx, u.Email, "Two-factor sign-in was reset on your Xenibase account", pgmail.Content{
-		Preheader: "You'll set up your authenticator app again the next time you sign in.",
+		Preheader: again,
 		Title:     "Two-factor sign-in was reset",
 		Blocks: []pgmail.Block{
 			pgmail.P(pgmail.Hi(nameOf(u))),
-			pgmail.P("A Xenibase administrator reset two-factor authentication on your account. The next time you sign in, you'll be asked to set up your authenticator app again."),
+			pgmail.P("A Xenibase administrator reset two-factor authentication on your account. " + again),
 			pgmail.P("If you didn't ask for this, please contact your administrator right away."),
 		},
 		Note: "We send this whenever two-factor sign-in changes on your account.",

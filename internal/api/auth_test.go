@@ -202,7 +202,7 @@ func TestAuthFlowOverHTTP(t *testing.T) {
 		t.Fatal("password alone must not sign in")
 	}
 	totp, _ := auth.TOTPCode(secret, clk.Now())
-	if code, body := b.do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": ch.ChallengeId, "code": totp}, nil); code != 200 {
+	if code, body := b.do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": *ch.ChallengeId, "code": totp}, nil); code != 200 {
 		t.Fatalf("totp: %d %s", code, body)
 	}
 	clk.step()

@@ -225,7 +225,7 @@ function ResetTotpModal({ user, onClose }: { user: AdminUser | null; onClose: ()
     <Dialog title="Reset two-factor authentication" open={!!user} onOpenChange={(o) => !o && onClose()}>
       <form className="flex flex-col gap-4" onSubmit={submit}>
         <p className="text-sm text-muted">
-          {user?.email} will set up a new authenticator at their next sign-in and is emailed now. Only do this after confirming who they are some other way.
+          {user?.email} is emailed now. Platform staff set up a new authenticator at their next sign-in; anyone else signs in with a password until they turn two-factor on again. Only do this after confirming who they are some other way.
         </p>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I've confirmed their identity out of band

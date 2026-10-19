@@ -413,6 +413,9 @@ type Challenge struct {
 	Token  string
 	UserID uuid.UUID
 	Enroll *Enrollment
+	// NeedsCode is false for an account without two-factor sign-in (the default
+	// for ordinary accounts): the password was enough, and CompleteLogin takes no code.
+	NeedsCode bool
 }
 
 type enrollPayload struct {
@@ -459,7 +462,10 @@ func (s *Service) Login(ctx context.Context, email, password string) (Challenge,
 		return out, err
 	}
 	params := store.InsertChallengeParams{ID: digest, Kind: "login", UserID: &u.ID, ExpiresAt: s.cfg.Now().Add(s.cfg.ChallengeTTL)}
-	if len(u.TotpSecret) == 0 {
+	out.NeedsCode = true
+	if len(u.TotpSecret) == 0 && !totpRequired(u.PlatformRole) {
+		out.NeedsCode = false
+	} else if len(u.TotpSecret) == 0 {
 		secret, err := GenerateTOTPSecret()
 		if err != nil {
 			return out, err
@@ -508,7 +514,7 @@ func (s *Service) CompleteLogin(ctx context.Context, challenge, code string, ip 
 	var codes []string
 	if ch.Kind == "enroll" {
 		codes, err = s.completeEnrolment(ctx, ch, digest, u, code)
-	} else {
+	} else if len(u.TotpSecret) > 0 || totpRequired(u.PlatformRole) {
 		err = s.checkSecondFactor(ctx, u, code)
 	}
 	if err != nil {
@@ -687,8 +693,10 @@ func (s *Service) Reauthenticate(ctx context.Context, sess Session, password, co
 	if !ok {
 		return s.recordFailure(ctx, u.ID)
 	}
-	if err := s.checkTOTP(ctx, u, code); err != nil {
-		return err
+	if len(u.TotpSecret) > 0 || totpRequired(u.PlatformRole) {
+		if err := s.checkTOTP(ctx, u, code); err != nil {
+			return err
+		}
 	}
 	if err := q.ResetLoginFailures(ctx, u.ID); err != nil {
 		return err

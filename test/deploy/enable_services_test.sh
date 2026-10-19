@@ -76,5 +76,25 @@ cd "$repo"
 bad=$(grep -E 'XENIBASE_EDGE_TRUSTED_PROXIES:' deploy/compose/compose.yaml | grep -vE ':[[:space:]]+[0-9a-fA-F:.]+/[0-9]+[[:space:]]*$' || true)
 check "compose: every XENIBASE_EDGE_TRUSTED_PROXIES is a CIDR range ($bad)" sh -c '[ -z "$1" ]' _ "$bad"
 
+# --- install.sh (so upgrade.sh) rebuilds the edge when services are on; its image
+# is local, and without this an upgrade keeps running the old edge.
+cd "$repo"
+inst=$(mktemp -d); mkdir -p "$inst/bin" "$inst/deploy/compose"
+cp deploy/compose/install.sh "$inst/deploy/compose/"
+cat > "$inst/bin/docker" <<'D'
+#!/bin/sh
+echo "docker $*" >> "$CALLS"
+D
+chmod +x "$inst/bin/docker"
+run_install() { # run_install <.env contents>
+	printf '%s\n' "$1" > "$inst/deploy/compose/.env"; : > "$inst/calls"
+	(cd "$inst/deploy/compose" && CALLS="$inst/calls" PATH="$inst/bin:$PATH" sh ./install.sh >/dev/null 2>&1)
+}
+run_install 'XENIBASE_UI_DOMAIN=app.example.test
+COMPOSE_PROFILES=services'
+check "install: builds the edge image when services are on" grep -q 'build.*-t xenibase-edge:local' "$inst/calls"
+run_install 'XENIBASE_UI_DOMAIN=app.example.test'
+check "install: leaves the edge alone when services are off" sh -c '! grep -q xenibase-edge "$1"' _ "$inst/calls"
+
 echo "enable-services: $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -258,6 +258,9 @@ func (s *Service) prepareTarget(ctx context.Context, op store.Operation, p, pt s
 	if err := s.projects.SyncMemberRoles(ctx, pt, log); err != nil {
 		return err
 	}
+	if err := s.restoreIntegratorRoles(ctx, p, pt, log); err != nil {
+		return err
+	}
 	src, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
 	if err != nil {
 		return err

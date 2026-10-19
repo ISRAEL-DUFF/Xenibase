@@ -869,6 +869,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/projects/{project_id}/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create integrator roles on a dedicated project's instance (platform admin)
+         * @description Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+         *     NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+         *     each to the project's owner role WITH ADMIN OPTION, so the owner
+         *     can grant and manage them, for integrators whose migrations expect
+         *     them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+         *     the project, so moves recreate them and the demotion check names
+         *     them. Dedicated projects only (`409 conflict` otherwise). Needs a
+         *     recent re-authentication.
+         */
+        post: operations["createIntegratorRoles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/moves": {
         parameters: {
             query?: never;
@@ -2113,6 +2140,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/oauth/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The third-party apps registered on this server */
+        get: operations["listOAuthClients"];
+        put?: never;
+        /**
+         * Register a third-party app (OAuth client)
+         * @description Redirect URIs must be absolute `https://` URLs without a fragment
+         *     (`http://localhost` and `http://127.0.0.1` are allowed for
+         *     development); the authorize request must match one exactly. A
+         *     confidential client (the default) gets a secret, shown once.
+         */
+        post: operations["createOAuthClient"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/oauth/clients/{client_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disable a third-party app
+         * @description The app can no longer ask for consent or exchange codes, and every token it was issued is revoked.
+         */
+        delete: operations["disableOAuthClient"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/storage-targets": {
         parameters: {
             query?: never;
@@ -2340,6 +2411,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/oauth/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What a third-party app asks for, for the consent page
+         * @description The first step of an app's OAuth 2.0 authorization code flow (RFC
+         *     6749 s4.1, PKCE required, RFC 7636). The consent page at
+         *     `/oauth/authorize` calls this with the app's query, and shows the
+         *     app's name, the scopes it asks for, and the organisations the user
+         *     may grant for, each with its projects. A bad `client_id` or
+         *     `redirect_uri` is a 400 and nothing is redirected (s4.1.2.1).
+         */
+        get: operations["getOAuthAuthorization"];
+        put?: never;
+        /**
+         * Approve or deny an app's request
+         * @description Approving stores a single-use authorization code (10 minutes) for
+         *     the chosen organisation, scopes (narrowed from the request, never
+         *     widened), projects and expiry, and answers with the app's redirect
+         *     URI carrying `code` and `state`. Denying answers with the redirect
+         *     carrying `error=access_denied`. The browser then goes there.
+         */
+        post: operations["decideOAuthAuthorization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/oauth/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Exchange an authorization code for an API token
+         * @description RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+         *     the `code`, the same `redirect_uri`, the `client_id`, the
+         *     `client_secret` (confidential clients; also accepted as HTTP Basic
+         *     auth) and the `code_verifier`. Form-encoded or JSON. A code works
+         *     once: a second exchange fails with `invalid_grant` and revokes the
+         *     token the first one issued (s4.1.2). The answer is an ordinary
+         *     Xenibase API token (`xb_…`) for the user in the organisation they
+         *     chose, with the granted scopes, projects and expiry. Errors are in
+         *     OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+         *     `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+         *     an address tries too often.
+         */
+        post: operations["exchangeOAuthToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/oauth/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * An app revokes a token it was issued
+         * @description RFC 7009: the client authenticates (`client_id` and `client_secret`
+         *     in the body or as HTTP Basic auth) and names the token. Answers 200
+         *     whether or not the token was still valid, or was ever this app's.
+         *     Revoking elsewhere (Account, the organisation's tokens) has the
+         *     same effect: the token answers `401 invalid_token` from then on.
+         */
+        post: operations["revokeOAuthToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/settings/tokens": {
         parameters: {
             query?: never;
@@ -2404,6 +2562,74 @@ export interface paths {
         put?: never;
         /** Replace your recovery codes (step-up auth); shown once */
         post: operations["regenerateRecoveryCodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/totp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether two-factor sign-in is on for you */
+        get: operations["getTotpStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/totp/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start turning two-factor sign-in on (password); returns the authenticator to scan */
+        post: operations["setupTotp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/totp/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn two-factor sign-in on with the first code; recovery codes are shown once */
+        post: operations["enableTotp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/totp/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn two-factor sign-in off (password and a code); not for platform staff */
+        post: operations["disableTotp"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5856,9 +6082,11 @@ export interface components {
             /** Format: password */
             password: string;
         };
+        /** @description A correct password. Accounts with two-factor sign-in (and platform staff) get a challenge to complete with `/auth/totp`; an account without it is signed in right away and gets the session instead. */
         LoginChallenge: {
-            challenge_id: string;
+            challenge_id?: string;
             enrollment?: components["schemas"]["LoginEnrollment"];
+            session?: components["schemas"]["SessionState"];
         };
         /** @description First sign-in - enrol this authenticator; the next code completes it. */
         LoginEnrollment: {
@@ -5874,6 +6102,33 @@ export interface components {
         ReauthRequest: {
             /** Format: password */
             password: string;
+            /** @description Required when two-factor sign-in is on for the account. */
+            code?: string;
+        };
+        TotpStatus: {
+            enabled: boolean;
+            /** @description Platform staff must keep two-factor sign-in on. */
+            required: boolean;
+        };
+        TotpSetupRequest: {
+            /** Format: password */
+            password: string;
+        };
+        TotpSetup: {
+            setup_token: string;
+            totp_secret: string;
+            totp_uri: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        TotpEnableRequest: {
+            setup_token: string;
+            code: string;
+        };
+        TotpDisableRequest: {
+            /** Format: password */
+            password: string;
+            /** @description A code from the authenticator, or a recovery code. */
             code: string;
         };
         Error: {
@@ -8924,7 +9179,9 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             /** @enum {string} */
-            created_via: "ui" | "device" | "api";
+            created_via: "ui" | "device" | "api" | "oauth";
+            /** @description The third-party app the token was issued to through OAuth, if any. */
+            oauth_client_name?: string | null;
             /** @enum {string} */
             status: "active" | "expired" | "revoked";
         };
@@ -8985,6 +9242,127 @@ export interface components {
             scopes?: components["schemas"]["TokenScope"][];
             project_ids?: string[] | null;
             expires_in_days?: number;
+        };
+        OAuthClient: {
+            /** Format: uuid */
+            id: string;
+            client_id: string;
+            name: string;
+            /** @description Whether the client has a secret. */
+            confidential: boolean;
+            redirect_uris: string[];
+            scopes_allowed: components["schemas"]["TokenScope"][];
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            disabled_at?: string | null;
+        };
+        OAuthClientList: {
+            items: components["schemas"]["OAuthClient"][];
+        };
+        CreateOAuthClientRequest: {
+            /** @description Shown on the consent page and on the tokens it is issued. */
+            name: string;
+            redirect_uris: string[];
+            /** @description The most the app may ask for; default read and write. */
+            scopes_allowed?: components["schemas"]["TokenScope"][];
+            /**
+             * @description false registers a public client (no secret; PKCE alone).
+             * @default true
+             */
+            confidential: boolean;
+        };
+        OAuthClientCreated: {
+            client: components["schemas"]["OAuthClient"];
+            /** @description The secret (`xbc_…`), shown only once; absent for a public client. */
+            client_secret?: string;
+        };
+        OAuthGrantProject: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        OAuthGrantOrg: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            personal: boolean;
+            projects: components["schemas"]["OAuthGrantProject"][];
+        };
+        OAuthAuthorizeInfo: {
+            client_id: string;
+            client_name: string;
+            redirect_uri: string;
+            state?: string;
+            /** @description What the app asked for; the user may narrow them. */
+            scopes: components["schemas"]["TokenScope"][];
+            code_challenge: string;
+            code_challenge_method: string;
+            /** @description The organisations the user may grant for, with the projects they could restrict the token to. */
+            organisations: components["schemas"]["OAuthGrantOrg"][];
+        };
+        OAuthDecision: {
+            client_id: string;
+            redirect_uri: string;
+            state?: string;
+            code_challenge: string;
+            code_challenge_method: string;
+            approve: boolean;
+            /** @description Within what the app asked for; the request's scopes by default. */
+            scopes?: components["schemas"]["TokenScope"][];
+            /** Format: uuid */
+            org_id?: string;
+            project_ids?: string[] | null;
+            expires_in_days?: number;
+        };
+        OAuthRedirect: {
+            /** @description The app's redirect URI with `code` and `state`, or `error`. */
+            redirect_to: string;
+        };
+        OAuthTokenRequest: {
+            /** @enum {string} */
+            grant_type: "authorization_code";
+            code: string;
+            redirect_uri: string;
+            client_id: string;
+            client_secret?: string;
+            code_verifier: string;
+        };
+        OAuthTokenResponse: {
+            /** @description The API token (`xb_…`), shown only once. */
+            access_token: string;
+            /** @enum {string} */
+            token_type: "Bearer";
+            /** @description Seconds until the token expires. */
+            expires_in: number;
+            /** @description Space-separated granted scopes. */
+            scope: string;
+            /** Format: uuid */
+            org_id: string;
+            /** @description The projects the token is restricted to; null for every project the user can access. */
+            project_ids?: string[] | null;
+            /** Format: uuid */
+            token_id: string;
+        };
+        OAuthRevokeRequest: {
+            token: string;
+            client_id?: string;
+            client_secret?: string;
+        };
+        OAuthError: {
+            /** @enum {string} */
+            error: "invalid_request" | "invalid_client" | "invalid_grant" | "unsupported_grant_type" | "slow_down" | "server_error";
+            error_description: string;
+        };
+        IntegratorRolesRequest: {
+            /** @description Role names matching `^[a-z][a-z0-9_]{2,62}$`. */
+            roles: string[];
+        };
+        IntegratorRoles: {
+            /** @description Every integrator role recorded on the project. */
+            roles: string[];
+            /** @description The ones this call created (the rest already existed). */
+            created: string[];
         };
         /** @description The API token a request was made with. */
         TokenGrant: {
@@ -10938,6 +11316,15 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description An OAuth 2.0 error (RFC 6749 s5.2). */
+        OAuthError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["OAuthError"];
+            };
+        };
     };
     parameters: {
         InsightRange: "1h" | "24h" | "7d" | "30d";
@@ -12217,6 +12604,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Operation"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    createIntegratorRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IntegratorRolesRequest"];
+            };
+        };
+        responses: {
+            /** @description The project's integrator roles. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegratorRoles"];
                 };
             };
             default: components["responses"]["Error"];
@@ -14290,6 +14704,73 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
+    listOAuthClients: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Clients. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthClientList"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    createOAuthClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOAuthClientRequest"];
+            };
+        };
+        responses: {
+            /** @description Registered. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthClientCreated"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    disableOAuthClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disabled. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Error"];
+        };
+    };
     listPlatformStorageTargets: {
         parameters: {
             query?: never;
@@ -14669,6 +15150,111 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
+    getOAuthAuthorization: {
+        parameters: {
+            query: {
+                client_id: string;
+                redirect_uri: string;
+                /** @description Space-separated `read`, `write`, `admin`; the app's allowed scopes by default. */
+                scope?: string;
+                state?: string;
+                code_challenge: string;
+                /** @description Only `S256` is accepted. */
+                code_challenge_method: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The request, for the consent page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthAuthorizeInfo"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    decideOAuthAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OAuthDecision"];
+            };
+        };
+        responses: {
+            /** @description Where to send the browser. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthRedirect"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    exchangeOAuthToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["OAuthTokenRequest"];
+                "application/json": components["schemas"]["OAuthTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The token. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthTokenResponse"];
+                };
+            };
+            default: components["responses"]["OAuthError"];
+        };
+    };
+    revokeOAuthToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["OAuthRevokeRequest"];
+                "application/json": components["schemas"]["OAuthRevokeRequest"];
+            };
+        };
+        responses: {
+            /** @description Revoked, or nothing to revoke. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["OAuthError"];
+        };
+    };
     getTokenSettings: {
         parameters: {
             query?: never;
@@ -14795,6 +15381,100 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["RecoveryCodes"];
                 };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getTotpStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpStatus"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    setupTotp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpSetupRequest"];
+            };
+        };
+        responses: {
+            /** @description The authenticator to enrol. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpSetup"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    enableTotp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpEnableRequest"];
+            };
+        };
+        responses: {
+            /** @description The recovery codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    disableTotp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpDisableRequest"];
+            };
+        };
+        responses: {
+            /** @description Turned off. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             default: components["responses"]["Error"];
         };

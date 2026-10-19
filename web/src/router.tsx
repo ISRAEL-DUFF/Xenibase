@@ -10,6 +10,7 @@ import {
 import { AppShell } from "./components/shell/AppShell";
 import { ToastProvider } from "./components/Toasts";
 import { StepUpHost } from "./components/StepUp";
+import { parseAuthorizeSearch } from "./lib/oauth";
 import { sessionQuery } from "./lib/session";
 import { LoginPage } from "./pages/Login";
 import { SetupPage } from "./pages/Setup";
@@ -31,6 +32,10 @@ const AccountPage = lazyRouteComponent(
 const DevicePage = lazyRouteComponent(
   () => import("./pages/Device"),
   "DevicePage",
+);
+const OAuthAuthorizePage = lazyRouteComponent(
+  () => import("./pages/OAuthAuthorize"),
+  "OAuthAuthorizePage",
 );
 const AdminUsersPage = lazyRouteComponent(
   () => import("./pages/AdminUsers"),
@@ -499,6 +504,14 @@ const device = createRoute({
   }),
   component: DevicePage,
 });
+// A third-party app's consent page; signed out, the app route sends the
+// user to log in and back here with the app's query intact.
+const oauthAuthorize = createRoute({
+  getParentRoute: () => app,
+  path: "/oauth/authorize",
+  validateSearch: parseAuthorizeSearch,
+  component: OAuthAuthorizePage,
+});
 const orgMembers = createRoute({
   getParentRoute: () => app,
   path: "/org/members",
@@ -701,6 +714,7 @@ const routeTree = root.addChildren([
     ]),
     account,
     device,
+    oauthAuthorize,
     orgMembers,
     orgSettings,
     orgAudit,

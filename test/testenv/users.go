@@ -174,15 +174,21 @@ func (e *Env) AcceptInvitation(token, email string) *Client {
 	var res gen.AcceptInvitationResult
 	if code := c.Do("POST", "/api/v1/invitations/accept", map[string]any{
 		"token": token, "name": strings.Split(email, "@")[0], "password": UserPassword, "terms_version": terms.Version,
-	}, &res); code != http.StatusOK || res.Login == nil || res.Login.Enrollment == nil {
+	}, &res); code != http.StatusOK || res.Login == nil || res.Login.Session == nil || res.Login.Session.User == nil {
 		e.t.Fatalf("accept invitation for %s: %d %+v", email, code, res)
 	}
-	c.totp = res.Login.Enrollment.TotpSecret
-	var st gen.SessionState
-	if code := c.Do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": res.Login.ChallengeId, "code": c.TOTP()}, &st); code != http.StatusOK ||
-		st.User == nil || st.RecoveryCodes == nil || len(*st.RecoveryCodes) != 10 {
-		e.t.Fatalf("enrol %s: %d %+v", email, code, st)
+	// An ordinary account signs in with a password alone; turn two-factor on the
+	// way a user does (Account → Security), so the rest of the suite can step up with TOTP.
+	var setup gen.TotpSetup
+	if code := c.Do("POST", "/api/v1/me/totp/setup", map[string]string{"password": UserPassword}, &setup); code != http.StatusOK {
+		e.t.Fatalf("two-factor setup for %s: %d", email, code)
 	}
+	c.totp = setup.TotpSecret
+	var rc gen.RecoveryCodes
+	if code := c.Do("POST", "/api/v1/me/totp/enable", map[string]string{"setup_token": setup.SetupToken, "code": c.TOTP()}, &rc); code != http.StatusOK || len(rc.Codes) != 10 {
+		e.t.Fatalf("enable two-factor for %s: %d %+v", email, code, rc)
+	}
+	st := *res.Login.Session
 	c.UserID = st.User.Id
 	var list gen.OrgList
 	if code := c.Do("GET", "/api/v1/orgs", nil, &list); code != http.StatusOK || len(list.Items) == 0 || !list.Items[0].Personal {
@@ -214,7 +220,7 @@ func (e *Env) SignIn(c *Client) *Client {
 		e.t.Fatalf("sign in %s: %d", c.Email, code)
 	}
 	var st gen.SessionState
-	if code := n.Do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": ch.ChallengeId, "code": n.TOTP()}, &st); code != http.StatusOK || !st.Authenticated {
+	if code := n.Do("POST", "/api/v1/auth/totp", map[string]string{"challenge_id": *ch.ChallengeId, "code": n.TOTP()}, &st); code != http.StatusOK || !st.Authenticated {
 		e.t.Fatalf("TOTP for %s: %d %+v", c.Email, code, st)
 	}
 	return n

@@ -21,8 +21,8 @@ machine (`test/docs/install-from-docs.sh` runs the commands marked below).
   resets, invitations, and security notices. Any provider works (Postmark,
   SES, Mailgun, Resend, your own relay); have the host, port, username,
   password, and a From address ready.
-- **An authenticator app** (1Password, Google Authenticator, Aegis, …) for
-  two-factor sign-in.
+- **An authenticator app** (1Password, Google Authenticator, Aegis, …) for the
+  platform admin's two-factor sign-in (other users can turn it on if they want).
 
 ## 2. Open the firewall
 

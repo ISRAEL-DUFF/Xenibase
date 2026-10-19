@@ -95,6 +95,10 @@ var routeRules = map[string]rule{
 	// The CLI's device login; the approval itself needs a session.
 	"POST /api/v1/auth/device":       {scope: scopePublic},
 	"POST /api/v1/auth/device/token": {scope: scopePublic},
+	// Third-party apps' OAuth token and revocation endpoints (RFC 6749
+	// §4.1.3, RFC 7009): the client authenticates in the handler.
+	"POST /api/v1/oauth/token":  {scope: scopePublic},
+	"POST /api/v1/oauth/revoke": {scope: scopePublic},
 	// /metrics takes a bearer token instead; the handler checks it or the session.
 	"GET /metrics": {scope: scopePublic},
 
@@ -108,6 +112,10 @@ var routeRules = map[string]rule{
 	"DELETE /api/v1/me/sessions/{session_id}":            {scope: scopeSelf, action: authz.Self},
 	"GET /api/v1/me/recovery-codes":                      {scope: scopeSelf, action: authz.Self},
 	"POST /api/v1/me/recovery-codes":                     {scope: scopeSelf, action: authz.Self},
+	"GET /api/v1/me/totp":                                {scope: scopeSelf, action: authz.Self},
+	"POST /api/v1/me/totp/setup":                         {scope: scopeSelf, action: authz.Self},
+	"POST /api/v1/me/totp/enable":                        {scope: scopeSelf, action: authz.Self},
+	"POST /api/v1/me/totp/disable":                       {scope: scopeSelf, action: authz.Self},
 	"POST /api/v1/me/terms/accept":                       {scope: scopeSelf, action: authz.Self, beforeTerms: true},
 	"GET /api/v1/me/invitations":                         {scope: scopeSelf, action: authz.Self},
 	"POST /api/v1/me/invitations/{invitation_id}/accept": {scope: scopeSelf, action: authz.Self},
@@ -124,6 +132,10 @@ var routeRules = map[string]rule{
 	"DELETE /api/v1/tokens/{token_id}":             {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},
 	"GET /api/v1/auth/device/requests/{user_code}": {scope: scopeSelf, action: authz.Self},
 	"POST /api/v1/auth/device/approve":             {scope: scopeSelf, action: authz.Self},
+	// A third-party app's consent page (RFC 6749 §4.1.1): sessions only,
+	// since the consent issues a token.
+	"GET /api/v1/oauth/authorize":  {scope: scopeSelf, action: authz.Self},
+	"POST /api/v1/oauth/authorize": {scope: scopeSelf, action: authz.Self},
 
 	// Organisations.
 	"GET /api/v1/orgs/{org}":                                                {scope: scopeOrgPath, action: authz.OrgView},
@@ -247,6 +259,7 @@ var routeRules = map[string]rule{
 	"POST /api/v1/projects/{id}/upgrade/preflight":                 {scope: scopeProject, action: authz.ProjectPromote},
 	"POST /api/v1/projects/{id}/upgrade":                           {scope: scopeProject, action: authz.ProjectPromote},
 	"POST /api/v1/admin/projects/{project_id}/move":                {scope: scopePlatform, action: authz.PlatformManage},
+	"POST /api/v1/admin/projects/{project_id}/roles":               {scope: scopePlatform, action: authz.PlatformManage},
 	"GET /api/v1/projects/{id}/moves":                              {scope: scopeProject, action: authz.ProjectView},
 	"POST /api/v1/projects/{id}/demote/preflight":                  {scope: scopeProject, action: authz.ProjectPromote},
 	"POST /api/v1/projects/{id}/demote":                            {scope: scopeProject, action: authz.ProjectPromote},
@@ -460,6 +473,9 @@ var routeRules = map[string]rule{
 	"GET /api/v1/admin/shared-clusters":                                  {scope: scopePlatform, action: authz.PlatformManage},
 	"GET /api/v1/admin/settings/tokens":                                  {scope: scopePlatform, action: authz.PlatformManage},
 	"PUT /api/v1/admin/settings/tokens":                                  {scope: scopePlatform, action: authz.PlatformManage},
+	"GET /api/v1/admin/oauth/clients":                                    {scope: scopePlatform, action: authz.PlatformManage},
+	"POST /api/v1/admin/oauth/clients":                                   {scope: scopePlatform, action: authz.PlatformManage},
+	"DELETE /api/v1/admin/oauth/clients/{client_id}":                     {scope: scopePlatform, action: authz.PlatformManage},
 	"GET /api/v1/admin/storage-targets":                                  {scope: scopePlatform, action: authz.PlatformManage},
 	"POST /api/v1/admin/storage-targets":                                 {scope: scopePlatform, action: authz.PlatformManage},
 	"GET /api/v1/admin/storage-targets/{target_id}":                      {scope: scopePlatform, action: authz.PlatformManage},

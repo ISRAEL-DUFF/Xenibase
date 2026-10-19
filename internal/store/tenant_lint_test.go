@@ -13,7 +13,7 @@ var tenantTables = []string{
 	"projects", "project_members", "project_db_users", "org_members", "invitations", "organizations",
 	"backups", "operations", "audit_log", "retired_databases", "alerts", "metric_points",
 	"usage_records", "reaped_sessions", "break_glass_sessions", "dedicated_requests",
-	"api_tokens", "device_auth_requests", "editor_preferences", "storage_targets", "backup_keys",
+	"api_tokens", "device_auth_requests", "oauth_codes", "editor_preferences", "storage_targets", "backup_keys",
 	"webhooks", "webhook_deliveries", "scheduled_jobs", "job_runs", "outbound_allowlist", "outbound_counters",
 	"saved_queries", "saved_query_favorites", "moves", "minor_upgrades", "availability_minutes", "failover_events", "ledger_entries", "billing_accounts", "billing_contacts", "billing_plan_changes", "invoices", "invoice_lines", "credit_notes", "payment_events", "payment_intents", "payments", "payment_allocations", "refunds", "virtual_accounts", "wht_certificates", "prepaid_deductions", "dunning_steps",
 	"tickets", "ticket_messages", "org_support_phones", "legal_documents", "legal_acceptances", "mrr_snapshots",

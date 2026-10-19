@@ -8,10 +8,19 @@ The [CLI guide](cli.md) covers the same from a terminal and in CI;
 ## Signing in
 
 An account starts from an invitation (or a sign-up, if the platform allows
-it). You confirm your email address, set a password, enrol an authenticator
-app (TOTP), and are shown **10 recovery codes** once: keep them somewhere
-safe. Each code works once, if you lose your phone. With none left, the
-platform admin can reset your two-factor after confirming who you are.
+it). You confirm your email address and set a password; that is all it takes
+to sign in.
+
+**Two-factor sign-in is optional.** To add it, open **Account → Security →
+Two-factor sign-in → Turn on**, confirm your password, scan the QR code with an
+authenticator app (TOTP) and enter the first code. You are shown **10 recovery
+codes** once: keep them somewhere safe. Each code works once, if you lose your
+phone. From then on, signing in needs your password and a code. To go back,
+**Turn off** asks for your password and a current code (or a recovery code).
+Both changes are emailed to you. With no code and no recovery code left, the
+platform admin can reset your two-factor after confirming who you are, and you
+sign in with your password until you turn it on again. Platform admins and
+support staff always have it on.
 
 **Account** lists your sessions (revoke any), lets you change your password
 and name, and shows new recovery codes (after confirming your password and
@@ -162,6 +171,8 @@ Deleting your organisation never deletes what is in your own bucket.
 - [The CLI and API tokens](cli.md): `xenibase login`, tokens scoped to one
   organisation (read, write or admin, optionally to some projects), and
   branches in CI.
+- [Connected apps](cli.md#connected-apps): connect an organisation to a
+  third-party app with your consent, and disconnect it from Account.
 
 ## Query insights
 

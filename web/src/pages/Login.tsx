@@ -27,7 +27,7 @@ export function LoginPage() {
   };
 
   const finish = async (s: SessionState) => {
-    // A first sign-in enrolled an authenticator: show the codes first.
+    // This sign-in enrolled an authenticator (a platform admin's first): show the codes first.
     if (s.recovery_codes?.length) setSignedIn(s);
     else await done(s);
   };
@@ -38,8 +38,11 @@ export function LoginPage() {
     setErr(null);
     setResent(false);
     try {
-      setChallenge(await api.login({ email, password }));
+      const res = await api.login({ email, password });
       setPassword("");
+      // An account without two-factor sign-in is signed in by its password alone.
+      if (res.session) await done(res.session);
+      else setChallenge(res);
     } catch (e) {
       setErr({ msg: errorMessage(e), code: e instanceof ApiRequestError ? e.code : undefined });
     } finally {
@@ -53,7 +56,7 @@ export function LoginPage() {
     setBusy(true);
     setErr(null);
     try {
-      await finish(await api.totp({ challenge_id: challenge.challenge_id, code }));
+      await finish(await api.totp({ challenge_id: challenge.challenge_id ?? "", code }));
     } catch (e) {
       setErr({ msg: errorMessage(e) });
       setCode("");
@@ -78,7 +81,7 @@ export function LoginPage() {
           uri={enr.totp_uri}
           secret={enr.totp_secret}
           submitLabel="Verify and sign in"
-          onCode={async (c) => finish(await api.totp({ challenge_id: challenge.challenge_id, code: c }))}
+          onCode={async (c) => finish(await api.totp({ challenge_id: challenge.challenge_id ?? "", code: c }))}
         />
       </AuthShell>
     );

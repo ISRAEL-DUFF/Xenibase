@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { ApiRequestError, api, errorMessage } from "../api/client";
 import { Alert, Button, Field, Input, Dialog } from "./ui";
+import { useTwoFactor } from "../lib/twofactor";
 
 /**
  * Typed-confirmation modal for destructive actions (spec §8.9). It always
@@ -29,6 +30,7 @@ export function ConfirmDestroy({
 }) {
   const [typed, setTyped] = useState("");
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -42,7 +44,7 @@ export function ConfirmDestroy({
       // window; the server enforces the window either way.
       const s = await api.session();
       if (!s.reauth_until || new Date(s.reauth_until).getTime() <= Date.now() + 5_000) {
-        await api.reauth({ password, code });
+        await api.reauth({ password, code: twoFactor ? code : undefined });
       }
       await run();
       setTyped("");
@@ -67,13 +69,15 @@ export function ConfirmDestroy({
         <Field label="Your password">
           {(id) => <Input id={id} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />}
         </Field>
-        <Field label="Authenticator code">
+        {twoFactor && (
+<Field label="Authenticator code">
           {(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" data-testid="confirm-code" />}
         </Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="danger" busy={busy} disabled={typed !== name || !password || code.length < 6}>
+          <Button type="submit" variant="danger" busy={busy} disabled={typed !== name || !password || (twoFactor && code.length < 6)}>
             {action}
           </Button>
         </div>

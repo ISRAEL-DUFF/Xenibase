@@ -50,9 +50,20 @@ export function ScopePicker({ value, onChange, allowed }: { value: TokenScope[];
   );
 }
 
-/** Optional project restriction for a token, within one organisation. */
-function ProjectPicker({ org, value, onChange }: { org: string; value: string[] | null; onChange: (v: string[] | null) => void }) {
-  const q = useQuery({ queryKey: ["projects", org, "for-token"], queryFn: () => api.projects(org), enabled: !!org });
+/** Optional project restriction for a token, within one organisation; `projects` skips the lookup. */
+export function ProjectPicker({
+  org,
+  value,
+  onChange,
+  projects,
+}: {
+  org: string;
+  value: string[] | null;
+  onChange: (v: string[] | null) => void;
+  projects?: { id: string; name: string }[];
+}) {
+  const q = useQuery({ queryKey: ["projects", org, "for-token"], queryFn: () => api.projects(org), enabled: !!org && !projects });
+  const items = projects ?? q.data?.items ?? [];
   return (
     <fieldset className="flex flex-col gap-2">
       <legend className="mb-1 text-sm font-medium">Projects</legend>
@@ -66,7 +77,7 @@ function ProjectPicker({ org, value, onChange }: { org: string; value: string[] 
       </label>
       {value !== null && (
         <div className="ml-6 flex max-h-40 flex-col gap-1 overflow-y-auto">
-          {(q.data?.items ?? []).map((p) => (
+          {items.map((p) => (
             <label key={p.id} className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -77,7 +88,7 @@ function ProjectPicker({ org, value, onChange }: { org: string; value: string[] 
               {p.name}
             </label>
           ))}
-          {q.data?.items.length === 0 && <span className="text-xs text-muted">No projects in this organisation.</span>}
+          {items.length === 0 && <span className="text-xs text-muted">No projects in this organisation.</span>}
         </div>
       )}
     </fieldset>
@@ -206,6 +217,7 @@ function TokenRows({ items, revoke, showOrg, showUser }: { items: APIToken[]; re
           <td className="px-3 py-1.5 text-sm">
             {t.name}
             <div className="font-mono text-xs text-muted">{t.prefix}…</div>
+            {t.oauth_client_name && <div className="text-xs text-muted">Connected app</div>}
           </td>
           {showUser && <td className="px-3 py-1.5 text-xs">{t.user_email}</td>}
           {showOrg && <td className="px-3 py-1.5 text-xs">{t.org_name}</td>}
@@ -228,14 +240,14 @@ function TokenRows({ items, revoke, showOrg, showUser }: { items: APIToken[]; re
   );
 }
 
-/** Account → Tokens (V2 §7.2). */
+/** Account → Tokens (V2 §7.2), and the apps connected through OAuth. */
 export function TokensCard() {
   const q = useQuery({ queryKey: ["me", "tokens"], queryFn: api.myTokens });
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const revoke = async (t: APIToken) => {
-    if (!window.confirm(`Revoke “${t.name}”? Anything using it stops working at once.`)) return;
+  const revoke = async (t: APIToken, what = `Revoke “${t.name}”? Anything using it stops working at once.`) => {
+    if (!window.confirm(what)) return;
     try {
       await api.revokeMyToken(t.id);
       await qc.invalidateQueries({ queryKey: ["me", "tokens"] });
@@ -243,24 +255,75 @@ export function TokensCard() {
       setErr(errorMessage(e));
     }
   };
+  const own = q.data?.items.filter((t) => t.created_via !== "oauth") ?? [];
+  const apps = q.data?.items.filter((t) => t.created_via === "oauth") ?? [];
   return (
-    <Panel
-      title="Your API tokens"
-      actions={
-        <Button onClick={() => setOpen(true)} data-testid="new-token">
-          New token
-        </Button>
-      }
-    >
-      <div id="tokens" className="flex flex-col gap-3">
+    <>
+      <Panel
+        title="Your API tokens"
+        actions={
+          <Button onClick={() => setOpen(true)} data-testid="new-token">
+            New token
+          </Button>
+        }
+      >
+        <div id="tokens" className="flex flex-col gap-3">
+          <p className="text-sm text-muted">
+            For the <span className="font-mono">xenibase</span> CLI, CI jobs and scripts. A token acts in one organisation, never with more than you can do, and
+            stops when you leave it. <span className="font-mono">xenibase login</span> creates one for you.
+          </p>
+          {own.length > 0 && <TokenRows items={own} revoke={revoke} showOrg />}
+          {err && <Alert>{err}</Alert>}
+        </div>
+        <NewTokenModal open={open} onClose={() => setOpen(false)} />
+      </Panel>
+      <ConnectedApps items={apps} revoke={revoke} />
+    </>
+  );
+}
+
+/** Tokens issued to third-party apps through OAuth: one row per connection. */
+function ConnectedApps({ items, revoke }: { items: APIToken[]; revoke: (t: APIToken, what: string) => Promise<void> }) {
+  return (
+    <Panel title="Connected apps">
+      <div id="connected-apps" className="flex flex-col gap-3">
         <p className="text-sm text-muted">
-          For the <span className="font-mono">xenibase</span> CLI, CI jobs and scripts. A token acts in one organisation, never with more than you can do, and
-          stops when you leave it. <span className="font-mono">xenibase login</span> creates one for you.
+          Apps you connected to an organisation with your consent. Each holds a token with the scopes you granted, until it expires or you disconnect it;
+          disconnecting breaks the app's connection at once.
         </p>
-        {q.data && q.data.items.length > 0 && <TokenRows items={q.data.items} revoke={revoke} showOrg />}
-        {err && <Alert>{err}</Alert>}
+        {items.length === 0 ? (
+          <p className="text-sm text-muted" data-testid="no-connected-apps">
+            No apps are connected.
+          </p>
+        ) : (
+          <Table head={["App", "Organisation", "Scopes", "Projects", "Expires", "Last used", ""]}>
+            {items.map((t) => (
+              <tr key={t.id} data-testid={`connected-app-${t.oauth_client_name ?? t.name}`}>
+                <td className="px-3 py-1.5 text-sm">
+                  {t.oauth_client_name ?? t.name}
+                  <div className="font-mono text-xs text-muted">{t.prefix}…</div>
+                </td>
+                <td className="px-3 py-1.5 text-xs">{t.org_name}</td>
+                <td className="px-3 py-1.5 font-mono text-xs">{t.scopes.join(", ")}</td>
+                <td className="px-3 py-1.5 text-xs">{t.project_ids ? `${t.project_ids.length} only` : "all"}</td>
+                <td className="px-3 py-1.5 text-xs">{t.status === "active" ? formatDate(t.expires_at) : <Badge tone={statusTone(t.status)}>{t.status}</Badge>}</td>
+                <td className="px-3 py-1.5 text-xs text-muted">{t.last_used_at ? relativeTime(t.last_used_at) : "never"}</td>
+                <td className="px-3 py-1.5 text-right">
+                  {t.status === "active" && (
+                    <Button
+                      className="text-xs"
+                      onClick={() => void revoke(t, `Disconnect “${t.oauth_client_name ?? t.name}”? It loses access to ${t.org_name ?? "the organisation"} at once.`)}
+                      data-testid={`disconnect-${t.oauth_client_name ?? t.name}`}
+                    >
+                      Disconnect
+                    </Button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </Table>
+        )}
       </div>
-      <NewTokenModal open={open} onClose={() => setOpen(false)} />
     </Panel>
   );
 }

@@ -3,9 +3,11 @@ import { useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { ApiRequestError, api, errorMessage } from "../api/client";
 import { Alert, Badge, Button, Dialog, Field, FormRow, Input, Page, Panel, Section, Table, PageSkeleton } from "../components/ui";
+import { RecoveryCodes, TotpEnrol } from "../components/Enrol";
 import { TokensCard } from "../components/Tokens";
 import { formatDate, relativeTime } from "../lib/format";
 import { setCurrentOrg } from "../lib/org";
+import { twoFactorQuery } from "../lib/twofactor";
 import { refreshSession, sessionQuery } from "../lib/session";
 
 /** Profile, password, two-factor, sessions, tokens, and invitations (V2 §13). */
@@ -19,9 +21,9 @@ export function AccountPage() {
         <Section title="Profile">
           <ProfileCard />
         </Section>
-        <Section title="Security" description="Signing in needs your password and a code from your authenticator app.">
+        <Section title="Security" description="Your password, and an optional second step at sign-in.">
           <PasswordCard />
-          <RecoveryCard />
+          <TwoFactorCard />
         </Section>
         <Section title="Sessions" description="Browsers signed in as you. Revoke any you don't recognise.">
           <SessionsCard />
@@ -288,5 +290,135 @@ function SessionsCard() {
         </Table>
       )}
     </>
+  );
+}
+
+/** Two-factor sign-in is off until the user turns it on here; platform staff keep it on. */
+function TwoFactorCard() {
+  const q = useQuery(twoFactorQuery);
+  const qc = useQueryClient();
+  const [dialog, setDialog] = useState<"on" | "off" | null>(null);
+  if (!q.data) return null;
+  const { enabled, required } = q.data;
+  const close = async () => {
+    setDialog(null);
+    await qc.invalidateQueries({ queryKey: ["me"] });
+  };
+  return (
+    <>
+      <Panel
+        title="Two-factor sign-in"
+        description="Ask for a code from an authenticator app (1Password, Aegis, Google Authenticator…) as well as your password."
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-[13px]">
+            {enabled ? <Badge tone="ok">On</Badge> : <Badge>Off</Badge>}{" "}
+            {enabled
+              ? required
+                ? "Required for platform staff."
+                : "Signing in needs your password and a code."
+              : "Signing in needs only your password."}
+          </p>
+          {!enabled && (
+            <Button variant="primary" onClick={() => setDialog("on")}>
+              Turn on
+            </Button>
+          )}
+          {enabled && !required && <Button onClick={() => setDialog("off")}>Turn off</Button>}
+        </div>
+      </Panel>
+      {enabled && <RecoveryCard />}
+      <TurnOnDialog open={dialog === "on"} onClose={close} />
+      <TurnOffDialog open={dialog === "off"} onClose={close} />
+    </>
+  );
+}
+
+function TurnOnDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [password, setPassword] = useState("");
+  const [setup, setSetup] = useState<{ setup_token: string; totp_uri: string; totp_secret: string } | null>(null);
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const reset = () => {
+    setPassword("");
+    setSetup(null);
+    setCodes(null);
+    setErr(null);
+  };
+  const leave = () => {
+    reset();
+    onClose();
+  };
+  const begin = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      setSetup(await api.setupTotp({ password }));
+      setPassword("");
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog title="Turn on two-factor sign-in" open={open} onOpenChange={(o) => !o && leave()}>
+      {codes ? (
+        <RecoveryCodes codes={codes} onDone={leave} doneLabel="Done" />
+      ) : setup ? (
+        <TotpEnrol
+          uri={setup.totp_uri}
+          secret={setup.totp_secret}
+          submitLabel="Verify and turn on"
+          onCode={async (code) => setCodes((await api.enableTotp({ setup_token: setup.setup_token, code })).codes)}
+        />
+      ) : (
+        <form className="flex flex-col gap-3" onSubmit={begin}>
+          <p className="text-sm text-muted">Confirm it's you with your password. Next you'll scan a code with your authenticator app.</p>
+          <Field label="Password">{(id) => <Input id={id} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />}</Field>
+          {err && <Alert>{err}</Alert>}
+          <Button type="submit" variant="primary" busy={busy} disabled={!password}>
+            Continue
+          </Button>
+        </form>
+      )}
+    </Dialog>
+  );
+}
+
+function TurnOffDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.disableTotp({ password, code });
+      setPassword("");
+      setCode("");
+      onClose();
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog title="Turn off two-factor sign-in" open={open} onOpenChange={(o) => !o && onClose()}>
+      <form className="flex flex-col gap-3" onSubmit={submit}>
+        <p className="text-sm text-muted">Signing in will need only your password. Confirm with your password and a current code (or a recovery code).</p>
+        <Field label="Password">{(id) => <Input id={id} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />}</Field>
+        <Field label="Authenticator or recovery code">{(id) => <Input id={id} autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />}</Field>
+        {err && <Alert>{err}</Alert>}
+        <Button type="submit" variant="danger" busy={busy} disabled={!password || code.length < 6}>
+          Turn off
+        </Button>
+      </form>
+    </Dialog>
   );
 }

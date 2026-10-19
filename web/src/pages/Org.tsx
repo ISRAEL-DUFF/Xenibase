@@ -28,6 +28,7 @@ import { canManageOrg, setCurrentOrg, useCurrentOrg } from "../lib/org";
 import { StorageTargetsPanel } from "../components/StorageTargets";
 import { sessionQuery } from "../lib/session";
 import { OrgTokensCard } from "../components/Tokens";
+import { useTwoFactor } from "../lib/twofactor";
 
 const orgRoles: OrgRole[] = ["owner", "admin", "member", "billing"];
 const projectRoles: { id: ProjectRole; label: string }[] = [
@@ -321,6 +322,7 @@ function InviteModal({ orgId, canInviteOwners, open, onClose }: { orgId: string;
 function TransferOwnershipModal({ orgId, members, open, onClose }: { orgId: string; members: OrgMember[]; open: boolean; onClose: () => void }) {
   const [to, setTo] = useState("");
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -329,7 +331,7 @@ function TransferOwnershipModal({ orgId, members, open, onClose }: { orgId: stri
     setBusy(true);
     setErr(null);
     try {
-      await api.reauth({ password, code });
+      await api.reauth({ password, code: twoFactor ? code : undefined });
       await api.transferOwnership(orgId, to);
       onClose();
     } catch (e) {
@@ -355,11 +357,13 @@ function TransferOwnershipModal({ orgId, members, open, onClose }: { orgId: stri
           )}
         </Field>
         <Field label="Your password">{(id) => <Input id={id} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />}</Field>
-        <Field label="Authenticator code">{(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} />}</Field>
+        {twoFactor && (
+<Field label="Authenticator code">{(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} />}</Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={!to || !password || code.length < 6}>
+          <Button type="submit" variant="primary" busy={busy} disabled={!to || !password || (twoFactor && code.length < 6)}>
             Transfer
           </Button>
         </div>
@@ -480,6 +484,7 @@ function DeleteOrgCard({ org }: { org: Org }) {
   const [confirm, setConfirm] = useState("");
   const [all, setAll] = useState(false);
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -488,7 +493,7 @@ function DeleteOrgCard({ org }: { org: Org }) {
     setBusy(true);
     setErr(null);
     try {
-      await api.reauth({ password, code });
+      await api.reauth({ password, code: twoFactor ? code : undefined });
       await api.deleteOrg(org.id, { confirm, delete_projects: all });
       setOpen(false);
       await qc.invalidateQueries();
@@ -521,9 +526,11 @@ function DeleteOrgCard({ org }: { org: Org }) {
             </label>
           )}
           <Field label="Your password">{(id) => <Input id={id} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />}</Field>
-          <Field label="Authenticator code">{(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} />}</Field>
+          {twoFactor && (
+<Field label="Authenticator code">{(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} />}</Field>
+          )}
           {err && <Alert>{err}</Alert>}
-          <Button type="submit" variant="danger" busy={busy} disabled={confirm !== org.name || (org.project_count > 0 && !all) || !password || code.length < 6}>
+          <Button type="submit" variant="danger" busy={busy} disabled={confirm !== org.name || (org.project_count > 0 && !all) || !password || (twoFactor && code.length < 6)}>
             Delete in 7 days
           </Button>
         </form>

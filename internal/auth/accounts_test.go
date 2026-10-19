@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/mail"
 )
@@ -71,8 +73,8 @@ func newAccounts(t *testing.T) (*auth.Service, *clock, *inbox, int, string) {
 	return s, c, box, int(terms.Version), secret
 }
 
-// enrol completes a first sign-in, enrolling TOTP, and returns the secret
-// and recovery codes.
+// enrol turns two-factor sign-in on for an ordinary account (which signs in
+// with a password alone until it does), and returns the secret and recovery codes.
 func enrol(t *testing.T, s *auth.Service, c *clock, addr string) (string, []string) {
 	t.Helper()
 	ctx := context.Background()
@@ -80,18 +82,25 @@ func enrol(t *testing.T, s *auth.Service, c *clock, addr string) (string, []stri
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if ch.Enroll == nil {
-		t.Fatal("a first sign-in should enrol TOTP")
+	if ch.Enroll != nil || ch.NeedsCode {
+		t.Fatalf("an ordinary account signs in without a code until it turns two-factor on: %+v", ch)
 	}
-	in, err := s.CompleteLogin(ctx, ch.Token, code(t, ch.Enroll.Secret, c), nil, "")
+	if _, err := s.CompleteLogin(ctx, ch.Token, "", nil, ""); err != nil {
+		t.Fatalf("password-only sign-in: %v", err)
+	}
+	enr, err := s.BeginEnableTOTP(ctx, ch.UserID, password)
 	if err != nil {
-		t.Fatalf("enrol: %v", err)
+		t.Fatalf("begin: %v", err)
 	}
-	if len(in.RecoveryCodes) != auth.RecoveryCodeCount || in.Session.PlatformRole != auth.RoleUser {
-		t.Fatalf("enrolment: %+v", in)
+	codes, err := s.EnableTOTP(ctx, ch.UserID, enr.Token, code(t, enr.Secret, c))
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if len(codes) != auth.RecoveryCodeCount {
+		t.Fatalf("recovery codes: %d", len(codes))
 	}
 	c.Step()
-	return ch.Enroll.Secret, in.RecoveryCodes
+	return enr.Secret, codes
 }
 
 func TestSignupModes(t *testing.T) {
@@ -202,7 +211,7 @@ func TestRecoveryCodes(t *testing.T) {
 		t.Fatalf("old code after regenerating: %v", err)
 	}
 
-	// The platform admin resets 2FA: the next sign-in enrols again.
+	// The platform admin resets 2FA: carol signs in with a password until she turns it on again.
 	if err := s.ResetTOTP(ctx, u.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -266,5 +275,123 @@ func TestTermsVersions(t *testing.T) {
 	}
 	if pending, _, _ := s.TermsOutstanding(ctx, sess.UserID); pending {
 		t.Fatal("still pending after accepting")
+	}
+}
+
+func TestTwoFactorIsOptIn(t *testing.T) {
+	s, c, box, terms, ownerSecret := newAccounts(t)
+	ctx := context.Background()
+	if _, err := s.SetSignupPolicy(ctx, auth.SignupPolicy{Mode: auth.SignupOpen}); err != nil {
+		t.Fatal(err)
+	}
+	const dana = "dana@example.com"
+	if err := s.Signup(ctx, auth.SignupParams{Email: dana, Password: password, TermsVersion: terms}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.VerifyEmail(ctx, box.lastToken(t, dana))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Off by default: the password alone signs in.
+	if st, err := s.TOTPStatus(ctx, u.ID); err != nil || st.Enabled || st.Required {
+		t.Fatalf("status of a new account: %+v %v", st, err)
+	}
+	ch, err := s.Login(ctx, dana, password)
+	if err != nil || ch.NeedsCode || ch.Enroll != nil {
+		t.Fatalf("login: %+v %v", ch, err)
+	}
+	in, err := s.CompleteLogin(ctx, ch.Token, "", nil, "")
+	if err != nil || len(in.RecoveryCodes) != 0 {
+		t.Fatalf("password-only sign-in: %+v %v", in, err)
+	}
+	// With no second factor, step-up asks for the password only, and there are no recovery codes to replace.
+	if err := s.Reauthenticate(ctx, in.Session, password, ""); err != nil {
+		t.Fatalf("reauth with the password: %v", err)
+	}
+	if _, err := s.RegenerateRecoveryCodes(ctx, u.ID); !errors.Is(err, auth.ErrTOTPOff) {
+		t.Fatalf("recovery codes while off: %v", err)
+	}
+	if err := s.DisableTOTP(ctx, u.ID, password, "123456"); !errors.Is(err, auth.ErrTOTPOff) {
+		t.Fatalf("disable while off: %v", err)
+	}
+
+	// Turning it on needs the password, and a code from the authenticator.
+	if _, err := s.BeginEnableTOTP(ctx, u.ID, "not the password at all"); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("setup with a wrong password: %v", err)
+	}
+	enr, err := s.BeginEnableTOTP(ctx, u.ID, password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnableTOTP(ctx, u.ID, enr.Token, "000000"); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("enable with a wrong code: %v", err)
+	}
+	if _, err := s.EnableTOTP(ctx, uuid.New(), enr.Token, code(t, enr.Secret, c)); !errors.Is(err, auth.ErrChallengeExpired) {
+		t.Fatalf("someone else's setup token: %v", err)
+	}
+	codes, err := s.EnableTOTP(ctx, u.ID, enr.Token, code(t, enr.Secret, c))
+	if err != nil || len(codes) != auth.RecoveryCodeCount {
+		t.Fatalf("enable: %v", err)
+	}
+	if _, err := s.EnableTOTP(ctx, u.ID, enr.Token, code(t, enr.Secret, c)); err == nil {
+		t.Fatal("a setup token works once")
+	}
+	if _, err := s.BeginEnableTOTP(ctx, u.ID, password); !errors.Is(err, auth.ErrTOTPOn) {
+		t.Fatalf("setup while on: %v", err)
+	}
+	if box.count(dana) < 2 { // verification, then a notice that it was turned on
+		t.Fatalf("no notice that two-factor was turned on")
+	}
+
+	// On: sign-in needs the code, and a setup token is not a login challenge.
+	c.Step()
+	ch, err = s.Login(ctx, dana, password)
+	if err != nil || !ch.NeedsCode {
+		t.Fatalf("login with two-factor on: %+v %v", ch, err)
+	}
+	if _, err := s.CompleteLogin(ctx, ch.Token, "", nil, ""); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("no code with two-factor on: %v", err)
+	}
+	ch, _ = s.Login(ctx, dana, password)
+	if _, err := s.CompleteLogin(ctx, ch.Token, code(t, enr.Secret, c), nil, ""); err != nil {
+		t.Fatalf("sign-in with the code: %v", err)
+	}
+	c.Step()
+
+	// Turning it off needs the password and a code.
+	if err := s.DisableTOTP(ctx, u.ID, "not the password at all", code(t, enr.Secret, c)); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("disable with a wrong password: %v", err)
+	}
+	if err := s.DisableTOTP(ctx, u.ID, password, "000000"); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("disable with a wrong code: %v", err)
+	}
+	if err := s.DisableTOTP(ctx, u.ID, password, codes[0]); err != nil { // a recovery code will do
+		t.Fatalf("disable: %v", err)
+	}
+	if st, _ := s.TOTPStatus(ctx, u.ID); st.Enabled {
+		t.Fatal("still on")
+	}
+	ch, err = s.Login(ctx, dana, password)
+	if err != nil || ch.NeedsCode {
+		t.Fatalf("login after turning it off: %+v %v", ch, err)
+	}
+
+	// Platform staff cannot turn it off, and always enrol.
+	owner, err := s.Login(ctx, email, password)
+	if err != nil || !owner.NeedsCode {
+		t.Fatalf("the platform admin: %+v %v", owner, err)
+	}
+	if err := s.DisableTOTP(ctx, owner.UserID, password, code(t, ownerSecret, c)); !errors.Is(err, auth.ErrTOTPRequired) {
+		t.Fatalf("a platform admin turning it off: %v", err)
+	}
+	if st, _ := s.TOTPStatus(ctx, owner.UserID); !st.Enabled || !st.Required {
+		t.Fatalf("admin status: %+v", st)
+	}
+	if err := s.ResetTOTP(ctx, owner.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if ch, err := s.Login(ctx, email, password); err != nil || ch.Enroll == nil {
+		t.Fatalf("a platform admin whose two-factor was reset enrols at the next sign-in: %+v %v", ch, err)
 	}
 }

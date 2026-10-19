@@ -6,6 +6,7 @@ import type { components } from "../api/schema";
 import { formatBytes, formatDate } from "../lib/format";
 import { useOperationToast } from "./Toasts";
 import { Alert, Badge, Button, Panel, EmptyState, Field, Input, Dialog, Select, Table, TableSkeleton, PanelSkeleton } from "./ui";
+import { useTwoFactor } from "../lib/twofactor";
 
 type TargetRequest = components["schemas"]["StorageTargetRequest"];
 
@@ -283,6 +284,7 @@ function downloadText(text: string, filename: string) {
 /** Step-up auth, then the project's key file (README + OpenPGP key). */
 function DownloadKeyModal({ p, onClose }: { p: Project; onClose: () => void }) {
   const [password, setPassword] = useState("");
+  const twoFactor = useTwoFactor();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -291,7 +293,7 @@ function DownloadKeyModal({ p, onClose }: { p: Project; onClose: () => void }) {
     setBusy(true);
     setErr(null);
     try {
-      await api.reauth({ password, code });
+      await api.reauth({ password, code: twoFactor ? code : undefined });
       const text = await api.downloadProjectBackupKey(p.id);
       downloadText(text, `xenibase-backup-key-${p.id}.asc`);
       onClose();
@@ -311,13 +313,15 @@ function DownloadKeyModal({ p, onClose }: { p: Project; onClose: () => void }) {
         <Field label="Your password">
           {(id) => <Input id={id} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />}
         </Field>
-        <Field label="Authenticator code">
+        {twoFactor && (
+<Field label="Authenticator code">
           {(id) => <Input id={id} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" />}
         </Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" busy={busy} disabled={!password || code.length < 6}>
+          <Button type="submit" variant="primary" busy={busy} disabled={!password || (twoFactor && code.length < 6)}>
             Download
           </Button>
         </div>

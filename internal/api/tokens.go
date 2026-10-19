@@ -213,6 +213,7 @@ func (s *Server) ListMyTokens(w http.ResponseWriter, r *http.Request) {
 			RevokedAt: row.RevokedAt, CreatedVia: row.CreatedVia, CreatedAt: row.CreatedAt,
 		}, now)
 		t.OrgName = &row.OrgName
+		t.OauthClientName = row.OauthClientName
 		out.Items = append(out.Items, t)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -291,6 +292,7 @@ func (s *Server) ListOrgTokens(w http.ResponseWriter, r *http.Request, org gen.O
 			RevokedAt: row.RevokedAt, CreatedVia: row.CreatedVia, CreatedAt: row.CreatedAt,
 		}, now)
 		t.UserEmail = &row.UserEmail
+		t.OauthClientName = row.OauthClientName
 		out.Items = append(out.Items, t)
 	}
 	writeJSON(w, http.StatusOK, out)

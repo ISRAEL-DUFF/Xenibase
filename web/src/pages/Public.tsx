@@ -246,7 +246,11 @@ export function InvitePage() {
       const r = await api.acceptInvitation(
         session?.authenticated ? { token: token ?? "" } : { token: token ?? "", name: name || undefined, password, terms_version: terms.data?.version },
       );
-      if (r.login) {
+      if (r.login?.session) {
+        // No two-factor sign-in on a new account: the invitation signed them in.
+        setSession(qc, r.login.session);
+        await goTo(r.org_id);
+      } else if (r.login) {
         setLogin(r.login);
         if (r.org_id) setCurrentOrg(r.org_id);
       } else await goTo(r.org_id);
@@ -277,7 +281,7 @@ export function InvitePage() {
           uri={login.enrollment.totp_uri}
           secret={login.enrollment.totp_secret}
           submitLabel="Verify and continue"
-          onCode={async (c) => setSignedIn(await api.totp({ challenge_id: login.challenge_id, code: c }))}
+          onCode={async (c) => setSignedIn(await api.totp({ challenge_id: login.challenge_id ?? "", code: c }))}
         />
       </AuthShell>
     );

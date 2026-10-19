@@ -49,7 +49,7 @@ type rtConn struct {
 	e     *Edge
 	hub   *rtHub
 	ws    *websocket.Conn
-	v2    bool
+	v2    atomic.Bool // the client speaks the v2 wire format; set by the read loop, read by senders
 	ip    string
 	base  Request // the key's role: service for the secret key, else anon
 	out   chan []byte
@@ -151,8 +151,9 @@ func (e *Edge) realtime(c *call, req Request) {
 		// connection's default; channels may send their own.
 		base.Claims = req.Claims
 	}
-	conn := &rtConn{e: e, hub: hub, ws: ws, v2: c.r.URL.Query().Get("vsn") == "2.0.0", ip: c.ip, base: base,
+	conn := &rtConn{e: e, hub: hub, ws: ws, ip: c.ip, base: base,
 		out: make(chan []byte, rtSendQueue), done: make(chan struct{}), channels: map[string]*rtChannel{}, started: time.Now(), id: randRef()}
+	conn.v2.Store(c.r.URL.Query().Get("vsn") == "2.0.0")
 	conn.lastSeen.Store(time.Now().UnixNano())
 	conn.run(c.r.Context())
 }
@@ -176,7 +177,9 @@ func (rc *rtConn) run(parent context.Context) {
 			rc.shutdown(websocket.StatusUnsupportedData, "not a realtime message")
 			return
 		}
-		rc.v2 = rc.v2 || v2
+		if v2 {
+			rc.v2.Store(true)
+		}
 		rc.handle(ctx, m)
 	}
 }
@@ -238,7 +241,7 @@ func (rc *rtConn) shutdown(code websocket.StatusCode, reason string) {
 
 // send queues m; a client too slow to keep up is disconnected.
 func (rc *rtConn) send(m rtMsg) bool {
-	b := encodeMsg(m, rc.v2)
+	b := encodeMsg(m, rc.v2.Load())
 	select {
 	case <-rc.done:
 		return false

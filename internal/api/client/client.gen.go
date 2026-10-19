@@ -22,6 +22,7 @@ import (
 const (
 	APITokenCreatedViaApi    APITokenCreatedVia = "api"
 	APITokenCreatedViaDevice APITokenCreatedVia = "device"
+	APITokenCreatedViaOauth  APITokenCreatedVia = "oauth"
 	APITokenCreatedViaUi     APITokenCreatedVia = "ui"
 )
 
@@ -31,6 +32,8 @@ func (e APITokenCreatedVia) Valid() bool {
 	case APITokenCreatedViaApi:
 		return true
 	case APITokenCreatedViaDevice:
+		return true
+	case APITokenCreatedViaOauth:
 		return true
 	case APITokenCreatedViaUi:
 		return true
@@ -1785,6 +1788,66 @@ func (e NodeLifecycle) Valid() bool {
 	case NodeLifecycleDraining:
 		return true
 	case NodeLifecycleProvisioning:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OAuthErrorError.
+const (
+	InvalidClient        OAuthErrorError = "invalid_client"
+	InvalidGrant         OAuthErrorError = "invalid_grant"
+	InvalidRequest       OAuthErrorError = "invalid_request"
+	ServerError          OAuthErrorError = "server_error"
+	SlowDown             OAuthErrorError = "slow_down"
+	UnsupportedGrantType OAuthErrorError = "unsupported_grant_type"
+)
+
+// Valid indicates whether the value is a known member of the OAuthErrorError enum.
+func (e OAuthErrorError) Valid() bool {
+	switch e {
+	case InvalidClient:
+		return true
+	case InvalidGrant:
+		return true
+	case InvalidRequest:
+		return true
+	case ServerError:
+		return true
+	case SlowDown:
+		return true
+	case UnsupportedGrantType:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OAuthTokenRequestGrantType.
+const (
+	AuthorizationCode OAuthTokenRequestGrantType = "authorization_code"
+)
+
+// Valid indicates whether the value is a known member of the OAuthTokenRequestGrantType enum.
+func (e OAuthTokenRequestGrantType) Valid() bool {
+	switch e {
+	case AuthorizationCode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OAuthTokenResponseTokenType.
+const (
+	Bearer OAuthTokenResponseTokenType = "Bearer"
+)
+
+// Valid indicates whether the value is a known member of the OAuthTokenResponseTokenType enum.
+func (e OAuthTokenResponseTokenType) Valid() bool {
+	switch e {
+	case Bearer:
 		return true
 	default:
 		return false
@@ -3972,8 +4035,11 @@ type APIToken struct {
 	LastUsedAt *time.Time         `json:"last_used_at,omitempty"`
 	LastUsedIp *string            `json:"last_used_ip,omitempty"`
 	Name       string             `json:"name"`
-	OrgId      openapi_types.UUID `json:"org_id"`
-	OrgName    *string            `json:"org_name,omitempty"`
+
+	// OauthClientName The third-party app the token was issued to through OAuth, if any.
+	OauthClientName *string            `json:"oauth_client_name,omitempty"`
+	OrgId           openapi_types.UUID `json:"org_id"`
+	OrgName         *string            `json:"org_name,omitempty"`
 
 	// Prefix The token's first characters, for recognising it.
 	Prefix string `json:"prefix"`
@@ -4008,6 +4074,7 @@ type AcceptInvitationRequest struct {
 
 // AcceptInvitationResult defines model for AcceptInvitationResult.
 type AcceptInvitationResult struct {
+	// Login A correct password. Accounts with two-factor sign-in (and platform staff) get a challenge to complete with `/auth/totp`; an account without it is signed in right away and gets the session instead.
 	Login *LoginChallenge     `json:"login,omitempty"`
 	OrgId *openapi_types.UUID `json:"org_id,omitempty"`
 }
@@ -5383,6 +5450,19 @@ type CreateNodeRequest struct {
 // CreateNodeRequestRole pooler: an edge pooler host (both PgBouncers and keepalived), never given a database. edge: runs xenibase-edge only, its cost split by backend services' use (V4.1 §11).
 type CreateNodeRequestRole string
 
+// CreateOAuthClientRequest defines model for CreateOAuthClientRequest.
+type CreateOAuthClientRequest struct {
+	// Confidential false registers a public client (no secret; PKCE alone).
+	Confidential *bool `json:"confidential,omitempty"`
+
+	// Name Shown on the consent page and on the tokens it is issued.
+	Name         string   `json:"name"`
+	RedirectUris []string `json:"redirect_uris"`
+
+	// ScopesAllowed The most the app may ask for; default read and write.
+	ScopesAllowed *[]TokenScope `json:"scopes_allowed,omitempty"`
+}
+
 // CreateOrgRequest defines model for CreateOrgRequest.
 type CreateOrgRequest struct {
 	Name string `json:"name"`
@@ -6370,6 +6450,21 @@ type InstanceUpdated struct {
 	Plan      *ResizePlan     `json:"plan,omitempty"`
 }
 
+// IntegratorRoles defines model for IntegratorRoles.
+type IntegratorRoles struct {
+	// Created The ones this call created (the rest already existed).
+	Created []string `json:"created"`
+
+	// Roles Every integrator role recorded on the project.
+	Roles []string `json:"roles"`
+}
+
+// IntegratorRolesRequest defines model for IntegratorRolesRequest.
+type IntegratorRolesRequest struct {
+	// Roles Role names matching `^[a-z][a-z0-9_]{2,62}$`.
+	Roles []string `json:"roles"`
+}
+
 // Invitation defines model for Invitation.
 type Invitation struct {
 	CreatedAt time.Time          `json:"created_at"`
@@ -6751,12 +6846,13 @@ type LockList struct {
 	Items []LockBlock `json:"items"`
 }
 
-// LoginChallenge defines model for LoginChallenge.
+// LoginChallenge A correct password. Accounts with two-factor sign-in (and platform staff) get a challenge to complete with `/auth/totp`; an account without it is signed in right away and gets the session instead.
 type LoginChallenge struct {
-	ChallengeId string `json:"challenge_id"`
+	ChallengeId *string `json:"challenge_id,omitempty"`
 
 	// Enrollment First sign-in - enrol this authenticator; the next code completes it.
 	Enrollment *LoginEnrollment `json:"enrollment,omitempty"`
+	Session    *SessionState    `json:"session,omitempty"`
 }
 
 // LoginEnrollment First sign-in - enrol this authenticator; the next code completes it.
@@ -7101,6 +7197,135 @@ type NoopParams struct {
 	FailAttempts *int `json:"fail_attempts,omitempty"`
 	Steps        *int `json:"steps,omitempty"`
 }
+
+// OAuthAuthorizeInfo defines model for OAuthAuthorizeInfo.
+type OAuthAuthorizeInfo struct {
+	ClientId            string `json:"client_id"`
+	ClientName          string `json:"client_name"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
+
+	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
+	Organisations []OAuthGrantOrg `json:"organisations"`
+	RedirectUri   string          `json:"redirect_uri"`
+
+	// Scopes What the app asked for; the user may narrow them.
+	Scopes []TokenScope `json:"scopes"`
+	State  *string      `json:"state,omitempty"`
+}
+
+// OAuthClient defines model for OAuthClient.
+type OAuthClient struct {
+	ClientId string `json:"client_id"`
+
+	// Confidential Whether the client has a secret.
+	Confidential  bool               `json:"confidential"`
+	CreatedAt     time.Time          `json:"created_at"`
+	DisabledAt    *time.Time         `json:"disabled_at,omitempty"`
+	Id            openapi_types.UUID `json:"id"`
+	Name          string             `json:"name"`
+	RedirectUris  []string           `json:"redirect_uris"`
+	ScopesAllowed []TokenScope       `json:"scopes_allowed"`
+}
+
+// OAuthClientCreated defines model for OAuthClientCreated.
+type OAuthClientCreated struct {
+	Client OAuthClient `json:"client"`
+
+	// ClientSecret The secret (`xbc_…`), shown only once; absent for a public client.
+	ClientSecret *string `json:"client_secret,omitempty"`
+}
+
+// OAuthClientList defines model for OAuthClientList.
+type OAuthClientList struct {
+	Items []OAuthClient `json:"items"`
+}
+
+// OAuthDecision defines model for OAuthDecision.
+type OAuthDecision struct {
+	Approve             bool                  `json:"approve"`
+	ClientId            string                `json:"client_id"`
+	CodeChallenge       string                `json:"code_challenge"`
+	CodeChallengeMethod string                `json:"code_challenge_method"`
+	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
+	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri         string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for; the request's scopes by default.
+	Scopes *[]TokenScope `json:"scopes,omitempty"`
+	State  *string       `json:"state,omitempty"`
+}
+
+// OAuthError defines model for OAuthError.
+type OAuthError struct {
+	Error            OAuthErrorError `json:"error"`
+	ErrorDescription string          `json:"error_description"`
+}
+
+// OAuthErrorError defines model for OAuthError.Error.
+type OAuthErrorError string
+
+// OAuthGrantOrg defines model for OAuthGrantOrg.
+type OAuthGrantOrg struct {
+	Id       openapi_types.UUID  `json:"id"`
+	Name     string              `json:"name"`
+	Personal bool                `json:"personal"`
+	Projects []OAuthGrantProject `json:"projects"`
+}
+
+// OAuthGrantProject defines model for OAuthGrantProject.
+type OAuthGrantProject struct {
+	Id   openapi_types.UUID `json:"id"`
+	Name string             `json:"name"`
+}
+
+// OAuthRedirect defines model for OAuthRedirect.
+type OAuthRedirect struct {
+	// RedirectTo The app's redirect URI with `code` and `state`, or `error`.
+	RedirectTo string `json:"redirect_to"`
+}
+
+// OAuthRevokeRequest defines model for OAuthRevokeRequest.
+type OAuthRevokeRequest struct {
+	ClientId     *string `json:"client_id,omitempty"`
+	ClientSecret *string `json:"client_secret,omitempty"`
+	Token        string  `json:"token"`
+}
+
+// OAuthTokenRequest defines model for OAuthTokenRequest.
+type OAuthTokenRequest struct {
+	ClientId     string                     `json:"client_id"`
+	ClientSecret *string                    `json:"client_secret,omitempty"`
+	Code         string                     `json:"code"`
+	CodeVerifier string                     `json:"code_verifier"`
+	GrantType    OAuthTokenRequestGrantType `json:"grant_type"`
+	RedirectUri  string                     `json:"redirect_uri"`
+}
+
+// OAuthTokenRequestGrantType defines model for OAuthTokenRequest.GrantType.
+type OAuthTokenRequestGrantType string
+
+// OAuthTokenResponse defines model for OAuthTokenResponse.
+type OAuthTokenResponse struct {
+	// AccessToken The API token (`xb_…`), shown only once.
+	AccessToken string `json:"access_token"`
+
+	// ExpiresIn Seconds until the token expires.
+	ExpiresIn int                `json:"expires_in"`
+	OrgId     openapi_types.UUID `json:"org_id"`
+
+	// ProjectIds The projects the token is restricted to; null for every project the user can access.
+	ProjectIds *[]openapi_types.UUID `json:"project_ids,omitempty"`
+
+	// Scope Space-separated granted scopes.
+	Scope     string                      `json:"scope"`
+	TokenId   openapi_types.UUID          `json:"token_id"`
+	TokenType OAuthTokenResponseTokenType `json:"token_type"`
+}
+
+// OAuthTokenResponseTokenType defines model for OAuthTokenResponse.TokenType.
+type OAuthTokenResponseTokenType string
 
 // Operation defines model for Operation.
 type Operation struct {
@@ -8089,8 +8314,9 @@ type ReasonRequest struct {
 
 // ReauthRequest defines model for ReauthRequest.
 type ReauthRequest struct {
-	Code     string `json:"code"`
-	Password string `json:"password"`
+	// Code Required when two-factor sign-in is on for the account.
+	Code     *string `json:"code,omitempty"`
+	Password string  `json:"password"`
 }
 
 // RebalanceMove defines model for RebalanceMove.
@@ -9494,10 +9720,44 @@ type TopQuery struct {
 	TotalMs float64 `json:"total_ms"`
 }
 
+// TotpDisableRequest defines model for TotpDisableRequest.
+type TotpDisableRequest struct {
+	// Code A code from the authenticator, or a recovery code.
+	Code     string `json:"code"`
+	Password string `json:"password"`
+}
+
+// TotpEnableRequest defines model for TotpEnableRequest.
+type TotpEnableRequest struct {
+	Code       string `json:"code"`
+	SetupToken string `json:"setup_token"`
+}
+
 // TotpRequest defines model for TotpRequest.
 type TotpRequest struct {
 	ChallengeId string `json:"challenge_id"`
 	Code        string `json:"code"`
+}
+
+// TotpSetup defines model for TotpSetup.
+type TotpSetup struct {
+	ExpiresAt  time.Time `json:"expires_at"`
+	SetupToken string    `json:"setup_token"`
+	TotpSecret string    `json:"totp_secret"`
+	TotpUri    string    `json:"totp_uri"`
+}
+
+// TotpSetupRequest defines model for TotpSetupRequest.
+type TotpSetupRequest struct {
+	Password string `json:"password"`
+}
+
+// TotpStatus defines model for TotpStatus.
+type TotpStatus struct {
+	Enabled bool `json:"enabled"`
+
+	// Required Platform staff must keep two-factor sign-in on.
+	Required bool `json:"required"`
 }
 
 // TransferOwnershipRequest defines model for TransferOwnershipRequest.
@@ -10245,6 +10505,20 @@ type GetNodeMetricsParams struct {
 // GetNodeMetricsParamsRange defines parameters for GetNodeMetrics.
 type GetNodeMetricsParamsRange string
 
+// GetOAuthAuthorizationParams defines parameters for GetOAuthAuthorization.
+type GetOAuthAuthorizationParams struct {
+	ClientId    string `form:"client_id" json:"client_id"`
+	RedirectUri string `form:"redirect_uri" json:"redirect_uri"`
+
+	// Scope Space-separated `read`, `write`, `admin`; the app's allowed scopes by default.
+	Scope         *string `form:"scope,omitempty" json:"scope,omitempty"`
+	State         *string `form:"state,omitempty" json:"state,omitempty"`
+	CodeChallenge string  `form:"code_challenge" json:"code_challenge"`
+
+	// CodeChallengeMethod Only `S256` is accepted.
+	CodeChallengeMethod string `form:"code_challenge_method" json:"code_challenge_method"`
+}
+
 // ListOperationsParams defines parameters for ListOperations.
 type ListOperationsParams struct {
 	// Org The organisation to list; your personal organisation when omitted.
@@ -10653,6 +10927,9 @@ type PreviewMaintenanceAnnouncementJSONRequestBody = MaintenancePreviewRequest
 // PutMaintenanceWindowJSONRequestBody defines body for PutMaintenanceWindow for application/json ContentType.
 type PutMaintenanceWindowJSONRequestBody = MaintenanceWindow
 
+// CreateOAuthClientJSONRequestBody defines body for CreateOAuthClient for application/json ContentType.
+type CreateOAuthClientJSONRequestBody = CreateOAuthClientRequest
+
 // AdminUpdateOrgJSONRequestBody defines body for AdminUpdateOrg for application/json ContentType.
 type AdminUpdateOrgJSONRequestBody = AdminUpdateOrgRequest
 
@@ -10706,6 +10983,9 @@ type PreviewPriceBookJSONRequestBody PreviewPriceBookJSONBody
 
 // MoveProjectJSONRequestBody defines body for MoveProject for application/json ContentType.
 type MoveProjectJSONRequestBody = MoveProjectRequest
+
+// CreateIntegratorRolesJSONRequestBody defines body for CreateIntegratorRoles for application/json ContentType.
+type CreateIntegratorRolesJSONRequestBody = IntegratorRolesRequest
 
 // AdminRunReconciliationJSONRequestBody defines body for AdminRunReconciliation for application/json ContentType.
 type AdminRunReconciliationJSONRequestBody AdminRunReconciliationJSONBody
@@ -10827,6 +11107,15 @@ type ChangePasswordJSONRequestBody = ChangePasswordRequest
 // AcceptTermsJSONRequestBody defines body for AcceptTerms for application/json ContentType.
 type AcceptTermsJSONRequestBody = AcceptTermsRequest
 
+// DisableTotpJSONRequestBody defines body for DisableTotp for application/json ContentType.
+type DisableTotpJSONRequestBody = TotpDisableRequest
+
+// EnableTotpJSONRequestBody defines body for EnableTotp for application/json ContentType.
+type EnableTotpJSONRequestBody = TotpEnableRequest
+
+// SetupTotpJSONRequestBody defines body for SetupTotp for application/json ContentType.
+type SetupTotpJSONRequestBody = TotpSetupRequest
+
 // CreateNodeJSONRequestBody defines body for CreateNode for application/json ContentType.
 type CreateNodeJSONRequestBody = CreateNodeRequest
 
@@ -10838,6 +11127,21 @@ type SetNodeCostJSONRequestBody = NodeCost
 
 // CreateSharedClusterJSONRequestBody defines body for CreateSharedCluster for application/json ContentType.
 type CreateSharedClusterJSONRequestBody = SharedClusterRequest
+
+// DecideOAuthAuthorizationJSONRequestBody defines body for DecideOAuthAuthorization for application/json ContentType.
+type DecideOAuthAuthorizationJSONRequestBody = OAuthDecision
+
+// RevokeOAuthTokenJSONRequestBody defines body for RevokeOAuthToken for application/json ContentType.
+type RevokeOAuthTokenJSONRequestBody = OAuthRevokeRequest
+
+// RevokeOAuthTokenFormdataRequestBody defines body for RevokeOAuthToken for application/x-www-form-urlencoded ContentType.
+type RevokeOAuthTokenFormdataRequestBody = OAuthRevokeRequest
+
+// ExchangeOAuthTokenJSONRequestBody defines body for ExchangeOAuthToken for application/json ContentType.
+type ExchangeOAuthTokenJSONRequestBody = OAuthTokenRequest
+
+// ExchangeOAuthTokenFormdataRequestBody defines body for ExchangeOAuthToken for application/x-www-form-urlencoded ContentType.
+type ExchangeOAuthTokenFormdataRequestBody = OAuthTokenRequest
 
 // CreateOrgJSONRequestBody defines body for CreateOrg for application/json ContentType.
 type CreateOrgJSONRequestBody = CreateOrgRequest
@@ -11598,6 +11902,42 @@ type ClientInterface interface {
 	// Corresponds with PUT /api/v1/admin/maintenance/window (the `PutMaintenanceWindow` operationId).
 	PutMaintenanceWindow(ctx context.Context, body PutMaintenanceWindowJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListOAuthClients The third-party apps registered on this server
+	//
+	// Corresponds with GET /api/v1/admin/oauth/clients (the `ListOAuthClients` operationId).
+	ListOAuthClients(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateOAuthClientWithBody Register a third-party app (OAuth client)
+	//
+	// Redirect URIs must be absolute `https://` URLs without a fragment
+	// (`http://localhost` and `http://127.0.0.1` are allowed for
+	// development); the authorize request must match one exactly. A
+	// confidential client (the default) gets a secret, shown once.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+	CreateOAuthClientWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateOAuthClient Register a third-party app (OAuth client)
+	//
+	// Redirect URIs must be absolute `https://` URLs without a fragment
+	// (`http://localhost` and `http://127.0.0.1` are allowed for
+	// development); the authorize request must match one exactly. A
+	// confidential client (the default) gets a secret, shown once.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+	CreateOAuthClient(ctx context.Context, body CreateOAuthClientJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableOAuthClient Disable a third-party app
+	//
+	// The app can no longer ask for consent or exchange codes, and every token it was issued is revoked.
+	//
+	// Corresponds with DELETE /api/v1/admin/oauth/clients/{client_id} (the `DisableOAuthClient` operationId).
+	DisableOAuthClient(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// AdminListOrgs Every organisation with plan, counts, size, and status (platform admin)
 	//
 	// Corresponds with GET /api/v1/admin/orgs (the `AdminListOrgs` operationId).
@@ -11952,6 +12292,38 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /api/v1/admin/projects/{project_id}/move (the `MoveProject` operationId).
 	MoveProject(ctx context.Context, projectId openapi_types.UUID, body MoveProjectJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateIntegratorRolesWithBody Create integrator roles on a dedicated project's instance (platform admin)
+	//
+	// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+	// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+	// each to the project's owner role WITH ADMIN OPTION, so the owner
+	// can grant and manage them, for integrators whose migrations expect
+	// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+	// the project, so moves recreate them and the demotion check names
+	// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+	// recent re-authentication.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+	CreateIntegratorRolesWithBody(ctx context.Context, projectId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateIntegratorRoles Create integrator roles on a dedicated project's instance (platform admin)
+	//
+	// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+	// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+	// each to the project's owner role WITH ADMIN OPTION, so the owner
+	// can grant and manage them, for integrators whose migrations expect
+	// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+	// the project, so moves recreate them and the demotion check names
+	// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+	// recent re-authentication.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+	CreateIntegratorRoles(ctx context.Context, projectId openapi_types.UUID, body CreateIntegratorRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminLastReconciliation The latest reconciliation against each provider
 	//
@@ -12803,6 +13175,53 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/me/terms/accept (the `AcceptTerms` operationId).
 	AcceptTerms(ctx context.Context, body AcceptTermsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetTotpStatus Whether two-factor sign-in is on for you
+	//
+	// Corresponds with GET /api/v1/me/totp (the `GetTotpStatus` operationId).
+	GetTotpStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableTotpWithBody Turn two-factor sign-in off (password and a code); not for platform staff
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+	DisableTotpWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableTotp Turn two-factor sign-in off (password and a code); not for platform staff
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+	DisableTotp(ctx context.Context, body DisableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableTotpWithBody Turn two-factor sign-in on with the first code; recovery codes are shown once
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+	EnableTotpWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableTotp Turn two-factor sign-in on with the first code; recovery codes are shown once
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+	EnableTotp(ctx context.Context, body EnableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetupTotpWithBody Start turning two-factor sign-in on (password); returns the authenticator to scan
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+	SetupTotpWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetupTotp Start turning two-factor sign-in on (password); returns the authenticator to scan
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+	SetupTotp(ctx context.Context, body SetupTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListNodes Nodes and their agents
 	//
 	// Corresponds with GET /api/v1/nodes (the `ListNodes` operationId).
@@ -12895,6 +13314,140 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /api/v1/nodes/{id}/shared-cluster (the `CreateSharedCluster` operationId).
 	CreateSharedCluster(ctx context.Context, id NodeID, body CreateSharedClusterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetOAuthAuthorization What a third-party app asks for, for the consent page
+	//
+	// The first step of an app's OAuth 2.0 authorization code flow (RFC
+	// 6749 s4.1, PKCE required, RFC 7636). The consent page at
+	// `/oauth/authorize` calls this with the app's query, and shows the
+	// app's name, the scopes it asks for, and the organisations the user
+	// may grant for, each with its projects. A bad `client_id` or
+	// `redirect_uri` is a 400 and nothing is redirected (s4.1.2.1).
+	//
+	// Corresponds with GET /api/v1/oauth/authorize (the `GetOAuthAuthorization` operationId).
+	GetOAuthAuthorization(ctx context.Context, params *GetOAuthAuthorizationParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DecideOAuthAuthorizationWithBody Approve or deny an app's request
+	//
+	// Approving stores a single-use authorization code (10 minutes) for
+	// the chosen organisation, scopes (narrowed from the request, never
+	// widened), projects and expiry, and answers with the app's redirect
+	// URI carrying `code` and `state`. Denying answers with the redirect
+	// carrying `error=access_denied`. The browser then goes there.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+	DecideOAuthAuthorizationWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DecideOAuthAuthorization Approve or deny an app's request
+	//
+	// Approving stores a single-use authorization code (10 minutes) for
+	// the chosen organisation, scopes (narrowed from the request, never
+	// widened), projects and expiry, and answers with the app's redirect
+	// URI carrying `code` and `state`. Denying answers with the redirect
+	// carrying `error=access_denied`. The browser then goes there.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+	DecideOAuthAuthorization(ctx context.Context, body DecideOAuthAuthorizationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeOAuthTokenWithBody An app revokes a token it was issued
+	//
+	// RFC 7009: the client authenticates (`client_id` and `client_secret`
+	// in the body or as HTTP Basic auth) and names the token. Answers 200
+	// whether or not the token was still valid, or was ever this app's.
+	// Revoking elsewhere (Account, the organisation's tokens) has the
+	// same effect: the token answers `401 invalid_token` from then on.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+	RevokeOAuthTokenWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeOAuthToken An app revokes a token it was issued
+	//
+	// RFC 7009: the client authenticates (`client_id` and `client_secret`
+	// in the body or as HTTP Basic auth) and names the token. Answers 200
+	// whether or not the token was still valid, or was ever this app's.
+	// Revoking elsewhere (Account, the organisation's tokens) has the
+	// same effect: the token answers `401 invalid_token` from then on.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+	RevokeOAuthToken(ctx context.Context, body RevokeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeOAuthTokenWithFormdataBody An app revokes a token it was issued
+	//
+	// RFC 7009: the client authenticates (`client_id` and `client_secret`
+	// in the body or as HTTP Basic auth) and names the token. Answers 200
+	// whether or not the token was still valid, or was ever this app's.
+	// Revoking elsewhere (Account, the organisation's tokens) has the
+	// same effect: the token answers `401 invalid_token` from then on.
+	//
+	// Takes a body of the `application/x-www-form-urlencoded` content type.
+	//
+	// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+	RevokeOAuthTokenWithFormdataBody(ctx context.Context, body RevokeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExchangeOAuthTokenWithBody Exchange an authorization code for an API token
+	//
+	// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+	// the `code`, the same `redirect_uri`, the `client_id`, the
+	// `client_secret` (confidential clients; also accepted as HTTP Basic
+	// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+	// once: a second exchange fails with `invalid_grant` and revokes the
+	// token the first one issued (s4.1.2). The answer is an ordinary
+	// Xenibase API token (`xb_…`) for the user in the organisation they
+	// chose, with the granted scopes, projects and expiry. Errors are in
+	// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+	// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+	// an address tries too often.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+	ExchangeOAuthTokenWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExchangeOAuthToken Exchange an authorization code for an API token
+	//
+	// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+	// the `code`, the same `redirect_uri`, the `client_id`, the
+	// `client_secret` (confidential clients; also accepted as HTTP Basic
+	// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+	// once: a second exchange fails with `invalid_grant` and revokes the
+	// token the first one issued (s4.1.2). The answer is an ordinary
+	// Xenibase API token (`xb_…`) for the user in the organisation they
+	// chose, with the granted scopes, projects and expiry. Errors are in
+	// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+	// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+	// an address tries too often.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+	ExchangeOAuthToken(ctx context.Context, body ExchangeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExchangeOAuthTokenWithFormdataBody Exchange an authorization code for an API token
+	//
+	// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+	// the `code`, the same `redirect_uri`, the `client_id`, the
+	// `client_secret` (confidential clients; also accepted as HTTP Basic
+	// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+	// once: a second exchange fails with `invalid_grant` and revokes the
+	// token the first one issued (s4.1.2). The answer is an ordinary
+	// Xenibase API token (`xb_…`) for the user in the organisation they
+	// chose, with the granted scopes, projects and expiry. Errors are in
+	// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+	// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+	// an address tries too often.
+	//
+	// Takes a body of the `application/x-www-form-urlencoded` content type.
+	//
+	// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+	ExchangeOAuthTokenWithFormdataBody(ctx context.Context, body ExchangeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListOperations List operations, newest first
 	//
@@ -16394,6 +16947,82 @@ func (c *Client) PutMaintenanceWindow(ctx context.Context, body PutMaintenanceWi
 	return c.Client.Do(req)
 }
 
+// ListOAuthClients The third-party apps registered on this server
+//
+// Corresponds with GET /api/v1/admin/oauth/clients (the `ListOAuthClients` operationId).
+func (c *Client) ListOAuthClients(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListOAuthClientsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateOAuthClientWithBody Register a third-party app (OAuth client)
+//
+// Redirect URIs must be absolute `https://` URLs without a fragment
+// (`http://localhost` and `http://127.0.0.1` are allowed for
+// development); the authorize request must match one exactly. A
+// confidential client (the default) gets a secret, shown once.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+func (c *Client) CreateOAuthClientWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateOAuthClientRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateOAuthClient Register a third-party app (OAuth client)
+//
+// Redirect URIs must be absolute `https://` URLs without a fragment
+// (`http://localhost` and `http://127.0.0.1` are allowed for
+// development); the authorize request must match one exactly. A
+// confidential client (the default) gets a secret, shown once.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+func (c *Client) CreateOAuthClient(ctx context.Context, body CreateOAuthClientJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateOAuthClientRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableOAuthClient Disable a third-party app
+//
+// The app can no longer ask for consent or exchange codes, and every token it was issued is revoked.
+//
+// Corresponds with DELETE /api/v1/admin/oauth/clients/{client_id} (the `DisableOAuthClient` operationId).
+func (c *Client) DisableOAuthClient(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableOAuthClientRequest(c.Server, clientId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // AdminListOrgs Every organisation with plan, counts, size, and status (platform admin)
 //
 // Corresponds with GET /api/v1/admin/orgs (the `AdminListOrgs` operationId).
@@ -17229,6 +17858,58 @@ func (c *Client) MoveProjectWithBody(ctx context.Context, projectId openapi_type
 // Corresponds with POST /api/v1/admin/projects/{project_id}/move (the `MoveProject` operationId).
 func (c *Client) MoveProject(ctx context.Context, projectId openapi_types.UUID, body MoveProjectJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewMoveProjectRequest(c.Server, projectId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateIntegratorRolesWithBody Create integrator roles on a dedicated project's instance (platform admin)
+//
+// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+// each to the project's owner role WITH ADMIN OPTION, so the owner
+// can grant and manage them, for integrators whose migrations expect
+// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+// the project, so moves recreate them and the demotion check names
+// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+// recent re-authentication.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+func (c *Client) CreateIntegratorRolesWithBody(ctx context.Context, projectId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateIntegratorRolesRequestWithBody(c.Server, projectId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// CreateIntegratorRoles Create integrator roles on a dedicated project's instance (platform admin)
+//
+// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+// each to the project's owner role WITH ADMIN OPTION, so the owner
+// can grant and manage them, for integrators whose migrations expect
+// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+// the project, so moves recreate them and the demotion check names
+// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+// recent re-authentication.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+func (c *Client) CreateIntegratorRoles(ctx context.Context, projectId openapi_types.UUID, body CreateIntegratorRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateIntegratorRolesRequest(c.Server, projectId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19259,6 +19940,123 @@ func (c *Client) AcceptTerms(ctx context.Context, body AcceptTermsJSONRequestBod
 	return c.Client.Do(req)
 }
 
+// GetTotpStatus Whether two-factor sign-in is on for you
+//
+// Corresponds with GET /api/v1/me/totp (the `GetTotpStatus` operationId).
+func (c *Client) GetTotpStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetTotpStatusRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableTotpWithBody Turn two-factor sign-in off (password and a code); not for platform staff
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+func (c *Client) DisableTotpWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableTotpRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DisableTotp Turn two-factor sign-in off (password and a code); not for platform staff
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+func (c *Client) DisableTotp(ctx context.Context, body DisableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableTotpRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableTotpWithBody Turn two-factor sign-in on with the first code; recovery codes are shown once
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+func (c *Client) EnableTotpWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableTotpRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// EnableTotp Turn two-factor sign-in on with the first code; recovery codes are shown once
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+func (c *Client) EnableTotp(ctx context.Context, body EnableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableTotpRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetupTotpWithBody Start turning two-factor sign-in on (password); returns the authenticator to scan
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+func (c *Client) SetupTotpWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetupTotpRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetupTotp Start turning two-factor sign-in on (password); returns the authenticator to scan
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+func (c *Client) SetupTotp(ctx context.Context, body SetupTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetupTotpRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ListNodes Nodes and their agents
 //
 // Corresponds with GET /api/v1/nodes (the `ListNodes` operationId).
@@ -19492,6 +20290,230 @@ func (c *Client) CreateSharedClusterWithBody(ctx context.Context, id NodeID, con
 // Corresponds with POST /api/v1/nodes/{id}/shared-cluster (the `CreateSharedCluster` operationId).
 func (c *Client) CreateSharedCluster(ctx context.Context, id NodeID, body CreateSharedClusterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateSharedClusterRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetOAuthAuthorization What a third-party app asks for, for the consent page
+//
+// The first step of an app's OAuth 2.0 authorization code flow (RFC
+// 6749 s4.1, PKCE required, RFC 7636). The consent page at
+// `/oauth/authorize` calls this with the app's query, and shows the
+// app's name, the scopes it asks for, and the organisations the user
+// may grant for, each with its projects. A bad `client_id` or
+// `redirect_uri` is a 400 and nothing is redirected (s4.1.2.1).
+//
+// Corresponds with GET /api/v1/oauth/authorize (the `GetOAuthAuthorization` operationId).
+func (c *Client) GetOAuthAuthorization(ctx context.Context, params *GetOAuthAuthorizationParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetOAuthAuthorizationRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DecideOAuthAuthorizationWithBody Approve or deny an app's request
+//
+// Approving stores a single-use authorization code (10 minutes) for
+// the chosen organisation, scopes (narrowed from the request, never
+// widened), projects and expiry, and answers with the app's redirect
+// URI carrying `code` and `state`. Denying answers with the redirect
+// carrying `error=access_denied`. The browser then goes there.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+func (c *Client) DecideOAuthAuthorizationWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDecideOAuthAuthorizationRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// DecideOAuthAuthorization Approve or deny an app's request
+//
+// Approving stores a single-use authorization code (10 minutes) for
+// the chosen organisation, scopes (narrowed from the request, never
+// widened), projects and expiry, and answers with the app's redirect
+// URI carrying `code` and `state`. Denying answers with the redirect
+// carrying `error=access_denied`. The browser then goes there.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+func (c *Client) DecideOAuthAuthorization(ctx context.Context, body DecideOAuthAuthorizationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDecideOAuthAuthorizationRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeOAuthTokenWithBody An app revokes a token it was issued
+//
+// RFC 7009: the client authenticates (`client_id` and `client_secret`
+// in the body or as HTTP Basic auth) and names the token. Answers 200
+// whether or not the token was still valid, or was ever this app's.
+// Revoking elsewhere (Account, the organisation's tokens) has the
+// same effect: the token answers `401 invalid_token` from then on.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+func (c *Client) RevokeOAuthTokenWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeOAuthTokenRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeOAuthToken An app revokes a token it was issued
+//
+// RFC 7009: the client authenticates (`client_id` and `client_secret`
+// in the body or as HTTP Basic auth) and names the token. Answers 200
+// whether or not the token was still valid, or was ever this app's.
+// Revoking elsewhere (Account, the organisation's tokens) has the
+// same effect: the token answers `401 invalid_token` from then on.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+func (c *Client) RevokeOAuthToken(ctx context.Context, body RevokeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeOAuthTokenRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeOAuthTokenWithFormdataBody An app revokes a token it was issued
+//
+// RFC 7009: the client authenticates (`client_id` and `client_secret`
+// in the body or as HTTP Basic auth) and names the token. Answers 200
+// whether or not the token was still valid, or was ever this app's.
+// Revoking elsewhere (Account, the organisation's tokens) has the
+// same effect: the token answers `401 invalid_token` from then on.
+//
+// Takes a body of the `application/x-www-form-urlencoded` content type.
+//
+// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+func (c *Client) RevokeOAuthTokenWithFormdataBody(ctx context.Context, body RevokeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeOAuthTokenRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ExchangeOAuthTokenWithBody Exchange an authorization code for an API token
+//
+// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+// the `code`, the same `redirect_uri`, the `client_id`, the
+// `client_secret` (confidential clients; also accepted as HTTP Basic
+// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+// once: a second exchange fails with `invalid_grant` and revokes the
+// token the first one issued (s4.1.2). The answer is an ordinary
+// Xenibase API token (`xb_…`) for the user in the organisation they
+// chose, with the granted scopes, projects and expiry. Errors are in
+// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+// an address tries too often.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+func (c *Client) ExchangeOAuthTokenWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExchangeOAuthTokenRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ExchangeOAuthToken Exchange an authorization code for an API token
+//
+// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+// the `code`, the same `redirect_uri`, the `client_id`, the
+// `client_secret` (confidential clients; also accepted as HTTP Basic
+// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+// once: a second exchange fails with `invalid_grant` and revokes the
+// token the first one issued (s4.1.2). The answer is an ordinary
+// Xenibase API token (`xb_…`) for the user in the organisation they
+// chose, with the granted scopes, projects and expiry. Errors are in
+// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+// an address tries too often.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+func (c *Client) ExchangeOAuthToken(ctx context.Context, body ExchangeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExchangeOAuthTokenRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ExchangeOAuthTokenWithFormdataBody Exchange an authorization code for an API token
+//
+// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+// the `code`, the same `redirect_uri`, the `client_id`, the
+// `client_secret` (confidential clients; also accepted as HTTP Basic
+// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+// once: a second exchange fails with `invalid_grant` and revokes the
+// token the first one issued (s4.1.2). The answer is an ordinary
+// Xenibase API token (`xb_…`) for the user in the organisation they
+// chose, with the granted scopes, projects and expiry. Errors are in
+// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+// an address tries too often.
+//
+// Takes a body of the `application/x-www-form-urlencoded` content type.
+//
+// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+func (c *Client) ExchangeOAuthTokenWithFormdataBody(ctx context.Context, body ExchangeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExchangeOAuthTokenRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27026,6 +28048,107 @@ func NewPutMaintenanceWindowRequestWithBody(server string, contentType string, b
 	return req, nil
 }
 
+// NewListOAuthClientsRequest constructs an http.Request for the ListOAuthClients method
+func NewListOAuthClientsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/oauth/clients")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCreateOAuthClientRequest calls the generic CreateOAuthClient builder with application/json body
+func NewCreateOAuthClientRequest(server string, body CreateOAuthClientJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateOAuthClientRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewCreateOAuthClientRequestWithBody constructs an http.Request for the CreateOAuthClient method, with any body, and a specified content type
+func NewCreateOAuthClientRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/oauth/clients")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewDisableOAuthClientRequest constructs an http.Request for the DisableOAuthClient method
+func NewDisableOAuthClientRequest(server string, clientId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "client_id", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/oauth/clients/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewAdminListOrgsRequest constructs an http.Request for the AdminListOrgs method
 func NewAdminListOrgsRequest(server string, params *AdminListOrgsParams) (*http.Request, error) {
 	var err error
@@ -28337,6 +29460,53 @@ func NewMoveProjectRequestWithBody(server string, projectId openapi_types.UUID, 
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/admin/projects/%s/move", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewCreateIntegratorRolesRequest calls the generic CreateIntegratorRoles builder with application/json body
+func NewCreateIntegratorRolesRequest(server string, projectId openapi_types.UUID, body CreateIntegratorRolesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateIntegratorRolesRequestWithBody(server, projectId, "application/json", bodyReader)
+}
+
+// NewCreateIntegratorRolesRequestWithBody constructs an http.Request for the CreateIntegratorRoles method, with any body, and a specified content type
+func NewCreateIntegratorRolesRequestWithBody(server string, projectId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "project_id", projectId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/projects/%s/roles", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -31497,6 +32667,153 @@ func NewAcceptTermsRequestWithBody(server string, contentType string, body io.Re
 	return req, nil
 }
 
+// NewGetTotpStatusRequest constructs an http.Request for the GetTotpStatus method
+func NewGetTotpStatusRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/me/totp")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDisableTotpRequest calls the generic DisableTotp builder with application/json body
+func NewDisableTotpRequest(server string, body DisableTotpJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDisableTotpRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewDisableTotpRequestWithBody constructs an http.Request for the DisableTotp method, with any body, and a specified content type
+func NewDisableTotpRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/me/totp/disable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewEnableTotpRequest calls the generic EnableTotp builder with application/json body
+func NewEnableTotpRequest(server string, body EnableTotpJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnableTotpRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnableTotpRequestWithBody constructs an http.Request for the EnableTotp method, with any body, and a specified content type
+func NewEnableTotpRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/me/totp/enable")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewSetupTotpRequest calls the generic SetupTotp builder with application/json body
+func NewSetupTotpRequest(server string, body SetupTotpJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetupTotpRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewSetupTotpRequestWithBody constructs an http.Request for the SetupTotp method, with any body, and a specified content type
+func NewSetupTotpRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/me/totp/setup")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewListNodesRequest constructs an http.Request for the ListNodes method
 func NewListNodesRequest(server string) (*http.Request, error) {
 	var err error
@@ -31929,6 +33246,246 @@ func NewCreateSharedClusterRequestWithBody(server string, id NodeID, contentType
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/nodes/%s/shared-cluster", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetOAuthAuthorizationRequest constructs an http.Request for the GetOAuthAuthorization method
+func NewGetOAuthAuthorizationRequest(server string, params *GetOAuthAuthorizationParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/oauth/authorize")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "client_id", params.ClientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "redirect_uri", params.RedirectUri, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "scope", *params.Scope, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "state", *params.State, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "code_challenge", params.CodeChallenge, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "code_challenge_method", params.CodeChallengeMethod, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDecideOAuthAuthorizationRequest calls the generic DecideOAuthAuthorization builder with application/json body
+func NewDecideOAuthAuthorizationRequest(server string, body DecideOAuthAuthorizationJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDecideOAuthAuthorizationRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewDecideOAuthAuthorizationRequestWithBody constructs an http.Request for the DecideOAuthAuthorization method, with any body, and a specified content type
+func NewDecideOAuthAuthorizationRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/oauth/authorize")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRevokeOAuthTokenRequest calls the generic RevokeOAuthToken builder with application/json body
+func NewRevokeOAuthTokenRequest(server string, body RevokeOAuthTokenJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRevokeOAuthTokenRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewRevokeOAuthTokenRequestWithFormdataBody calls the generic RevokeOAuthToken builder with application/x-www-form-urlencoded body
+func NewRevokeOAuthTokenRequestWithFormdataBody(server string, body RevokeOAuthTokenFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRevokeOAuthTokenRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRevokeOAuthTokenRequestWithBody constructs an http.Request for the RevokeOAuthToken method, with any body, and a specified content type
+func NewRevokeOAuthTokenRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/oauth/revoke")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewExchangeOAuthTokenRequest calls the generic ExchangeOAuthToken builder with application/json body
+func NewExchangeOAuthTokenRequest(server string, body ExchangeOAuthTokenJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewExchangeOAuthTokenRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewExchangeOAuthTokenRequestWithFormdataBody calls the generic ExchangeOAuthToken builder with application/x-www-form-urlencoded body
+func NewExchangeOAuthTokenRequestWithFormdataBody(server string, body ExchangeOAuthTokenFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewExchangeOAuthTokenRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewExchangeOAuthTokenRequestWithBody constructs an http.Request for the ExchangeOAuthToken method, with any body, and a specified content type
+func NewExchangeOAuthTokenRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/oauth/token")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -42879,6 +44436,46 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with PUT /api/v1/admin/maintenance/window (the `PutMaintenanceWindow` operationId).
 	PutMaintenanceWindowWithResponse(ctx context.Context, body PutMaintenanceWindowJSONRequestBody, reqEditors ...RequestEditorFn) (*PutMaintenanceWindowResponse, error)
 
+	// ListOAuthClientsWithResponse The third-party apps registered on this server
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/admin/oauth/clients (the `ListOAuthClients` operationId).
+	ListOAuthClientsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListOAuthClientsResponse, error)
+
+	// CreateOAuthClientWithBodyWithResponse Register a third-party app (OAuth client)
+	//
+	// Redirect URIs must be absolute `https://` URLs without a fragment
+	// (`http://localhost` and `http://127.0.0.1` are allowed for
+	// development); the authorize request must match one exactly. A
+	// confidential client (the default) gets a secret, shown once.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+	CreateOAuthClientWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateOAuthClientResponse, error)
+
+	// CreateOAuthClientWithResponse Register a third-party app (OAuth client)
+	//
+	// Redirect URIs must be absolute `https://` URLs without a fragment
+	// (`http://localhost` and `http://127.0.0.1` are allowed for
+	// development); the authorize request must match one exactly. A
+	// confidential client (the default) gets a secret, shown once.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+	CreateOAuthClientWithResponse(ctx context.Context, body CreateOAuthClientJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateOAuthClientResponse, error)
+
+	// DisableOAuthClientWithResponse Disable a third-party app
+	//
+	// The app can no longer ask for consent or exchange codes, and every token it was issued is revoked.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /api/v1/admin/oauth/clients/{client_id} (the `DisableOAuthClient` operationId).
+	DisableOAuthClientWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*DisableOAuthClientResponse, error)
+
 	// AdminListOrgsWithResponse Every organisation with plan, counts, size, and status (platform admin)
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -43259,6 +44856,38 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /api/v1/admin/projects/{project_id}/move (the `MoveProject` operationId).
 	MoveProjectWithResponse(ctx context.Context, projectId openapi_types.UUID, body MoveProjectJSONRequestBody, reqEditors ...RequestEditorFn) (*MoveProjectResponse, error)
+
+	// CreateIntegratorRolesWithBodyWithResponse Create integrator roles on a dedicated project's instance (platform admin)
+	//
+	// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+	// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+	// each to the project's owner role WITH ADMIN OPTION, so the owner
+	// can grant and manage them, for integrators whose migrations expect
+	// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+	// the project, so moves recreate them and the demotion check names
+	// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+	// recent re-authentication.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+	CreateIntegratorRolesWithBodyWithResponse(ctx context.Context, projectId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateIntegratorRolesResponse, error)
+
+	// CreateIntegratorRolesWithResponse Create integrator roles on a dedicated project's instance (platform admin)
+	//
+	// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+	// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+	// each to the project's owner role WITH ADMIN OPTION, so the owner
+	// can grant and manage them, for integrators whose migrations expect
+	// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+	// the project, so moves recreate them and the demotion check names
+	// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+	// recent re-authentication.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+	CreateIntegratorRolesWithResponse(ctx context.Context, projectId openapi_types.UUID, body CreateIntegratorRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateIntegratorRolesResponse, error)
 
 	// AdminLastReconciliationWithResponse The latest reconciliation against each provider
 	//
@@ -44184,6 +45813,55 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /api/v1/me/terms/accept (the `AcceptTerms` operationId).
 	AcceptTermsWithResponse(ctx context.Context, body AcceptTermsJSONRequestBody, reqEditors ...RequestEditorFn) (*AcceptTermsResponse, error)
 
+	// GetTotpStatusWithResponse Whether two-factor sign-in is on for you
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/me/totp (the `GetTotpStatus` operationId).
+	GetTotpStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetTotpStatusResponse, error)
+
+	// DisableTotpWithBodyWithResponse Turn two-factor sign-in off (password and a code); not for platform staff
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+	DisableTotpWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DisableTotpResponse, error)
+
+	// DisableTotpWithResponse Turn two-factor sign-in off (password and a code); not for platform staff
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+	DisableTotpWithResponse(ctx context.Context, body DisableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*DisableTotpResponse, error)
+
+	// EnableTotpWithBodyWithResponse Turn two-factor sign-in on with the first code; recovery codes are shown once
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+	EnableTotpWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableTotpResponse, error)
+
+	// EnableTotpWithResponse Turn two-factor sign-in on with the first code; recovery codes are shown once
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+	EnableTotpWithResponse(ctx context.Context, body EnableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableTotpResponse, error)
+
+	// SetupTotpWithBodyWithResponse Start turning two-factor sign-in on (password); returns the authenticator to scan
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+	SetupTotpWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetupTotpResponse, error)
+
+	// SetupTotpWithResponse Start turning two-factor sign-in on (password); returns the authenticator to scan
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+	SetupTotpWithResponse(ctx context.Context, body SetupTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*SetupTotpResponse, error)
+
 	// ListNodesWithResponse Nodes and their agents
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -44290,6 +45968,142 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /api/v1/nodes/{id}/shared-cluster (the `CreateSharedCluster` operationId).
 	CreateSharedClusterWithResponse(ctx context.Context, id NodeID, body CreateSharedClusterJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSharedClusterResponse, error)
+
+	// GetOAuthAuthorizationWithResponse What a third-party app asks for, for the consent page
+	//
+	// The first step of an app's OAuth 2.0 authorization code flow (RFC
+	// 6749 s4.1, PKCE required, RFC 7636). The consent page at
+	// `/oauth/authorize` calls this with the app's query, and shows the
+	// app's name, the scopes it asks for, and the organisations the user
+	// may grant for, each with its projects. A bad `client_id` or
+	// `redirect_uri` is a 400 and nothing is redirected (s4.1.2.1).
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/oauth/authorize (the `GetOAuthAuthorization` operationId).
+	GetOAuthAuthorizationWithResponse(ctx context.Context, params *GetOAuthAuthorizationParams, reqEditors ...RequestEditorFn) (*GetOAuthAuthorizationResponse, error)
+
+	// DecideOAuthAuthorizationWithBodyWithResponse Approve or deny an app's request
+	//
+	// Approving stores a single-use authorization code (10 minutes) for
+	// the chosen organisation, scopes (narrowed from the request, never
+	// widened), projects and expiry, and answers with the app's redirect
+	// URI carrying `code` and `state`. Denying answers with the redirect
+	// carrying `error=access_denied`. The browser then goes there.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+	DecideOAuthAuthorizationWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DecideOAuthAuthorizationResponse, error)
+
+	// DecideOAuthAuthorizationWithResponse Approve or deny an app's request
+	//
+	// Approving stores a single-use authorization code (10 minutes) for
+	// the chosen organisation, scopes (narrowed from the request, never
+	// widened), projects and expiry, and answers with the app's redirect
+	// URI carrying `code` and `state`. Denying answers with the redirect
+	// carrying `error=access_denied`. The browser then goes there.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+	DecideOAuthAuthorizationWithResponse(ctx context.Context, body DecideOAuthAuthorizationJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideOAuthAuthorizationResponse, error)
+
+	// RevokeOAuthTokenWithBodyWithResponse An app revokes a token it was issued
+	//
+	// RFC 7009: the client authenticates (`client_id` and `client_secret`
+	// in the body or as HTTP Basic auth) and names the token. Answers 200
+	// whether or not the token was still valid, or was ever this app's.
+	// Revoking elsewhere (Account, the organisation's tokens) has the
+	// same effect: the token answers `401 invalid_token` from then on.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+	RevokeOAuthTokenWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeOAuthTokenResponse, error)
+
+	// RevokeOAuthTokenWithResponse An app revokes a token it was issued
+	//
+	// RFC 7009: the client authenticates (`client_id` and `client_secret`
+	// in the body or as HTTP Basic auth) and names the token. Answers 200
+	// whether or not the token was still valid, or was ever this app's.
+	// Revoking elsewhere (Account, the organisation's tokens) has the
+	// same effect: the token answers `401 invalid_token` from then on.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+	RevokeOAuthTokenWithResponse(ctx context.Context, body RevokeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeOAuthTokenResponse, error)
+
+	// RevokeOAuthTokenWithFormdataBodyWithResponse An app revokes a token it was issued
+	//
+	// RFC 7009: the client authenticates (`client_id` and `client_secret`
+	// in the body or as HTTP Basic auth) and names the token. Answers 200
+	// whether or not the token was still valid, or was ever this app's.
+	// Revoking elsewhere (Account, the organisation's tokens) has the
+	// same effect: the token answers `401 invalid_token` from then on.
+	//
+	// Takes a body of the `application/x-www-form-urlencoded` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+	RevokeOAuthTokenWithFormdataBodyWithResponse(ctx context.Context, body RevokeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*RevokeOAuthTokenResponse, error)
+
+	// ExchangeOAuthTokenWithBodyWithResponse Exchange an authorization code for an API token
+	//
+	// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+	// the `code`, the same `redirect_uri`, the `client_id`, the
+	// `client_secret` (confidential clients; also accepted as HTTP Basic
+	// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+	// once: a second exchange fails with `invalid_grant` and revokes the
+	// token the first one issued (s4.1.2). The answer is an ordinary
+	// Xenibase API token (`xb_…`) for the user in the organisation they
+	// chose, with the granted scopes, projects and expiry. Errors are in
+	// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+	// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+	// an address tries too often.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+	ExchangeOAuthTokenWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExchangeOAuthTokenResponse, error)
+
+	// ExchangeOAuthTokenWithResponse Exchange an authorization code for an API token
+	//
+	// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+	// the `code`, the same `redirect_uri`, the `client_id`, the
+	// `client_secret` (confidential clients; also accepted as HTTP Basic
+	// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+	// once: a second exchange fails with `invalid_grant` and revokes the
+	// token the first one issued (s4.1.2). The answer is an ordinary
+	// Xenibase API token (`xb_…`) for the user in the organisation they
+	// chose, with the granted scopes, projects and expiry. Errors are in
+	// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+	// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+	// an address tries too often.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+	ExchangeOAuthTokenWithResponse(ctx context.Context, body ExchangeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*ExchangeOAuthTokenResponse, error)
+
+	// ExchangeOAuthTokenWithFormdataBodyWithResponse Exchange an authorization code for an API token
+	//
+	// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+	// the `code`, the same `redirect_uri`, the `client_id`, the
+	// `client_secret` (confidential clients; also accepted as HTTP Basic
+	// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+	// once: a second exchange fails with `invalid_grant` and revokes the
+	// token the first one issued (s4.1.2). The answer is an ordinary
+	// Xenibase API token (`xb_…`) for the user in the organisation they
+	// chose, with the granted scopes, projects and expiry. Errors are in
+	// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+	// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+	// an address tries too often.
+	//
+	// Takes a body of the `application/x-www-form-urlencoded` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+	ExchangeOAuthTokenWithFormdataBodyWithResponse(ctx context.Context, body ExchangeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*ExchangeOAuthTokenResponse, error)
 
 	// ListOperationsWithResponse List operations, newest first
 	//
@@ -49308,6 +51122,143 @@ func (r PutMaintenanceWindowResponse) ContentType() string {
 	return ""
 }
 
+type ListOAuthClientsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *OAuthClientList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListOAuthClientsResponse) GetJSON200() *OAuthClientList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListOAuthClientsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListOAuthClientsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListOAuthClientsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListOAuthClientsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListOAuthClientsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CreateOAuthClientResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *OAuthClientCreated
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r CreateOAuthClientResponse) GetJSON201() *OAuthClientCreated {
+	return r.JSON201
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CreateOAuthClientResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CreateOAuthClientResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateOAuthClientResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateOAuthClientResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CreateOAuthClientResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableOAuthClientResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableOAuthClientResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableOAuthClientResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableOAuthClientResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableOAuthClientResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableOAuthClientResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type AdminListOrgsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -50814,6 +52765,54 @@ func (r MoveProjectResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r MoveProjectResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CreateIntegratorRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *IntegratorRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CreateIntegratorRolesResponse) GetJSON200() *IntegratorRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r CreateIntegratorRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r CreateIntegratorRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateIntegratorRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateIntegratorRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CreateIntegratorRolesResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -54440,6 +56439,191 @@ func (r AcceptTermsResponse) ContentType() string {
 	return ""
 }
 
+type GetTotpStatusResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *TotpStatus
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetTotpStatusResponse) GetJSON200() *TotpStatus {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetTotpStatusResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetTotpStatusResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetTotpStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetTotpStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetTotpStatusResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DisableTotpResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DisableTotpResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DisableTotpResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableTotpResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableTotpResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DisableTotpResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type EnableTotpResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *RecoveryCodes
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r EnableTotpResponse) GetJSON200() *RecoveryCodes {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r EnableTotpResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r EnableTotpResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableTotpResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableTotpResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r EnableTotpResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetupTotpResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *TotpSetup
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetupTotpResponse) GetJSON200() *TotpSetup {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetupTotpResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetupTotpResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetupTotpResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetupTotpResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetupTotpResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListNodesResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -54955,6 +57139,191 @@ func (r CreateSharedClusterResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r CreateSharedClusterResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetOAuthAuthorizationResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *OAuthAuthorizeInfo
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetOAuthAuthorizationResponse) GetJSON200() *OAuthAuthorizeInfo {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetOAuthAuthorizationResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetOAuthAuthorizationResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetOAuthAuthorizationResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetOAuthAuthorizationResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetOAuthAuthorizationResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type DecideOAuthAuthorizationResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *OAuthRedirect
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r DecideOAuthAuthorizationResponse) GetJSON200() *OAuthRedirect {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r DecideOAuthAuthorizationResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r DecideOAuthAuthorizationResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r DecideOAuthAuthorizationResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DecideOAuthAuthorizationResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r DecideOAuthAuthorizationResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type RevokeOAuthTokenResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *OAuthError
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r RevokeOAuthTokenResponse) GetJSONDefault() *OAuthError {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r RevokeOAuthTokenResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeOAuthTokenResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeOAuthTokenResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RevokeOAuthTokenResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ExchangeOAuthTokenResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *OAuthTokenResponse
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *OAuthError
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ExchangeOAuthTokenResponse) GetJSON200() *OAuthTokenResponse {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ExchangeOAuthTokenResponse) GetJSONDefault() *OAuthError {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ExchangeOAuthTokenResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ExchangeOAuthTokenResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExchangeOAuthTokenResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ExchangeOAuthTokenResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -66616,6 +68985,70 @@ func (c *ClientWithResponses) PutMaintenanceWindowWithResponse(ctx context.Conte
 	return ParsePutMaintenanceWindowResponse(rsp)
 }
 
+// ListOAuthClientsWithResponse The third-party apps registered on this server
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/admin/oauth/clients (the `ListOAuthClients` operationId).
+func (c *ClientWithResponses) ListOAuthClientsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListOAuthClientsResponse, error) {
+	rsp, err := c.ListOAuthClients(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListOAuthClientsResponse(rsp)
+}
+
+// CreateOAuthClientWithBodyWithResponse Register a third-party app (OAuth client)
+//
+// Redirect URIs must be absolute `https://` URLs without a fragment
+// (`http://localhost` and `http://127.0.0.1` are allowed for
+// development); the authorize request must match one exactly. A
+// confidential client (the default) gets a secret, shown once.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+func (c *ClientWithResponses) CreateOAuthClientWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateOAuthClientResponse, error) {
+	rsp, err := c.CreateOAuthClientWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateOAuthClientResponse(rsp)
+}
+
+// CreateOAuthClientWithResponse Register a third-party app (OAuth client)
+//
+// Redirect URIs must be absolute `https://` URLs without a fragment
+// (`http://localhost` and `http://127.0.0.1` are allowed for
+// development); the authorize request must match one exactly. A
+// confidential client (the default) gets a secret, shown once.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/oauth/clients (the `CreateOAuthClient` operationId).
+func (c *ClientWithResponses) CreateOAuthClientWithResponse(ctx context.Context, body CreateOAuthClientJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateOAuthClientResponse, error) {
+	rsp, err := c.CreateOAuthClient(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateOAuthClientResponse(rsp)
+}
+
+// DisableOAuthClientWithResponse Disable a third-party app
+//
+// The app can no longer ask for consent or exchange codes, and every token it was issued is revoked.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /api/v1/admin/oauth/clients/{client_id} (the `DisableOAuthClient` operationId).
+func (c *ClientWithResponses) DisableOAuthClientWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*DisableOAuthClientResponse, error) {
+	rsp, err := c.DisableOAuthClient(ctx, clientId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableOAuthClientResponse(rsp)
+}
+
 // AdminListOrgsWithResponse Every organisation with plan, counts, size, and status (platform admin)
 //
 // Returns a wrapper object for the known response body format(s).
@@ -67289,6 +69722,50 @@ func (c *ClientWithResponses) MoveProjectWithResponse(ctx context.Context, proje
 		return nil, err
 	}
 	return ParseMoveProjectResponse(rsp)
+}
+
+// CreateIntegratorRolesWithBodyWithResponse Create integrator roles on a dedicated project's instance (platform admin)
+//
+// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+// each to the project's owner role WITH ADMIN OPTION, so the owner
+// can grant and manage them, for integrators whose migrations expect
+// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+// the project, so moves recreate them and the demotion check names
+// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+// recent re-authentication.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+func (c *ClientWithResponses) CreateIntegratorRolesWithBodyWithResponse(ctx context.Context, projectId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateIntegratorRolesResponse, error) {
+	rsp, err := c.CreateIntegratorRolesWithBody(ctx, projectId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateIntegratorRolesResponse(rsp)
+}
+
+// CreateIntegratorRolesWithResponse Create integrator roles on a dedicated project's instance (platform admin)
+//
+// Creates the named NOLOGIN roles (NOSUPERUSER NOCREATEDB NOCREATEROLE
+// NOREPLICATION NOBYPASSRLS) as the instance's superuser and grants
+// each to the project's owner role WITH ADMIN OPTION, so the owner
+// can grant and manage them, for integrators whose migrations expect
+// them (Taskiem's `taskiem_app` and `taskiem_dispatch`). Recorded on
+// the project, so moves recreate them and the demotion check names
+// them. Dedicated projects only (`409 conflict` otherwise). Needs a
+// recent re-authentication.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/projects/{project_id}/roles (the `CreateIntegratorRoles` operationId).
+func (c *ClientWithResponses) CreateIntegratorRolesWithResponse(ctx context.Context, projectId openapi_types.UUID, body CreateIntegratorRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateIntegratorRolesResponse, error) {
+	rsp, err := c.CreateIntegratorRoles(ctx, projectId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateIntegratorRolesResponse(rsp)
 }
 
 // AdminLastReconciliationWithResponse The latest reconciliation against each provider
@@ -68917,6 +71394,97 @@ func (c *ClientWithResponses) AcceptTermsWithResponse(ctx context.Context, body 
 	return ParseAcceptTermsResponse(rsp)
 }
 
+// GetTotpStatusWithResponse Whether two-factor sign-in is on for you
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/me/totp (the `GetTotpStatus` operationId).
+func (c *ClientWithResponses) GetTotpStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetTotpStatusResponse, error) {
+	rsp, err := c.GetTotpStatus(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetTotpStatusResponse(rsp)
+}
+
+// DisableTotpWithBodyWithResponse Turn two-factor sign-in off (password and a code); not for platform staff
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+func (c *ClientWithResponses) DisableTotpWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DisableTotpResponse, error) {
+	rsp, err := c.DisableTotpWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableTotpResponse(rsp)
+}
+
+// DisableTotpWithResponse Turn two-factor sign-in off (password and a code); not for platform staff
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/me/totp/disable (the `DisableTotp` operationId).
+func (c *ClientWithResponses) DisableTotpWithResponse(ctx context.Context, body DisableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*DisableTotpResponse, error) {
+	rsp, err := c.DisableTotp(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableTotpResponse(rsp)
+}
+
+// EnableTotpWithBodyWithResponse Turn two-factor sign-in on with the first code; recovery codes are shown once
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+func (c *ClientWithResponses) EnableTotpWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableTotpResponse, error) {
+	rsp, err := c.EnableTotpWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableTotpResponse(rsp)
+}
+
+// EnableTotpWithResponse Turn two-factor sign-in on with the first code; recovery codes are shown once
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/me/totp/enable (the `EnableTotp` operationId).
+func (c *ClientWithResponses) EnableTotpWithResponse(ctx context.Context, body EnableTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableTotpResponse, error) {
+	rsp, err := c.EnableTotp(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableTotpResponse(rsp)
+}
+
+// SetupTotpWithBodyWithResponse Start turning two-factor sign-in on (password); returns the authenticator to scan
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+func (c *ClientWithResponses) SetupTotpWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetupTotpResponse, error) {
+	rsp, err := c.SetupTotpWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetupTotpResponse(rsp)
+}
+
+// SetupTotpWithResponse Start turning two-factor sign-in on (password); returns the authenticator to scan
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/me/totp/setup (the `SetupTotp` operationId).
+func (c *ClientWithResponses) SetupTotpWithResponse(ctx context.Context, body SetupTotpJSONRequestBody, reqEditors ...RequestEditorFn) (*SetupTotpResponse, error) {
+	rsp, err := c.SetupTotp(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetupTotpResponse(rsp)
+}
+
 // ListNodesWithResponse Nodes and their agents
 //
 // Returns a wrapper object for the known response body format(s).
@@ -69112,6 +71680,196 @@ func (c *ClientWithResponses) CreateSharedClusterWithResponse(ctx context.Contex
 		return nil, err
 	}
 	return ParseCreateSharedClusterResponse(rsp)
+}
+
+// GetOAuthAuthorizationWithResponse What a third-party app asks for, for the consent page
+//
+// The first step of an app's OAuth 2.0 authorization code flow (RFC
+// 6749 s4.1, PKCE required, RFC 7636). The consent page at
+// `/oauth/authorize` calls this with the app's query, and shows the
+// app's name, the scopes it asks for, and the organisations the user
+// may grant for, each with its projects. A bad `client_id` or
+// `redirect_uri` is a 400 and nothing is redirected (s4.1.2.1).
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/oauth/authorize (the `GetOAuthAuthorization` operationId).
+func (c *ClientWithResponses) GetOAuthAuthorizationWithResponse(ctx context.Context, params *GetOAuthAuthorizationParams, reqEditors ...RequestEditorFn) (*GetOAuthAuthorizationResponse, error) {
+	rsp, err := c.GetOAuthAuthorization(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetOAuthAuthorizationResponse(rsp)
+}
+
+// DecideOAuthAuthorizationWithBodyWithResponse Approve or deny an app's request
+//
+// Approving stores a single-use authorization code (10 minutes) for
+// the chosen organisation, scopes (narrowed from the request, never
+// widened), projects and expiry, and answers with the app's redirect
+// URI carrying `code` and `state`. Denying answers with the redirect
+// carrying `error=access_denied`. The browser then goes there.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+func (c *ClientWithResponses) DecideOAuthAuthorizationWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DecideOAuthAuthorizationResponse, error) {
+	rsp, err := c.DecideOAuthAuthorizationWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDecideOAuthAuthorizationResponse(rsp)
+}
+
+// DecideOAuthAuthorizationWithResponse Approve or deny an app's request
+//
+// Approving stores a single-use authorization code (10 minutes) for
+// the chosen organisation, scopes (narrowed from the request, never
+// widened), projects and expiry, and answers with the app's redirect
+// URI carrying `code` and `state`. Denying answers with the redirect
+// carrying `error=access_denied`. The browser then goes there.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/authorize (the `DecideOAuthAuthorization` operationId).
+func (c *ClientWithResponses) DecideOAuthAuthorizationWithResponse(ctx context.Context, body DecideOAuthAuthorizationJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideOAuthAuthorizationResponse, error) {
+	rsp, err := c.DecideOAuthAuthorization(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDecideOAuthAuthorizationResponse(rsp)
+}
+
+// RevokeOAuthTokenWithBodyWithResponse An app revokes a token it was issued
+//
+// RFC 7009: the client authenticates (`client_id` and `client_secret`
+// in the body or as HTTP Basic auth) and names the token. Answers 200
+// whether or not the token was still valid, or was ever this app's.
+// Revoking elsewhere (Account, the organisation's tokens) has the
+// same effect: the token answers `401 invalid_token` from then on.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+func (c *ClientWithResponses) RevokeOAuthTokenWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeOAuthTokenResponse, error) {
+	rsp, err := c.RevokeOAuthTokenWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeOAuthTokenResponse(rsp)
+}
+
+// RevokeOAuthTokenWithResponse An app revokes a token it was issued
+//
+// RFC 7009: the client authenticates (`client_id` and `client_secret`
+// in the body or as HTTP Basic auth) and names the token. Answers 200
+// whether or not the token was still valid, or was ever this app's.
+// Revoking elsewhere (Account, the organisation's tokens) has the
+// same effect: the token answers `401 invalid_token` from then on.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+func (c *ClientWithResponses) RevokeOAuthTokenWithResponse(ctx context.Context, body RevokeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeOAuthTokenResponse, error) {
+	rsp, err := c.RevokeOAuthToken(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeOAuthTokenResponse(rsp)
+}
+
+// RevokeOAuthTokenWithFormdataBodyWithResponse An app revokes a token it was issued
+//
+// RFC 7009: the client authenticates (`client_id` and `client_secret`
+// in the body or as HTTP Basic auth) and names the token. Answers 200
+// whether or not the token was still valid, or was ever this app's.
+// Revoking elsewhere (Account, the organisation's tokens) has the
+// same effect: the token answers `401 invalid_token` from then on.
+//
+// Takes a body of the `application/x-www-form-urlencoded` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/revoke (the `RevokeOAuthToken` operationId).
+func (c *ClientWithResponses) RevokeOAuthTokenWithFormdataBodyWithResponse(ctx context.Context, body RevokeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*RevokeOAuthTokenResponse, error) {
+	rsp, err := c.RevokeOAuthTokenWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeOAuthTokenResponse(rsp)
+}
+
+// ExchangeOAuthTokenWithBodyWithResponse Exchange an authorization code for an API token
+//
+// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+// the `code`, the same `redirect_uri`, the `client_id`, the
+// `client_secret` (confidential clients; also accepted as HTTP Basic
+// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+// once: a second exchange fails with `invalid_grant` and revokes the
+// token the first one issued (s4.1.2). The answer is an ordinary
+// Xenibase API token (`xb_…`) for the user in the organisation they
+// chose, with the granted scopes, projects and expiry. Errors are in
+// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+// an address tries too often.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+func (c *ClientWithResponses) ExchangeOAuthTokenWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExchangeOAuthTokenResponse, error) {
+	rsp, err := c.ExchangeOAuthTokenWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExchangeOAuthTokenResponse(rsp)
+}
+
+// ExchangeOAuthTokenWithResponse Exchange an authorization code for an API token
+//
+// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+// the `code`, the same `redirect_uri`, the `client_id`, the
+// `client_secret` (confidential clients; also accepted as HTTP Basic
+// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+// once: a second exchange fails with `invalid_grant` and revokes the
+// token the first one issued (s4.1.2). The answer is an ordinary
+// Xenibase API token (`xb_…`) for the user in the organisation they
+// chose, with the granted scopes, projects and expiry. Errors are in
+// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+// an address tries too often.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+func (c *ClientWithResponses) ExchangeOAuthTokenWithResponse(ctx context.Context, body ExchangeOAuthTokenJSONRequestBody, reqEditors ...RequestEditorFn) (*ExchangeOAuthTokenResponse, error) {
+	rsp, err := c.ExchangeOAuthToken(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExchangeOAuthTokenResponse(rsp)
+}
+
+// ExchangeOAuthTokenWithFormdataBodyWithResponse Exchange an authorization code for an API token
+//
+// RFC 6749 s4.1.3 with PKCE (s7636 s4.5): `grant_type=authorization_code`,
+// the `code`, the same `redirect_uri`, the `client_id`, the
+// `client_secret` (confidential clients; also accepted as HTTP Basic
+// auth) and the `code_verifier`. Form-encoded or JSON. A code works
+// once: a second exchange fails with `invalid_grant` and revokes the
+// token the first one issued (s4.1.2). The answer is an ordinary
+// Xenibase API token (`xb_…`) for the user in the organisation they
+// chose, with the granted scopes, projects and expiry. Errors are in
+// OAuth's shape (s5.2): `invalid_request`, `invalid_client` (401),
+// `invalid_grant`, `unsupported_grant_type`; `slow_down` (429) when
+// an address tries too often.
+//
+// Takes a body of the `application/x-www-form-urlencoded` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/oauth/token (the `ExchangeOAuthToken` operationId).
+func (c *ClientWithResponses) ExchangeOAuthTokenWithFormdataBodyWithResponse(ctx context.Context, body ExchangeOAuthTokenFormdataRequestBody, reqEditors ...RequestEditorFn) (*ExchangeOAuthTokenResponse, error) {
+	rsp, err := c.ExchangeOAuthTokenWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExchangeOAuthTokenResponse(rsp)
 }
 
 // ListOperationsWithResponse List operations, newest first
@@ -75305,6 +78063,101 @@ func ParsePutMaintenanceWindowResponse(rsp *http.Response) (*PutMaintenanceWindo
 	return response, nil
 }
 
+// ParseListOAuthClientsResponse parses an HTTP response from a ListOAuthClientsWithResponse call
+func ParseListOAuthClientsResponse(rsp *http.Response) (*ListOAuthClientsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListOAuthClientsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OAuthClientList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateOAuthClientResponse parses an HTTP response from a CreateOAuthClientWithResponse call
+func ParseCreateOAuthClientResponse(rsp *http.Response) (*CreateOAuthClientResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateOAuthClientResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest OAuthClientCreated
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableOAuthClientResponse parses an HTTP response from a DisableOAuthClientWithResponse call
+func ParseDisableOAuthClientResponse(rsp *http.Response) (*DisableOAuthClientResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableOAuthClientResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseAdminListOrgsResponse parses an HTTP response from a AdminListOrgsWithResponse call
 func ParseAdminListOrgsResponse(rsp *http.Response) (*AdminListOrgsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -76325,6 +79178,39 @@ func ParseMoveProjectResponse(rsp *http.Response) (*MoveProjectResponse, error) 
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateIntegratorRolesResponse parses an HTTP response from a CreateIntegratorRolesWithResponse call
+func ParseCreateIntegratorRolesResponse(rsp *http.Response) (*CreateIntegratorRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateIntegratorRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest IntegratorRoles
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -78842,6 +81728,134 @@ func ParseAcceptTermsResponse(rsp *http.Response) (*AcceptTermsResponse, error) 
 	return response, nil
 }
 
+// ParseGetTotpStatusResponse parses an HTTP response from a GetTotpStatusWithResponse call
+func ParseGetTotpStatusResponse(rsp *http.Response) (*GetTotpStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetTotpStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TotpStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableTotpResponse parses an HTTP response from a DisableTotpWithResponse call
+func ParseDisableTotpResponse(rsp *http.Response) (*DisableTotpResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableTotpResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableTotpResponse parses an HTTP response from a EnableTotpWithResponse call
+func ParseEnableTotpResponse(rsp *http.Response) (*EnableTotpResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableTotpResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RecoveryCodes
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetupTotpResponse parses an HTTP response from a SetupTotpWithResponse call
+func ParseSetupTotpResponse(rsp *http.Response) (*SetupTotpResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetupTotpResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TotpSetup
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListNodesResponse parses an HTTP response from a ListNodesWithResponse call
 func ParseListNodesResponse(rsp *http.Response) (*ListNodesResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -79191,6 +82205,134 @@ func ParseCreateSharedClusterResponse(rsp *http.Response) (*CreateSharedClusterR
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetOAuthAuthorizationResponse parses an HTTP response from a GetOAuthAuthorizationWithResponse call
+func ParseGetOAuthAuthorizationResponse(rsp *http.Response) (*GetOAuthAuthorizationResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetOAuthAuthorizationResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OAuthAuthorizeInfo
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDecideOAuthAuthorizationResponse parses an HTTP response from a DecideOAuthAuthorizationWithResponse call
+func ParseDecideOAuthAuthorizationResponse(rsp *http.Response) (*DecideOAuthAuthorizationResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DecideOAuthAuthorizationResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OAuthRedirect
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeOAuthTokenResponse parses an HTTP response from a RevokeOAuthTokenWithResponse call
+func ParseRevokeOAuthTokenResponse(rsp *http.Response) (*RevokeOAuthTokenResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeOAuthTokenResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest OAuthError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExchangeOAuthTokenResponse parses an HTTP response from a ExchangeOAuthTokenWithResponse call
+func ParseExchangeOAuthTokenResponse(rsp *http.Response) (*ExchangeOAuthTokenResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExchangeOAuthTokenResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OAuthTokenResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest OAuthError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

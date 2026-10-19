@@ -196,7 +196,10 @@ type CreateParams struct {
 	Projects []uuid.UUID // nil: unrestricted
 	// ExpiresIn defaults to DefaultExpiry (capped by the platform maximum).
 	ExpiresIn time.Duration
-	Via       string // ui, device, api
+	Via       string // ui, device, api, oauth
+	// OAuthClientID is the third-party app the token is issued to (Via
+	// oauth), shown with the token as the app's name.
+	OAuthClientID *uuid.UUID
 }
 
 // Created is a new token: Secret is shown once.
@@ -244,7 +247,7 @@ func (s *Service) create(ctx context.Context, q *store.Queries, p CreateParams) 
 	}
 	row, err := q.InsertAPIToken(ctx, store.InsertAPITokenParams{
 		UserID: p.UserID, OrgID: p.OrgID, Name: name, TokenHash: Hash(secret), Prefix: secret[:displayLen],
-		Scopes: scopes, ProjectIds: p.Projects, ExpiresAt: s.cfg.Now().Add(exp), CreatedVia: via,
+		Scopes: scopes, ProjectIds: p.Projects, ExpiresAt: s.cfg.Now().Add(exp), CreatedVia: via, OauthClientID: p.OAuthClientID,
 	})
 	if err != nil {
 		return Created{}, err
@@ -327,20 +330,22 @@ func Hash(secret string) string {
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // newSecret returns "xb_" + 32 random bytes in base62 (43 characters).
-func newSecret() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	n := new(big.Int).SetBytes(b)
+func newSecret() (string, error) { return randomBase62(Prefix, 43) }
+
+// randomBase62 returns prefix followed by n uniformly random base62
+// characters.
+func randomBase62(prefix string, n int) (string, error) {
 	base := big.NewInt(62)
-	var out []byte
-	mod := new(big.Int)
-	for range 43 {
-		n.DivMod(n, base, mod)
-		out = append(out, base62[mod.Int64()])
+	out := make([]byte, 0, len(prefix)+n)
+	out = append(out, prefix...)
+	for range n {
+		i, err := rand.Int(rand.Reader, base)
+		if err != nil {
+			return "", err
+		}
+		out = append(out, base62[i.Int64()])
 	}
-	return Prefix + string(out), nil
+	return string(out), nil
 }
 
 // ---- Email ------------------------------------------------------------------
@@ -381,7 +386,7 @@ func (s *Service) notifyCreated(ctx context.Context, q *store.Queries, t store.A
 }
 
 // Sweep emails owners of tokens expiring within a week and clears expired
-// device logins.
+// device logins and authorization codes.
 func (s *Service) Sweep(ctx context.Context) error {
 	q := store.New(s.db)
 	now := s.cfg.Now()
@@ -404,7 +409,10 @@ func (s *Service) Sweep(ctx context.Context) error {
 			return err
 		}
 	}
-	_, err = q.DeleteExpiredDeviceRequests(ctx)
+	if _, err := q.DeleteExpiredDeviceRequests(ctx); err != nil {
+		return err
+	}
+	_, err = q.DeleteExpiredOAuthCodes(ctx)
 	return err
 }
 

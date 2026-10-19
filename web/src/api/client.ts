@@ -1,4 +1,5 @@
 import type { components } from "./schema";
+import type { OAuthAuthorizeSearch } from "../lib/oauth";
 
 type S = components["schemas"];
 export type Version = S["Version"];
@@ -186,6 +187,8 @@ export type PoolerHosts = S["PoolerHosts"];
 export type TokenScope = S["TokenScope"];
 export type CreatedToken = S["CreatedToken"];
 export type DeviceRequest = S["DeviceRequest"];
+export type OAuthAuthorizeInfo = S["OAuthAuthorizeInfo"];
+export type OAuthClient = S["OAuthClient"];
 export type ApiErrorBody = S["Error"];
 export type SessionState = S["SessionState"];
 export type Project = S["Project"];
@@ -468,8 +471,15 @@ export const api = {
     request<LoginChallenge>("POST", "/api/v1/auth/login", b),
   totp: (b: { challenge_id: string; code: string }) =>
     request<SessionState>("POST", "/api/v1/auth/totp", b),
-  reauth: (b: { password: string; code: string }) =>
+  reauth: (b: { password: string; code?: string }) =>
     request<void>("POST", "/api/v1/auth/reauth", b),
+  totpStatus: () => getJSON<S["TotpStatus"]>("/api/v1/me/totp"),
+  setupTotp: (b: { password: string }) =>
+    request<S["TotpSetup"]>("POST", "/api/v1/me/totp/setup", b),
+  enableTotp: (b: { setup_token: string; code: string }) =>
+    request<S["RecoveryCodes"]>("POST", "/api/v1/me/totp/enable", b),
+  disableTotp: (b: { password: string; code: string }) =>
+    request<void>("POST", "/api/v1/me/totp/disable", b),
   logout: () => request<void>("POST", "/api/v1/auth/logout"),
 
   signup: (b: S["SignupRequest"]) =>
@@ -535,6 +545,16 @@ export const api = {
     ),
   approveDevice: (b: S["DeviceApproveRequest"]) =>
     request<APIToken | undefined>("POST", "/api/v1/auth/device/approve", b),
+  oauthAuthorization: (p: OAuthAuthorizeSearch) =>
+    getJSON<OAuthAuthorizeInfo>(`/api/v1/oauth/authorize${qs(p)}`),
+  decideOAuth: (b: S["OAuthDecision"]) =>
+    request<S["OAuthRedirect"]>("POST", "/api/v1/oauth/authorize", b),
+  oauthClients: () =>
+    getJSON<S["OAuthClientList"]>("/api/v1/admin/oauth/clients"),
+  createOAuthClient: (b: S["CreateOAuthClientRequest"]) =>
+    request<S["OAuthClientCreated"]>("POST", "/api/v1/admin/oauth/clients", b),
+  disableOAuthClient: (clientId: string) =>
+    request<void>("DELETE", `/api/v1/admin/oauth/clients/${encodeURIComponent(clientId)}`),
   tokenSettings: () =>
     getJSON<S["TokenSettings"]>("/api/v1/admin/settings/tokens"),
   putTokenSettings: (b: S["TokenSettings"]) =>

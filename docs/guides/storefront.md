@@ -528,7 +528,7 @@ write nothing (`Idempotent-Replayed: true`). Use a key that identifies the
 
 ### b. Tell your server when an order is paid (webhook)
 
-In the app: **Project → Webhooks → New**:
+In the app: **Database → Webhooks → New**:
 
 | Field | Value |
 | --- | --- |
@@ -538,6 +538,12 @@ In the app: **Project → Webhooks → New**:
 | URL | `https://storefront.example.com/api/xenibase/webhook` (public `https://`) |
 
 Xenibase shows the signing secret **once**; put it in `XENIBASE_WEBHOOK_SECRET`.
+A webhook has one URL, and it must be public `https://`, so the one pointing at
+your production site (for example on Vercel) does not reach a laptop. Give each
+environment its own project (and so its own webhook and secret), or tunnel to
+localhost while you develop. Set the secret in the host's environment variables
+and redeploy before the first event; if it is lost, **Rotate secret** on the
+webhook's page issues a new one.
 Events are written in the same transaction as the change, so a rolled-back
 change never sends one and a committed one always does. Delivery is **at least
 once**, in order: your handler must be safe to run twice.
@@ -605,7 +611,7 @@ async function fulfil(orderId: string, eventId: string) {
 - Respond fast. Return 2xx as soon as you've safely recorded the work; if it
   takes long, acknowledge first and do the work in a queue.
 - If the handler errors (non-2xx), Xenibase retries. A broken receiver shows as
-  failed deliveries under Project → Webhooks, and the webhook can be paused and
+  failed deliveries under Database → Webhooks, and the webhook can be paused and
   resumed.
 - The registrar call is the one step with a real-world effect. Make it
   idempotent on the registrar's side too (check whether the domain is already
@@ -804,7 +810,7 @@ Docs that were wrong or unclear count: say which page and which sentence.
 | Sign-in methods, emails, redirect URLs, hooks | Project → Authentication |
 | Buckets and files | Project → Storage |
 | Turn realtime on for a table | Project → Realtime |
-| Webhooks and their delivery results | Project → Webhooks |
+| Webhooks and their delivery results | Database → Webhooks |
 | Types for your code | `xenibase gen types --lang ts --project <name>` |
 
 Go deeper: [Backend services](../backend-services.md) (every endpoint and

@@ -533,6 +533,46 @@ func (s *Server) MoveProject(w http.ResponseWriter, r *http.Request, id openapi_
 	s.writeOperation(w, "move", op)
 }
 
+// CreateIntegratorRoles implements POST /api/v1/admin/projects/{project_id}/roles.
+func (s *Server) CreateIntegratorRoles(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	var req gen.IntegratorRolesRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := dedicated.ValidateIntegratorRoles(req.Roles); err != nil {
+		s.provisionError(w, "integrator roles", err)
+		return
+	}
+	p, err := store.New(s.db).GetProject(r.Context(), id)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && p.DeletedAt != nil) {
+		writeError(w, http.StatusNotFound, "not_found", "project not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "integrator roles", err)
+		return
+	}
+	a := auditFrom(r.Context())
+	a.target("project", id.String())
+	a.orgID, a.projectID = p.OrgID, p.ID
+	a.set("roles", req.Roles)
+	if p.Tier != provision.TierDedicated {
+		writeError(w, http.StatusConflict, "conflict", "dedicated projects only: "+p.Name+" is on the shared tier, whose roles are the platform's")
+		return
+	}
+	ds := s.dedicatedSvc(w)
+	if ds == nil || !s.requireProjects(w) {
+		return
+	}
+	res, err := ds.CreateIntegratorRoles(r.Context(), p, req.Roles)
+	if err != nil {
+		s.provisionError(w, "integrator roles", err)
+		return
+	}
+	a.set("created", res.Created)
+	writeJSON(w, http.StatusOK, gen.IntegratorRoles{Roles: res.Roles, Created: res.Created})
+}
+
 // ListProjectMoves implements GET /api/v1/projects/{id}/moves.
 func (s *Server) ListProjectMoves(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
 	list, err := store.New(s.db).LatestMoves(r.Context(), store.LatestMovesParams{ProjectID: id, Lim: 20})

@@ -130,7 +130,7 @@ the first real invoice:
 
 | Situation | Do |
 | --- | --- |
-| Someone lost their authenticator and recovery codes | Confirm who they are out of band (a call, not the email that asks), then Users → the user → **Reset two-factor**. It is audited and they are emailed. |
+| Someone lost their authenticator and recovery codes | Confirm who they are out of band (a call, not the email that asks), then Users → the user → **Reset two-factor**. It is audited and they are emailed. (Ordinary accounts then sign in with a password until they turn two-factor back on; platform staff set up a new authenticator at their next sign-in.) |
 | A colleague should help run the platform | They need an active account with two-factor set up. Users → **Platform role** → platform admin. It asks for your password and a code, signs them out, emails them, and is audited. Choosing *user* reverses it; the last admin can't be removed. |
 | A colleague should answer support tickets | Users → **Platform role** → *support staff*. They see Platform → Support and the metadata of the organisations that write in, and nothing else of the platform's. See [support](support.md). |
 | Nobody can sign in as a platform admin | On the server: `docker compose exec xenibase-server xenibase-server admin list`, then `promote <email>`, `reset-2fa <email>` or `reset-password <email>` (prints a one-hour link when email is down). Audited as done on the server. See [operations](operations.md#platform-admins-and-recovery). |
@@ -147,6 +147,8 @@ the first real invoice:
 | Abuse through webhooks or jobs | **Outbound off** (Organisations → the org → Outbound): its databases keep working. The per-host counters show where the traffic went. |
 | Abuse, non-payment, or a security incident | **Suspend** with a reason: apps can't connect, background work stops, a final backup is taken, owners are emailed. **Reinstate** undoes it. |
 | A support case needs a look inside | **Break-glass** (Organisations → the org): a reason, at most 4 hours, step-up auth. Owners are emailed and see a banner; everything is in their audit log. End it as soon as you're done. |
+| A partner app (Taskiem) wants customers to connect their organisations to it | Register it once: `POST /api/v1/admin/oauth/clients` with its name, `https://` redirect URIs and the most it may ask for (`read`, `write`); send its developers the `client_id` and the one-time `client_secret` out of band. Users consent per organisation and disconnect from Account; `DELETE /api/v1/admin/oauth/clients/{client_id}` disables the app and revokes every token it holds. See [OAuth for third-party apps](oauth-apps.md). |
+| An integrator's migrations need their own Postgres roles (Taskiem's `taskiem_app` and `taskiem_dispatch`) | Only on a **dedicated** project (owners are `NOCREATEROLE`, and shared clusters' roles are the platform's). `POST /api/v1/admin/projects/{project_id}/roles` with `{"roles": ["taskiem_app", "taskiem_dispatch"]}` (step-up auth, audited) creates them as the instance's superuser, `NOLOGIN` with no attribute, and grants each to the project's owner role `WITH ADMIN OPTION`, so the owner grants and manages them from then on. They are recorded on the project: a move recreates them on the target, and the demotion check names them (a project with integrator roles can't be demoted). A shared project answers `409 conflict`. |
 
 ## Backups and keys
 

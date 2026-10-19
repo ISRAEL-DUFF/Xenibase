@@ -207,8 +207,7 @@ func newMatrixWorld(t *testing.T) *matrixWorld {
 		if err != nil {
 			t.Fatal(err)
 		}
-		code, _ := auth.TOTPCode(ch.Enroll.Secret, clk.Now())
-		signed, err := svc.CompleteLogin(ctx, ch.Token, code, nil, "")
+		signed, err := svc.CompleteLogin(ctx, ch.Token, "", nil, "") // no two-factor: the password was enough
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -597,7 +596,8 @@ var specMatrix = map[authz.Action][]string{
 	authz.Self: {
 		"POST /api/v1/auth/reauth", "POST /api/v1/auth/logout", "GET /api/v1/me", "PATCH /api/v1/me", "POST /api/v1/me/password",
 		"GET /api/v1/me/sessions", "DELETE /api/v1/me/sessions/{session_id}", "GET /api/v1/me/recovery-codes",
-		"POST /api/v1/me/recovery-codes", "POST /api/v1/me/terms/accept", "GET /api/v1/me/invitations",
+		"POST /api/v1/me/recovery-codes", "GET /api/v1/me/totp", "POST /api/v1/me/totp/setup", "POST /api/v1/me/totp/enable",
+		"POST /api/v1/me/totp/disable", "POST /api/v1/me/terms/accept", "GET /api/v1/me/invitations",
 		"POST /api/v1/me/invitations/{invitation_id}/accept", "GET /api/v1/orgs", "POST /api/v1/orgs",
 		"GET /api/v1/settings/general", "GET /api/v1/profiles", "POST /api/v1/imports/preflight",
 		// V3 §6.1 "Projects choose a region at creation"
@@ -605,6 +605,8 @@ var specMatrix = map[authz.Action][]string{
 		// §7.2 "Users manage their own tokens", §7.1 device-login approval
 		"GET /api/v1/tokens", "POST /api/v1/tokens", "DELETE /api/v1/tokens/{token_id}",
 		"GET /api/v1/auth/device/requests/{user_code}", "POST /api/v1/auth/device/approve",
+		// OAuth for third-party apps: consenting is the user's own act
+		"GET /api/v1/oauth/authorize", "POST /api/v1/oauth/authorize",
 	},
 	// §2.4: the platform admin's
 	// V3 §7.1 "Support staff role ... can see the support console and org metadata"
@@ -668,6 +670,10 @@ var specMatrix = map[authz.Action][]string{
 		"POST /api/v1/admin/instances/{instance_id}/minor-upgrade",
 		// §7.2 "The platform admin can set a platform-wide maximum"
 		"GET /api/v1/admin/settings/tokens", "PUT /api/v1/admin/settings/tokens",
+		// OAuth for third-party apps: the platform admin registers clients
+		"GET /api/v1/admin/oauth/clients", "POST /api/v1/admin/oauth/clients", "DELETE /api/v1/admin/oauth/clients/{client_id}",
+		// Integrator roles on a dedicated instance: the platform's superuser creates them
+		"POST /api/v1/admin/projects/{project_id}/roles",
 		// V2 §6 "Platform targets (managed by the platform admin)"
 		"GET /api/v1/admin/storage-targets", "POST /api/v1/admin/storage-targets",
 		"GET /api/v1/admin/storage-targets/{target_id}", "PATCH /api/v1/admin/storage-targets/{target_id}",
