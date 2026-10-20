@@ -14,6 +14,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/pgsource"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -85,10 +86,13 @@ func connectSource(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGConn,
 	}
 	cfg.ConnectTimeout = 15 * time.Second
 	cfg.RuntimeParams["application_name"] = "xenibase-import"
-	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: cannot connect to the source: %w", ErrInvalid, redactErr(err, pg.Password))
+	}
+	if err := pgsource.ReadOnly(ctx, conn); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, pg.Password))
 	}
 	return conn, pg, nil
 }
