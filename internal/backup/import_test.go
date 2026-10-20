@@ -2,8 +2,11 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/israel-duff/xenibase/internal/pgsource/pgsourcetest"
 )
@@ -32,5 +35,19 @@ func TestConnectSourceThroughAPoolerThatIgnoresFewStartupParameters(t *testing.T
 	defer conn.Close(context.Background())
 	if q := srv.Queries(); len(q) != 1 || q[0] != "SET default_transaction_read_only = on" {
 		t.Fatalf("the source session must be made read-only: %q", q)
+	}
+}
+
+func TestPreflightTimeOutIsAnswerNotInternalError(t *testing.T) {
+	srv := pgsourcetest.Start(t)
+	srv.Hang = true
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := (&Service{}).Preflight(ctx, "postgres://u:secret@"+srv.Addr+"/db?sslmode=disable")
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "did not answer in time") {
+		t.Fatalf("a source that never answers should be a clear request error, not %v", err)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("the password leaked: %v", err)
 	}
 }

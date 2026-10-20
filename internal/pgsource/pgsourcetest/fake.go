@@ -16,6 +16,9 @@ import (
 // Pooler is the fake server.
 type Pooler struct {
 	Addr string
+	// Hang makes the server accept a query and never answer it, as a pooler with
+	// no free server connection does. Set it before the first query.
+	Hang bool
 
 	mu      sync.Mutex
 	queries []string
@@ -93,13 +96,29 @@ func (p *Pooler) serve(c net.Conn, refuse []string) {
 		case *pgproto3.Query:
 			p.mu.Lock()
 			p.queries = append(p.queries, m.String)
+			hang := p.Hang && !strings.HasPrefix(m.String, "SET ")
 			p.mu.Unlock()
+			if hang {
+				_, _ = c.Read(make([]byte, 1)) // until the client gives up and closes
+				return
+			}
 			tag := strings.ToUpper(strings.Fields(m.String + " ")[0])
 			be.Send(&pgproto3.CommandComplete{CommandTag: []byte(tag)})
 			be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 			if err := be.Flush(); err != nil {
 				return
 			}
+		case *pgproto3.Parse:
+			// A query on the extended protocol (what pgx uses for a query with a
+			// result): only the hanging server answers it, by not answering.
+			p.mu.Lock()
+			hang := p.Hang
+			p.mu.Unlock()
+			if !hang {
+				return
+			}
+			_, _ = c.Read(make([]byte, 1))
+			return
 		case *pgproto3.Terminate:
 			return
 		default:
