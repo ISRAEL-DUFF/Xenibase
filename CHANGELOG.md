@@ -5,6 +5,12 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+## v4.2.4
+
+### Fixed
+- **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.
+- **A source that doesn't answer is explained, not an "internal error".** When the import's preflight (or the import itself) can't read the source in time, for example because a pooler in front of it has no free connection for that login, or a query is refused, the answer is now a clear request error naming the likely cause (the password is redacted). It was a 500 after the preflight's one-minute limit.
+
 ## v4.2.3
 
 - **Upgrades rebuild the edge.** `install.sh` built the server and agent images but not the edge, so a deployment with backend services on kept running the old edge after `upgrade.sh` (v4.2.2's browser preflight fix never reached it). The edge is rebuilt on every install and upgrade while the `services` profile is on. If you upgraded to v4.2.2 and use backend services, upgrade again.
