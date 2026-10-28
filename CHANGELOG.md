@@ -20,6 +20,10 @@ bundle share one version (spec §11.5).
   refused every project, so the Lagos launch rehearsals could not run until it
   was open.
 
+### Security
+- Built with Go 1.26.10, which distrusts compromised intermediate certificates
+  in `crypto/x509` (GO-2026-6809); the agent's TLS connections reached it.
+
 ### Upgrading
 - Migration 00056 adds `regions.api_domain` and `region_early_access`. Nothing
   changes until a region is given a domain or an early-access list.
