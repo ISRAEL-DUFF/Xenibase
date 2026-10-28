@@ -204,6 +204,7 @@ var auditActions = map[string]string{
 	"PUT /api/v1/admin/capacity/settings":                          "capacity.settings",
 	"PUT /api/v1/admin/regions/{region_id}":                        "region.save",
 	"PUT /api/v1/projects/{id}/residency":                          "project.residency",
+	"PUT /api/v1/projects/{id}/manage-roles":                       "project.manage_roles",
 	"POST /api/v1/admin/capacity/evaluate":                         "capacity.evaluate",
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/approve":  "capacity.approve",
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/reject":   "capacity.reject",
@@ -411,6 +412,7 @@ var reauthRequired = map[string]bool{
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/approve": true,
 	"PUT /api/v1/admin/capacity/settings":                         true,
 	"PUT /api/v1/projects/{id}/residency":                         true,
+	"PUT /api/v1/projects/{id}/manage-roles":                      true,
 	// Moving money or changing what is owed (M27 security review).
 	"POST /api/v1/admin/payments/{payment_id}/refund":        true,
 	"POST /api/v1/admin/payments":                            true,

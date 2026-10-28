@@ -174,6 +174,7 @@ export type AdminRegionList = S["AdminRegionList"];
 export type AdminRegionRequest = S["AdminRegionRequest"];
 export type RegionReadiness = S["RegionReadiness"];
 export type ProjectResidencyResult = S["ProjectResidencyResult"];
+export type ManageRoles = S["ManageRoles"];
 export type RebalanceMove = S["RebalanceMove"];
 export type Margins = S["Margins"];
 export type CostSettings = S["CostSettings"];
@@ -554,7 +555,10 @@ export const api = {
   createOAuthClient: (b: S["CreateOAuthClientRequest"]) =>
     request<S["OAuthClientCreated"]>("POST", "/api/v1/admin/oauth/clients", b),
   disableOAuthClient: (clientId: string) =>
-    request<void>("DELETE", `/api/v1/admin/oauth/clients/${encodeURIComponent(clientId)}`),
+    request<void>(
+      "DELETE",
+      `/api/v1/admin/oauth/clients/${encodeURIComponent(clientId)}`,
+    ),
   tokenSettings: () =>
     getJSON<S["TokenSettings"]>("/api/v1/admin/settings/tokens"),
   putTokenSettings: (b: S["TokenSettings"]) =>
@@ -1649,6 +1653,17 @@ export const api = {
       "PUT",
       `/api/v1/admin/regions/${encodeURIComponent(id)}`,
       b,
+    ),
+  manageRoles: (projectId: string) =>
+    getJSON<ManageRoles>(`/api/v1/projects/${projectId}/manage-roles`),
+  setManageRoles: (projectId: string, enabled: boolean) =>
+    request<ManageRoles>("PUT", `/api/v1/projects/${projectId}/manage-roles`, {
+      enabled,
+    }),
+  syncManageRoles: (projectId: string) =>
+    request<ManageRoles>(
+      "POST",
+      `/api/v1/projects/${projectId}/manage-roles/sync`,
     ),
   setResidency: (projectId: string, enabled: boolean) =>
     request<ProjectResidencyResult>(

@@ -971,6 +971,7 @@ type Project struct {
 	ForwardRegion       *string
 	ForwardUntil        *time.Time
 	IntegratorRoles     []string
+	ManageRoles         bool
 }
 
 type ProjectApiKey struct {
@@ -1026,6 +1027,13 @@ type ProjectMember struct {
 	Role      string
 	AddedBy   *uuid.UUID
 	CreatedAt time.Time
+}
+
+type ProjectOwnedLogin struct {
+	ProjectID     uuid.UUID
+	RoleName      string
+	ScramVerifier string
+	SyncedAt      time.Time
 }
 
 type ProjectService struct {

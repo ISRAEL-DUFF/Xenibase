@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -407,6 +408,20 @@ func (m *Manager) Sync(ctx context.Context) error {
 				if v := logins[role]; v != "" {
 					cfg.Users = append(cfg.Users, User{Name: role, Secret: v})
 				}
+			}
+		})
+	}
+
+	// Logins dedicated owners created with role management on, last: a
+	// platform login with the same name wins (Render refuses duplicates).
+	owned, err := q.PoolerOwnedLogins(ctx)
+	if err != nil {
+		return fmt.Errorf("pooler sync: load owned logins: %w", err)
+	}
+	for _, u := range owned {
+		add(served(u.Region, u.ForwardRegion, u.ForwardUntil), func(cfg *Config) {
+			if !slices.ContainsFunc(cfg.Users, func(x User) bool { return x.Name == u.RoleName }) {
+				cfg.Users = append(cfg.Users, User{Name: u.RoleName, Secret: u.ScramVerifier})
 			}
 		})
 	}

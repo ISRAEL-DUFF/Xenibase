@@ -1,8 +1,13 @@
 # Taskiem's dedicated-database request: what Xenibase can do
 
 Assessment of [Taskiem's request of 28 October 2026](taskiem-dedicated-request.md)
-against the code as of this date. Not a reply to Taskiem; the reply comes
-once the open item below is decided.
+against the code as of this date. Not a reply to Taskiem.
+
+**Update:** role management, the change below, is built
+([Database roles on dedicated projects](../database-roles.md)). Taskiem's
+migrations and installer run unchanged on a dedicated project with it on,
+as long as the installer names its logins `<database>_app` and
+`<database>_public`, which it does.
 
 ## The short answer
 

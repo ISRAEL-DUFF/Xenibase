@@ -7001,6 +7001,29 @@ type MaintenanceWindow struct {
 	Weekday int `json:"weekday"`
 }
 
+// ManageRoles defines model for ManageRoles.
+type ManageRoles struct {
+	// Enabled The owner role has CREATEROLE.
+	Enabled bool `json:"enabled"`
+
+	// Logins The owner's logins the poolers accept.
+	Logins []struct {
+		Name     string    `json:"name"`
+		SyncedAt time.Time `json:"synced_at"`
+	} `json:"logins"`
+
+	// Skipped After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password).
+	Skipped *[]struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"skipped,omitempty"`
+}
+
+// ManageRolesRequest defines model for ManageRolesRequest.
+type ManageRolesRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Margins defines model for Margins.
 type Margins struct {
 	Categories        []CategoryCost     `json:"categories"`
@@ -7987,11 +8010,14 @@ type Project struct {
 	LegacyCredentialsUntil *time.Time `json:"legacy_credentials_until,omitempty"`
 
 	// Lifecycle A Free project paused or archived for inactivity (V3 §4).
-	Lifecycle *ProjectLifecycle  `json:"lifecycle,omitempty"`
-	MyRole    *ProjectRole       `json:"my_role,omitempty"`
-	Name      string             `json:"name"`
-	OrgId     openapi_types.UUID `json:"org_id"`
-	OwnerRole string             `json:"owner_role"`
+	Lifecycle *ProjectLifecycle `json:"lifecycle,omitempty"`
+
+	// ManageRoles A dedicated project's owner role has CREATEROLE (role management).
+	ManageRoles *bool              `json:"manage_roles,omitempty"`
+	MyRole      *ProjectRole       `json:"my_role,omitempty"`
+	Name        string             `json:"name"`
+	OrgId       openapi_types.UUID `json:"org_id"`
+	OwnerRole   string             `json:"owner_role"`
 
 	// ParentProjectId Set for a branch (V2 §8).
 	ParentProjectId *openapi_types.UUID `json:"parent_project_id,omitempty"`
@@ -11276,6 +11302,9 @@ type CreateJobJSONRequestBody = JobRequest
 // UpdateJobJSONRequestBody defines body for UpdateJob for application/json ContentType.
 type UpdateJobJSONRequestBody = JobUpdate
 
+// SetProjectManageRolesJSONRequestBody defines body for SetProjectManageRoles for application/json ContentType.
+type SetProjectManageRolesJSONRequestBody = ManageRolesRequest
+
 // AddProjectMemberJSONRequestBody defines body for AddProjectMember for application/json ContentType.
 type AddProjectMemberJSONRequestBody = ProjectMemberRequest
 
@@ -12337,6 +12366,15 @@ type ServerInterface interface {
 	// ListJobRuns A job's history (30 days, at most 1,000 runs)
 	// (GET /api/v1/projects/{id}/jobs/{job_id}/runs)
 	ListJobRuns(w http.ResponseWriter, r *http.Request, id ProjectID, jobId JobID, params ListJobRunsParams)
+	// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+	// (GET /api/v1/projects/{id}/manage-roles)
+	GetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+	// (PUT /api/v1/projects/{id}/manage-roles)
+	SetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// SyncProjectManageRoles Sync the owner's logins to the poolers now
+	// (POST /api/v1/projects/{id}/manage-roles/sync)
+	SyncProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID)
 	// ListProjectMembers Project members (org owners and admins are implicit admins)
 	// (GET /api/v1/projects/{id}/members)
 	ListProjectMembers(w http.ResponseWriter, r *http.Request, id ProjectID)
@@ -14485,6 +14523,24 @@ func (_ Unimplemented) RunJob(w http.ResponseWriter, r *http.Request, id Project
 // ListJobRuns A job's history (30 days, at most 1,000 runs)
 // (GET /api/v1/projects/{id}/jobs/{job_id}/runs)
 func (_ Unimplemented) ListJobRuns(w http.ResponseWriter, r *http.Request, id ProjectID, jobId JobID, params ListJobRunsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+// (GET /api/v1/projects/{id}/manage-roles)
+func (_ Unimplemented) GetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+// (PUT /api/v1/projects/{id}/manage-roles)
+func (_ Unimplemented) SetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// SyncProjectManageRoles Sync the owner's logins to the poolers now
+// (POST /api/v1/projects/{id}/manage-roles/sync)
+func (_ Unimplemented) SyncProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -23341,6 +23397,84 @@ func (siw *ServerInterfaceWrapper) ListJobRuns(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// GetProjectManageRoles operation middleware
+func (siw *ServerInterfaceWrapper) GetProjectManageRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetProjectManageRoles(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetProjectManageRoles operation middleware
+func (siw *ServerInterfaceWrapper) SetProjectManageRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetProjectManageRoles(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SyncProjectManageRoles operation middleware
+func (siw *ServerInterfaceWrapper) SyncProjectManageRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SyncProjectManageRoles(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListProjectMembers operation middleware
 func (siw *ServerInterfaceWrapper) ListProjectMembers(w http.ResponseWriter, r *http.Request) {
 
@@ -27595,6 +27729,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/admin/regions/{region_id}/etcd-move-all", wrapper.MoveAllToRegionEtcd)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{id}/manage-roles", wrapper.GetProjectManageRoles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/projects/{id}/manage-roles", wrapper.SetProjectManageRoles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{id}/manage-roles/sync", wrapper.SyncProjectManageRoles)
 	})
 	r.Group(func(r chi.Router) {
 		r.Put(options.BaseURL+"/api/v1/projects/{id}/residency", wrapper.SetProjectResidency)

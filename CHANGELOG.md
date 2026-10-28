@@ -13,6 +13,14 @@ bundle share one version (spec §11.5).
   region), so a Lagos project's API traffic stays in Lagos instead of crossing
   to the home region. Edge nodes Xenibase adds in the region get it in their
   cloud-init. See `docs/regions.md`.
+- **Role management on dedicated projects.** An organisation owner can let a
+  dedicated project's owner role create roles (`CREATEROLE`, Project Settings →
+  Compute → Database roles, or `PUT /api/v1/projects/{id}/manage-roles`), for
+  applications whose migrations create their own roles. Postgres 16+ limits it
+  to the roles the owner creates. Logins it creates named `<database>_<name>`
+  connect through the poolers within 30 seconds (`POST …/manage-roles/sync` for
+  at once), with the project's connection limit; moves and major upgrades take
+  the roles along. See `docs/database-roles.md`.
 - **Early access to hidden regions.** A hidden region takes new projects from
   the organisations in its **Early-access organisations** list
   (`early_access_org_ids`), for rehearsals before it opens or a first customer;
@@ -27,6 +35,8 @@ bundle share one version (spec §11.5).
 ### Upgrading
 - Migration 00056 adds `regions.api_domain` and `region_early_access`. Nothing
   changes until a region is given a domain or an early-access list.
+- Migration 00057 adds `projects.manage_roles` and `project_owned_logins`.
+  Nothing changes until an owner turns role management on.
 
 ## v4.2.3
 

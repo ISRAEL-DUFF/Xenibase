@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -667,4 +669,117 @@ func (s *Server) UpgradeProject(w http.ResponseWriter, r *http.Request, id gen.P
 		return
 	}
 	s.writeOperation(w, "upgrade", op)
+}
+
+// manageRolesOut is a project's role management as the API shows it.
+func (s *Server) manageRolesOut(r *http.Request, p store.Project, skipped map[string]string) (gen.ManageRoles, error) {
+	rows, err := store.New(s.db).ListOwnedLogins(r.Context(), p.ID)
+	if err != nil {
+		return gen.ManageRoles{}, err
+	}
+	out := gen.ManageRoles{Enabled: p.ManageRoles, Logins: make([]struct {
+		Name     string    `json:"name"`
+		SyncedAt time.Time `json:"synced_at"`
+	}, 0, len(rows))}
+	for _, l := range rows {
+		out.Logins = append(out.Logins, struct {
+			Name     string    `json:"name"`
+			SyncedAt time.Time `json:"synced_at"`
+		}{Name: l.RoleName, SyncedAt: l.SyncedAt})
+	}
+	if skipped != nil {
+		names := make([]string, 0, len(skipped))
+		for n := range skipped {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+		list := make([]struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		}, 0, len(names))
+		for _, n := range names {
+			list = append(list, struct {
+				Name   string `json:"name"`
+				Reason string `json:"reason"`
+			}{Name: n, Reason: skipped[n]})
+		}
+		out.Skipped = &list
+	}
+	return out, nil
+}
+
+// GetProjectManageRoles implements GET /api/v1/projects/{id}/manage-roles.
+func (s *Server) GetProjectManageRoles(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "manage roles", err)
+		return
+	}
+	out, err := s.manageRolesOut(r, p, nil)
+	if err != nil {
+		s.internalError(w, "manage roles", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// SetProjectManageRoles implements PUT /api/v1/projects/{id}/manage-roles:
+// organisation owners, after step-up.
+func (s *Server) SetProjectManageRoles(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	var req gen.ManageRolesRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ds := s.dedicatedSvc(w)
+	if ds == nil || !s.requireProjects(w) {
+		return
+	}
+	a := auditFrom(r.Context())
+	a.target("project", id.String())
+	a.projectID = id
+	a.set("enabled", req.Enabled)
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "manage roles", err)
+		return
+	}
+	p, err = ds.SetManageRoles(r.Context(), p, req.Enabled)
+	if err != nil {
+		s.provisionError(w, "manage roles", err)
+		return
+	}
+	out, err := s.manageRolesOut(r, p, nil)
+	if err != nil {
+		s.internalError(w, "manage roles", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// SyncProjectManageRoles implements POST /api/v1/projects/{id}/manage-roles/sync.
+func (s *Server) SyncProjectManageRoles(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	ds := s.dedicatedSvc(w)
+	if ds == nil || !s.requireProjects(w) {
+		return
+	}
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "manage roles", err)
+		return
+	}
+	if p.Tier != provision.TierDedicated {
+		writeError(w, http.StatusConflict, "conflict", "role management is for dedicated projects")
+		return
+	}
+	res, err := ds.SyncOwnedRoles(r.Context(), p)
+	if err != nil {
+		s.provisionError(w, "manage roles", err)
+		return
+	}
+	out, err := s.manageRolesOut(r, p, res.Skipped)
+	if err != nil {
+		s.internalError(w, "manage roles", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }

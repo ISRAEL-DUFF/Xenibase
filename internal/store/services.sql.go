@@ -1098,7 +1098,7 @@ func (q *Queries) PruneRequestLogs(ctx context.Context, before time.Time) (int64
 }
 
 const realtimeProjects = `-- name: RealtimeProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, s.ref FROM project_services s JOIN projects p ON p.id = s.project_id
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, s.ref FROM project_services s JOIN projects p ON p.id = s.project_id
 WHERE s.enabled AND s.schema_version >= 5 AND p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle = 'active'
 ORDER BY p.org_id, p.id
 `
@@ -1163,6 +1163,7 @@ func (q *Queries) RealtimeProjects(ctx context.Context) ([]RealtimeProjectsRow, 
 			&i.Project.ForwardRegion,
 			&i.Project.ForwardUntil,
 			&i.Project.IntegratorRoles,
+			&i.Project.ManageRoles,
 			&i.Ref,
 		); err != nil {
 			return nil, err
@@ -1234,7 +1235,7 @@ func (q *Queries) ScheduleStorageCleanups(ctx context.Context, keepDays int32) (
 }
 
 const servicesToReconcile = `-- name: ServicesToReconcile :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles FROM project_services s JOIN projects p ON p.id = s.project_id
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles FROM project_services s JOIN projects p ON p.id = s.project_id
 WHERE s.enabled AND p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle = 'active'
   AND (s.schema_version < $1 OR s.roles_instance IS DISTINCT FROM p.instance_id)
 ORDER BY p.id
@@ -1296,6 +1297,7 @@ func (q *Queries) ServicesToReconcile(ctx context.Context, schemaVersion int32) 
 			&i.ForwardRegion,
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
+			&i.ManageRoles,
 		); err != nil {
 			return nil, err
 		}
@@ -1495,7 +1497,7 @@ func (q *Queries) SetStorageReconciled(ctx context.Context, arg SetStorageReconc
 }
 
 const storageProjects = `-- name: StorageProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, s.ref, s.storage_quota_bytes, s.upload_max_bytes, s.storage_egress_blocked, s.transforms_blocked
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, s.ref, s.storage_quota_bytes, s.upload_max_bytes, s.storage_egress_blocked, s.transforms_blocked
 FROM project_services s JOIN projects p ON p.id = s.project_id
 WHERE s.enabled AND s.schema_version >= 4 AND p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle = 'active'
 ORDER BY p.org_id, p.id
@@ -1565,6 +1567,7 @@ func (q *Queries) StorageProjects(ctx context.Context) ([]StorageProjectsRow, er
 			&i.Project.ForwardRegion,
 			&i.Project.ForwardUntil,
 			&i.Project.IntegratorRoles,
+			&i.Project.ManageRoles,
 			&i.Ref,
 			&i.StorageQuotaBytes,
 			&i.UploadMaxBytes,
