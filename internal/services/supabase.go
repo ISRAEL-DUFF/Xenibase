@@ -16,6 +16,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/files"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/pgsource"
 	"github.com/israel-duff/xenibase/internal/projauth"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/storage"
@@ -195,10 +196,13 @@ func connectSupabase(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGCon
 	}
 	cfg.ConnectTimeout = 15 * time.Second
 	cfg.RuntimeParams["application_name"] = "xenibase-migrate"
-	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: cannot connect to the source: %w", ErrInvalid, redact(err, pg.Password))
+	}
+	if err := pgsource.ReadOnly(ctx, conn); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redact(err, pg.Password))
 	}
 	return conn, pg, nil
 }

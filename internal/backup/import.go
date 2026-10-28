@@ -14,6 +14,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/pgsource"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -85,10 +86,13 @@ func connectSource(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGConn,
 	}
 	cfg.ConnectTimeout = 15 * time.Second
 	cfg.RuntimeParams["application_name"] = "xenibase-import"
-	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: cannot connect to the source: %w", ErrInvalid, redactErr(err, pg.Password))
+	}
+	if err := pgsource.ReadOnly(ctx, conn); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, pg.Password))
 	}
 	return conn, pg, nil
 }
@@ -103,12 +107,28 @@ func redactErr(err error, password string) error {
 
 // Preflight inspects a source database without changing it.
 func (s *Service) Preflight(ctx context.Context, sourceURL string) (Preflight, error) {
-	conn, _, err := connectSource(ctx, sourceURL)
+	conn, pg, err := connectSource(ctx, sourceURL)
 	if err != nil {
 		return Preflight{}, err
 	}
 	defer conn.Close(context.Background())
-	return preflight(ctx, conn)
+	pf, err := preflight(ctx, conn)
+	return pf, sourceReadError(ctx, err, pg.Password)
+}
+
+// sourceReadError says what went wrong reading the source, as something the
+// user can act on: a source that never answered (behind a pooler with no free
+// connection for the login, say) or a query it refused, rather than an
+// "internal error".
+func sourceReadError(ctx context.Context, err error, password string) error {
+	switch {
+	case err == nil, errors.Is(err, ErrInvalid):
+		return err
+	case ctx.Err() != nil, errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return fmt.Errorf("%w: the source did not answer in time. If it is behind a connection pooler such as PgBouncer, the pooler may have no free connection for this login: free some, raise its pool size, or use a direct connection", ErrInvalid)
+	default:
+		return fmt.Errorf("%w: reading the source failed: %w", ErrInvalid, redactErr(err, password))
+	}
 }
 
 func preflight(ctx context.Context, conn *pgx.Conn) (Preflight, error) {
@@ -254,7 +274,7 @@ func (s *Service) Import(ctx context.Context, p ImportParams) (provision.Created
 	pf, err := preflight(ctx, conn)
 	_ = conn.Close(context.Background())
 	if err != nil {
-		return provision.Created{}, err
+		return provision.Created{}, sourceReadError(ctx, err, pg.Password)
 	}
 	schemas := slices.Clone(p.Schemas)
 	sort.Strings(schemas)
