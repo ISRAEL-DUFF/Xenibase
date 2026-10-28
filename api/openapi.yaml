@@ -7475,7 +7475,7 @@ paths:
       tags: [regions]
       responses:
         "200":
-          description: Active regions.
+          description: Active regions, and hidden ones the caller's organisations have early access to.
           content:
             application/json:
               schema:
@@ -7636,6 +7636,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Operation"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/manage-roles:
+    get:
+      operationId: getProjectManageRoles
+      summary: Role management on a dedicated project, and the owner's logins the poolers accept
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: The setting and the synced logins.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageRoles"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setProjectManageRoles
+      summary: Turn role management on or off (organisation owners; step-up)
+      description: |
+        On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+        and later that lets it create roles and manage only those it created;
+        it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+        owner creates, named <database>_<name>, connect through the poolers
+        within about 30 seconds (or at once after a sync), with the project's
+        connection limit. Off removes CREATEROLE; roles already created stay.
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManageRolesRequest"
+      responses:
+        "200":
+          description: Changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageRoles"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/manage-roles/sync:
+    post:
+      operationId: syncProjectManageRoles
+      summary: Sync the owner's logins to the poolers now
+      description: Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: Synced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageRoles"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/residency:
@@ -9214,6 +9275,9 @@ components:
         data_residency:
           type: boolean
           description: Data, backups and branches stay in the project's region's country (V3 §6.3).
+        manage_roles:
+          type: boolean
+          description: A dedicated project's owner role has CREATEROLE (role management).
         forward_region:
           type: string
           nullable: true
@@ -9361,6 +9425,12 @@ components:
         home:
           type: boolean
           description: The platform's home region, where projects go by default.
+        early_access_org_ids:
+          type: array
+          description: Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens.
+          items:
+            type: string
+            format: uuid
     RegionList:
       type: object
       required: [items]
@@ -9371,7 +9441,7 @@ components:
             $ref: "#/components/schemas/Region"
     AdminRegion:
       type: object
-      required: [id, name, country, pooler_host, provider, location, residency, status, home, nodes, pooler_hosts, projects, residency_projects, created_at]
+      required: [id, name, country, pooler_host, api_domain, early_access_org_ids, provider, location, residency, status, home, nodes, pooler_hosts, projects, residency_projects, created_at]
       properties:
         id:
           type: string
@@ -9382,6 +9452,15 @@ components:
         pooler_host:
           type: string
           description: The hostname in the region's connection strings; empty is the platform's database host.
+        api_domain:
+          type: string
+          description: The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN).
+        early_access_org_ids:
+          type: array
+          description: Organisations that may create projects while the region is hidden.
+          items:
+            type: string
+            format: uuid
         provider:
           type: string
           description: manual or hetzner.
@@ -9476,6 +9555,16 @@ components:
           type: string
         pooler_host:
           type: string
+        api_domain:
+          type: string
+          description: The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects.
+        early_access_org_ids:
+          type: array
+          description: Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
         provider:
           type: string
           description: manual (the default) or hetzner.
@@ -9496,7 +9585,43 @@ components:
           type: boolean
         hidden:
           type: boolean
-          description: Hidden regions take no new projects.
+          description: Hidden regions take new projects only from their early-access organisations.
+    ManageRolesRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    ManageRoles:
+      type: object
+      required: [enabled, logins]
+      properties:
+        enabled:
+          type: boolean
+          description: The owner role has CREATEROLE.
+        logins:
+          type: array
+          description: The owner's logins the poolers accept.
+          items:
+            type: object
+            required: [name, synced_at]
+            properties:
+              name:
+                type: string
+              synced_at:
+                type: string
+                format: date-time
+        skipped:
+          type: array
+          description: After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password).
+          items:
+            type: object
+            required: [name, reason]
+            properties:
+              name:
+                type: string
+              reason:
+                type: string
     ProjectResidencyRequest:
       type: object
       required: [enabled]

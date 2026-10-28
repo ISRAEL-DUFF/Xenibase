@@ -207,6 +207,7 @@ func run() error {
 	kinds := map[string]jobs.Kind{jobs.KindNoop: jobs.Noop()}
 	// Regions (V3 §6.1): the home region is where projects go by default.
 	regionSvc := regions.New(pool, cfg.Cloud.Region, log)
+	regionSvc.SetPlatformDomain(cfg.Edge.Domain)
 	if err := regionSvc.Ensure(ctx); err != nil {
 		return fmt.Errorf("regions: %w", err)
 	}
@@ -260,6 +261,9 @@ func run() error {
 		// Postgres minor releases, one instance at a time in the weekly
 		// maintenance window (V3 §2.4).
 		go func() { defer bg.Done(); backups.Dedicated.RunMaintenance(bgCtx, 5*time.Minute) }()
+		// Logins dedicated owners create with role management on (V4.2).
+		bg.Add(1)
+		go func() { defer bg.Done(); backups.Dedicated.RunOwnedRoles(bgCtx, 30*time.Second) }()
 	}
 
 	// Email carries the logo from, and links to, the web app.
@@ -391,7 +395,7 @@ func run() error {
 	// xenibase-edge follows.
 	var servicesSvc *services.Service
 	if projects != nil {
-		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, EdgeSecret: cfg.Edge.Secret}, log)
+		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret}, log)
 		if branchSvc != nil {
 			branchSvc.API = servicesSvc // branches get an API of their own (V4.1 §9.5)
 		}
@@ -466,7 +470,7 @@ func run() error {
 			Network: cfg.Cloud.HetznerNetworkID, PlacementGroup: cfg.Cloud.HetznerPlacementGroup, SSHKeys: cfg.Cloud.HetznerSSHKeys,
 			Bootstrap: cloud.Bootstrap{ServerURL: cfg.Cloud.ServerURL, ServerCA: cfg.Cloud.ServerCA, AgentImage: cfg.Cloud.AgentImage,
 				PGImage: cfg.Cloud.PGImage, PrivateCIDR: cfg.Cloud.PrivateCIDR},
-			Edge: edgeBoot,
+			Edge: edgeBoot, RegionAPIDomain: regionSvc.APIDomain,
 		}, log)
 		for name, k := range capacitySvc.Kinds() {
 			kinds[name] = k

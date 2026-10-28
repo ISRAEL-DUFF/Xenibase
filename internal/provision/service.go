@@ -700,11 +700,23 @@ func (s *Service) resolveRegion(ctx context.Context, p *CreateParams) error {
 		}
 	}
 	r, err := q.GetRegion(ctx, p.Region)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && r.Status != "active" && p.Branch == nil) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: no region %q", ErrInvalid, p.Region)
 	}
 	if err != nil {
 		return err
+	}
+	// A hidden region takes new projects only from its early-access
+	// organisations (a rehearsal, a first customer); a branch follows its
+	// parent wherever it is.
+	if r.Status != "active" && p.Branch == nil {
+		ok, err := q.RegionHasEarlyAccess(ctx, store.RegionHasEarlyAccessParams{RegionID: r.ID, OrgID: p.OrgID})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: no region %q", ErrInvalid, p.Region)
+		}
 	}
 	if p.DataResidency && !r.Residency {
 		return fmt.Errorf("%w: %s doesn't offer data residency", ErrInvalid, r.Name)

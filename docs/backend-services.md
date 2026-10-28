@@ -1047,8 +1047,8 @@ Run one xenibase-edge per region, on the region's nodes. It keeps no state.
 | `XENIBASE_API_DOMAIN` (server) | The API domain: projects are at `<ref>.<domain>`. |
 | `XENIBASE_EDGE_SECRET` (server and edges) | At least 32 characters, the same everywhere. Without it xenibase-server serves no edge. |
 | `XENIBASE_EDGE_CONTROL_URL` | xenibase-server's URL as the edge reaches it. |
-| `XENIBASE_EDGE_DOMAIN` | The same as `XENIBASE_API_DOMAIN`. |
-| `XENIBASE_EDGE_REGION` | The region it serves (empty for all). |
+| `XENIBASE_EDGE_DOMAIN` | The API domain it serves: `XENIBASE_API_DOMAIN`, or for an edge in a region with its own API domain, that domain ([Regions](regions.md#a-regions-api-domain)). |
+| `XENIBASE_EDGE_REGION` | The region it serves (empty for all). An edge for a region's own API domain sets it to that region. |
 | `XENIBASE_EDGE_TLS_CERT`, `XENIBASE_EDGE_TLS_KEY` | A wildcard certificate for `*.<domain>`. |
 | `XENIBASE_EDGE_LISTEN` | Default `:8443`. |
 | `XENIBASE_EDGE_POOLER_ADDR` | Optional: the transaction pooler as the edge reaches it. |

@@ -109,6 +109,16 @@ func (s *Service) Provisioned(ctx context.Context, p store.Project, log *jobs.St
 	}
 }
 
+// OwnerCreateRole is the owner's CREATEROLE attribute: on for a dedicated
+// project with role management on, where Postgres 16+ limits it to the
+// roles the owner creates (the instance is the project's alone).
+func OwnerCreateRole(p store.Project) string {
+	if p.ManageRoles && p.Tier == TierDedicated {
+		return "CREATEROLE"
+	}
+	return "NOCREATEROLE"
+}
+
 func (s *Service) ensureRole(ctx context.Context, p store.Project, set store.ProjectSettings, log *jobs.StepLogger) error {
 	if !crypto.IsSCRAMVerifier(p.ScramVerifier) || strings.Contains(p.ScramVerifier, "'") {
 		return jobs.Permanent(errors.New("project has an invalid SCRAM verifier"))
@@ -131,8 +141,8 @@ func (s *Service) ensureRole(ctx context.Context, p store.Project, set store.Pro
 	if err != nil {
 		return err
 	}
-	attrs := fmt.Sprintf("%s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT CONNECTION LIMIT %d PASSWORD %s",
-		login, set.ConnectionLimit, literal(p.ScramVerifier))
+	attrs := fmt.Sprintf("%s NOSUPERUSER NOCREATEDB %s NOREPLICATION NOBYPASSRLS INHERIT CONNECTION LIMIT %d PASSWORD %s",
+		login, OwnerCreateRole(p), set.ConnectionLimit, literal(p.ScramVerifier))
 	verb := "CREATE"
 	if exists {
 		verb = "ALTER"

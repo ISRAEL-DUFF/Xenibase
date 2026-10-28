@@ -169,6 +169,7 @@ function RegionPanel({
     name: r?.name ?? "",
     country: r?.country ?? "",
     pooler_host: r?.pooler_host ?? "",
+    api_domain: r?.api_domain ?? "",
     provider: r?.provider ?? "manual",
     location: r?.location ?? "",
     storage_target_id: r?.storage_target_id ?? null,
@@ -177,6 +178,9 @@ function RegionPanel({
     residency: r?.residency ?? false,
     hidden: r?.status === "hidden",
   });
+  const [early, setEarly] = useState(
+    (r?.early_access_org_ids ?? []).join("\n"),
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const set = (k: keyof AdminRegionRequest, v: unknown) =>
@@ -186,7 +190,10 @@ function RegionPanel({
     setBusy(true);
     setErr(null);
     try {
-      await api.saveRegion(id, f);
+      await api.saveRegion(id, {
+        ...f,
+        early_access_org_ids: early.split(/[\s,]+/).filter(Boolean),
+      });
       await qc.invalidateQueries({ queryKey: ["admin", "regions"] });
       await qc.invalidateQueries({ queryKey: ["regions"] });
       onClose();
@@ -281,6 +288,19 @@ function RegionPanel({
             />
           )}
         </Field>
+        <Field
+          label="API domain"
+          hint="Optional. Projects here serve their backend services at <ref>.<this domain>, from this region's edge, so API traffic stays in the region. Empty is the platform's API domain."
+        >
+          {(fid) => (
+            <Input
+              id={fid}
+              placeholder="ng.api.example.com"
+              value={f.api_domain ?? ""}
+              onChange={(e) => set("api_domain", e.target.value)}
+            />
+          )}
+        </Field>
         <Field label="Provider">
           {(fid) => (
             <Select
@@ -339,8 +359,25 @@ function RegionPanel({
             checked={!!f.hidden}
             onChange={(e) => set("hidden", e.target.checked)}
           />
-          <span>Hidden: no new projects (existing ones keep running).</span>
+          <span>
+            Hidden: no new projects except from early-access organisations
+            (existing ones keep running).
+          </span>
         </label>
+        <Field
+          label="Early-access organisations"
+          hint="Organisation IDs, one per line, that may create projects here while the region is hidden: your own for a rehearsal, or a first customer."
+        >
+          {(fid) => (
+            <textarea
+              id={fid}
+              rows={3}
+              className="h-20 rounded-md border border-line-strong bg-surface-2 p-2 font-mono text-xs focus:border-accent focus:outline-none"
+              value={early}
+              onChange={(e) => setEarly(e.target.value)}
+            />
+          )}
+        </Field>
         {err && <Alert>{err}</Alert>}
       </form>
     </SidePanel>

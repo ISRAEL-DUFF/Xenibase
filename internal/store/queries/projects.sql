@@ -99,3 +99,41 @@ SELECT migration_format FROM editor_preferences WHERE project_id = @project_id A
 INSERT INTO editor_preferences (project_id, user_id, org_id, migration_format)
 VALUES (@project_id, @user_id, @org_id, @migration_format)
 ON CONFLICT (project_id, user_id) DO UPDATE SET migration_format = EXCLUDED.migration_format, org_id = EXCLUDED.org_id, updated_at = now();
+
+-- name: SetProjectManageRoles :one
+-- tenant: system - the project was authorized by the caller.
+UPDATE projects SET manage_roles = @manage_roles WHERE id = @id RETURNING *;
+
+-- name: ManageRolesProjects :many
+-- tenant: system - the owned-roles sweep: dedicated projects with role
+-- management on, or with logins still synced from when it was.
+SELECT p.* FROM projects p
+WHERE p.deleted_at IS NULL AND p.tier = 'dedicated' AND p.status = 'active'
+  AND (p.manage_roles OR EXISTS (SELECT 1 FROM project_owned_logins l WHERE l.project_id = p.id))
+ORDER BY p.created_at;
+
+-- name: ListOwnedLogins :many
+-- tenant: system - one project's synced logins, the project authorized by the caller.
+SELECT role_name, synced_at FROM project_owned_logins WHERE project_id = @project_id ORDER BY role_name;
+
+-- name: OwnedLoginVerifiers :many
+-- tenant: system - one project's synced logins with their verifiers, for the sweep.
+SELECT role_name, scram_verifier FROM project_owned_logins WHERE project_id = @project_id ORDER BY role_name;
+
+-- name: DeleteOwnedLogins :exec
+-- tenant: system - the sweep replaces a project's whole set.
+DELETE FROM project_owned_logins WHERE project_id = @project_id;
+
+-- name: InsertOwnedLogin :exec
+-- tenant: system - the sweep replaces a project's whole set.
+INSERT INTO project_owned_logins (project_id, role_name, scram_verifier) VALUES (@project_id, @role_name, @scram_verifier);
+
+-- name: PoolerOwnedLogins :many
+-- tenant: system - logins dedicated owners created, which the poolers must
+-- accept; none while the project's logins are off (suspended organisation,
+-- hard storage lock).
+SELECT l.role_name, l.scram_verifier, p.region, p.forward_region, p.forward_until
+FROM project_owned_logins l JOIN projects p ON p.id = l.project_id JOIN organizations o ON o.id = p.org_id
+WHERE p.deleted_at IS NULL AND o.status = 'active' AND p.storage_state <> 'hard'
+  AND p.status IN ('active', 'moving', 'upgrading', 'restoring')
+ORDER BY l.role_name;

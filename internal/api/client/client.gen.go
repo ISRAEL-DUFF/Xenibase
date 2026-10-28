@@ -4138,10 +4138,16 @@ type AdminOrgSummaryStatus string
 
 // AdminRegion defines model for AdminRegion.
 type AdminRegion struct {
+	// ApiDomain The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN).
+	ApiDomain string `json:"api_domain"`
+
 	// CopyTargetId Where backups on platform targets are copied (V3 §2.5).
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      string              `json:"country"`
 	CreatedAt    time.Time           `json:"created_at"`
+
+	// EarlyAccessOrgIds Organisations that may create projects while the region is hidden.
+	EarlyAccessOrgIds []openapi_types.UUID `json:"early_access_org_ids"`
 
 	// FloatingIpId The region's pooler floating IP at the provider.
 	FloatingIpId *string `json:"floating_ip_id,omitempty"`
@@ -4188,11 +4194,16 @@ type AdminRegionListCopiesStatus string
 
 // AdminRegionRequest defines model for AdminRegionRequest.
 type AdminRegionRequest struct {
+	// ApiDomain The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects.
+	ApiDomain    *string             `json:"api_domain,omitempty"`
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      *string             `json:"country,omitempty"`
-	FloatingIpId *string             `json:"floating_ip_id,omitempty"`
 
-	// Hidden Hidden regions take no new projects.
+	// EarlyAccessOrgIds Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
+	FloatingIpId      *string               `json:"floating_ip_id,omitempty"`
+
+	// Hidden Hidden regions take new projects only from their early-access organisations.
 	Hidden     *bool   `json:"hidden,omitempty"`
 	Location   *string `json:"location,omitempty"`
 	Name       string  `json:"name"`
@@ -6994,6 +7005,29 @@ type MaintenanceWindow struct {
 	Weekday int `json:"weekday"`
 }
 
+// ManageRoles defines model for ManageRoles.
+type ManageRoles struct {
+	// Enabled The owner role has CREATEROLE.
+	Enabled bool `json:"enabled"`
+
+	// Logins The owner's logins the poolers accept.
+	Logins []struct {
+		Name     string    `json:"name"`
+		SyncedAt time.Time `json:"synced_at"`
+	} `json:"logins"`
+
+	// Skipped After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password).
+	Skipped *[]struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"skipped,omitempty"`
+}
+
+// ManageRolesRequest defines model for ManageRolesRequest.
+type ManageRolesRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Margins defines model for Margins.
 type Margins struct {
 	Categories        []CategoryCost     `json:"categories"`
@@ -7980,11 +8014,14 @@ type Project struct {
 	LegacyCredentialsUntil *time.Time `json:"legacy_credentials_until,omitempty"`
 
 	// Lifecycle A Free project paused or archived for inactivity (V3 §4).
-	Lifecycle *ProjectLifecycle  `json:"lifecycle,omitempty"`
-	MyRole    *ProjectRole       `json:"my_role,omitempty"`
-	Name      string             `json:"name"`
-	OrgId     openapi_types.UUID `json:"org_id"`
-	OwnerRole string             `json:"owner_role"`
+	Lifecycle *ProjectLifecycle `json:"lifecycle,omitempty"`
+
+	// ManageRoles A dedicated project's owner role has CREATEROLE (role management).
+	ManageRoles *bool              `json:"manage_roles,omitempty"`
+	MyRole      *ProjectRole       `json:"my_role,omitempty"`
+	Name        string             `json:"name"`
+	OrgId       openapi_types.UUID `json:"org_id"`
+	OwnerRole   string             `json:"owner_role"`
 
 	// ParentProjectId Set for a branch (V2 §8).
 	ParentProjectId *openapi_types.UUID `json:"parent_project_id,omitempty"`
@@ -8393,6 +8430,9 @@ type RecoveryCodesStatus struct {
 type Region struct {
 	// Country ISO 3166 two-letter code; empty when not tied to one.
 	Country string `json:"country"`
+
+	// EarlyAccessOrgIds Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
 
 	// Home The platform's home region, where projects go by default.
 	Home bool `json:"home"`
@@ -11265,6 +11305,9 @@ type CreateJobJSONRequestBody = JobRequest
 
 // UpdateJobJSONRequestBody defines body for UpdateJob for application/json ContentType.
 type UpdateJobJSONRequestBody = JobUpdate
+
+// SetProjectManageRolesJSONRequestBody defines body for SetProjectManageRoles for application/json ContentType.
+type SetProjectManageRolesJSONRequestBody = ManageRolesRequest
 
 // AddProjectMemberJSONRequestBody defines body for AddProjectMember for application/json ContentType.
 type AddProjectMemberJSONRequestBody = ProjectMemberRequest
@@ -14631,6 +14674,46 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /api/v1/projects/{id}/jobs/{job_id}/runs (the `ListJobRuns` operationId).
 	ListJobRuns(ctx context.Context, id ProjectID, jobId JobID, params *ListJobRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+	//
+	// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+	GetProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectManageRolesWithBody Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRolesWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRoles(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SyncProjectManageRoles Sync the owner's logins to the poolers now
+	//
+	// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+	//
+	// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+	SyncProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListProjectMembers Project members (org owners and admins are implicit admins)
 	//
@@ -23367,6 +23450,86 @@ func (c *Client) RunJob(ctx context.Context, id ProjectID, jobId JobID, reqEdito
 // Corresponds with GET /api/v1/projects/{id}/jobs/{job_id}/runs (the `ListJobRuns` operationId).
 func (c *Client) ListJobRuns(ctx context.Context, id ProjectID, jobId JobID, params *ListJobRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListJobRunsRequest(c.Server, id, jobId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+//
+// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+func (c *Client) GetProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetProjectManageRolesRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectManageRolesWithBody Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *Client) SetProjectManageRolesWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectManageRolesRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *Client) SetProjectManageRoles(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectManageRolesRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SyncProjectManageRoles Sync the owner's logins to the poolers now
+//
+// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+//
+// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+func (c *Client) SyncProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSyncProjectManageRolesRequest(c.Server, id)
 	if err != nil {
 		return nil, err
 	}
@@ -39265,6 +39428,121 @@ func NewListJobRunsRequest(server string, id ProjectID, jobId JobID, params *Lis
 	return req, nil
 }
 
+// NewGetProjectManageRolesRequest constructs an http.Request for the GetProjectManageRoles method
+func NewGetProjectManageRolesRequest(server string, id ProjectID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/manage-roles", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetProjectManageRolesRequest calls the generic SetProjectManageRoles builder with application/json body
+func NewSetProjectManageRolesRequest(server string, id ProjectID, body SetProjectManageRolesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetProjectManageRolesRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewSetProjectManageRolesRequestWithBody constructs an http.Request for the SetProjectManageRoles method, with any body, and a specified content type
+func NewSetProjectManageRolesRequestWithBody(server string, id ProjectID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/manage-roles", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewSyncProjectManageRolesRequest constructs an http.Request for the SyncProjectManageRoles method
+func NewSyncProjectManageRolesRequest(server string, id ProjectID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/manage-roles/sync", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListProjectMembersRequest constructs an http.Request for the ListProjectMembers method
 func NewListProjectMembersRequest(server string, id ProjectID) (*http.Request, error) {
 	var err error
@@ -47453,6 +47731,50 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /api/v1/projects/{id}/jobs/{job_id}/runs (the `ListJobRuns` operationId).
 	ListJobRunsWithResponse(ctx context.Context, id ProjectID, jobId JobID, params *ListJobRunsParams, reqEditors ...RequestEditorFn) (*ListJobRunsResponse, error)
+
+	// GetProjectManageRolesWithResponse Role management on a dedicated project, and the owner's logins the poolers accept
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+	GetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectManageRolesResponse, error)
+
+	// SetProjectManageRolesWithBodyWithResponse Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRolesWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error)
+
+	// SetProjectManageRolesWithResponse Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error)
+
+	// SyncProjectManageRolesWithResponse Sync the owner's logins to the poolers now
+	//
+	// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+	SyncProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*SyncProjectManageRolesResponse, error)
 
 	// ListProjectMembersWithResponse Project members (org owners and admins are implicit admins)
 	//
@@ -63251,6 +63573,150 @@ func (r ListJobRunsResponse) ContentType() string {
 	return ""
 }
 
+type GetProjectManageRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ManageRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetProjectManageRolesResponse) GetJSON200() *ManageRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetProjectManageRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetProjectManageRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetProjectManageRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetProjectManageRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetProjectManageRolesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetProjectManageRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ManageRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetProjectManageRolesResponse) GetJSON200() *ManageRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetProjectManageRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetProjectManageRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetProjectManageRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetProjectManageRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetProjectManageRolesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SyncProjectManageRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ManageRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SyncProjectManageRolesResponse) GetJSON200() *ManageRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SyncProjectManageRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SyncProjectManageRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SyncProjectManageRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SyncProjectManageRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SyncProjectManageRolesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListProjectMembersResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -74221,6 +74687,74 @@ func (c *ClientWithResponses) ListJobRunsWithResponse(ctx context.Context, id Pr
 		return nil, err
 	}
 	return ParseListJobRunsResponse(rsp)
+}
+
+// GetProjectManageRolesWithResponse Role management on a dedicated project, and the owner's logins the poolers accept
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+func (c *ClientWithResponses) GetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectManageRolesResponse, error) {
+	rsp, err := c.GetProjectManageRoles(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetProjectManageRolesResponse(rsp)
+}
+
+// SetProjectManageRolesWithBodyWithResponse Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *ClientWithResponses) SetProjectManageRolesWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error) {
+	rsp, err := c.SetProjectManageRolesWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectManageRolesResponse(rsp)
+}
+
+// SetProjectManageRolesWithResponse Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *ClientWithResponses) SetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error) {
+	rsp, err := c.SetProjectManageRoles(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectManageRolesResponse(rsp)
+}
+
+// SyncProjectManageRolesWithResponse Sync the owner's logins to the poolers now
+//
+// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+func (c *ClientWithResponses) SyncProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*SyncProjectManageRolesResponse, error) {
+	rsp, err := c.SyncProjectManageRoles(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSyncProjectManageRolesResponse(rsp)
 }
 
 // ListProjectMembersWithResponse Project members (org owners and admins are implicit admins)
@@ -86403,6 +86937,105 @@ func ParseListJobRunsResponse(rsp *http.Response) (*ListJobRunsResponse, error) 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest JobRunList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetProjectManageRolesResponse parses an HTTP response from a GetProjectManageRolesWithResponse call
+func ParseGetProjectManageRolesResponse(rsp *http.Response) (*GetProjectManageRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetProjectManageRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ManageRoles
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetProjectManageRolesResponse parses an HTTP response from a SetProjectManageRolesWithResponse call
+func ParseSetProjectManageRolesResponse(rsp *http.Response) (*SetProjectManageRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetProjectManageRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ManageRoles
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSyncProjectManageRolesResponse parses an HTTP response from a SyncProjectManageRolesWithResponse call
+func ParseSyncProjectManageRolesResponse(rsp *http.Response) (*SyncProjectManageRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SyncProjectManageRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ManageRoles
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

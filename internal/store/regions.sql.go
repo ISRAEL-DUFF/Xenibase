@@ -12,6 +12,54 @@ import (
 	"github.com/google/uuid"
 )
 
+const addRegionEarlyAccess = `-- name: AddRegionEarlyAccess :exec
+INSERT INTO region_early_access (region_id, org_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+`
+
+type AddRegionEarlyAccessParams struct {
+	RegionID string
+	OrgID    uuid.UUID
+}
+
+func (q *Queries) AddRegionEarlyAccess(ctx context.Context, arg AddRegionEarlyAccessParams) error {
+	_, err := q.db.Exec(ctx, addRegionEarlyAccess, arg.RegionID, arg.OrgID)
+	return err
+}
+
+const clearRegionEarlyAccess = `-- name: ClearRegionEarlyAccess :exec
+DELETE FROM region_early_access WHERE region_id = $1
+`
+
+// tenant: system - the platform admin replaces a region's whole list.
+func (q *Queries) ClearRegionEarlyAccess(ctx context.Context, regionID string) error {
+	_, err := q.db.Exec(ctx, clearRegionEarlyAccess, regionID)
+	return err
+}
+
+const earlyAccessRegionsForOrg = `-- name: EarlyAccessRegionsForOrg :many
+SELECT region_id FROM region_early_access WHERE org_id = $1
+`
+
+func (q *Queries) EarlyAccessRegionsForOrg(ctx context.Context, orgID uuid.UUID) ([]string, error) {
+	rows, err := q.db.Query(ctx, earlyAccessRegionsForOrg, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var region_id string
+		if err := rows.Scan(&region_id); err != nil {
+			return nil, err
+		}
+		items = append(items, region_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ensureRegion = `-- name: EnsureRegion :exec
 INSERT INTO regions (id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING
 `
@@ -27,7 +75,7 @@ func (q *Queries) EnsureRegion(ctx context.Context, arg EnsureRegionParams) erro
 }
 
 const getRegion = `-- name: GetRegion :one
-SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at FROM regions WHERE id = $1
+SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain FROM regions WHERE id = $1
 `
 
 func (q *Queries) GetRegion(ctx context.Context, id string) (Region, error) {
@@ -46,13 +94,14 @@ func (q *Queries) GetRegion(ctx context.Context, id string) (Region, error) {
 		&i.Residency,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ApiDomain,
 	)
 	return i, err
 }
 
 const listRegions = `-- name: ListRegions :many
 
-SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at FROM regions ORDER BY created_at, id
+SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain FROM regions ORDER BY created_at, id
 `
 
 // Regions (V3 §6).
@@ -78,6 +127,7 @@ func (q *Queries) ListRegions(ctx context.Context) ([]Region, error) {
 			&i.Residency,
 			&i.Status,
 			&i.CreatedAt,
+			&i.ApiDomain,
 		); err != nil {
 			return nil, err
 		}
@@ -87,6 +137,48 @@ func (q *Queries) ListRegions(ctx context.Context) ([]Region, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const regionEarlyAccessOrgs = `-- name: RegionEarlyAccessOrgs :many
+
+SELECT org_id FROM region_early_access WHERE region_id = $1 ORDER BY created_at, org_id
+`
+
+// Early access to hidden regions.
+func (q *Queries) RegionEarlyAccessOrgs(ctx context.Context, regionID string) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, regionEarlyAccessOrgs, regionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var org_id uuid.UUID
+		if err := rows.Scan(&org_id); err != nil {
+			return nil, err
+		}
+		items = append(items, org_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const regionHasEarlyAccess = `-- name: RegionHasEarlyAccess :one
+SELECT EXISTS (SELECT 1 FROM region_early_access WHERE region_id = $1 AND org_id = $2)
+`
+
+type RegionHasEarlyAccessParams struct {
+	RegionID string
+	OrgID    uuid.UUID
+}
+
+func (q *Queries) RegionHasEarlyAccess(ctx context.Context, arg RegionHasEarlyAccessParams) (bool, error) {
+	row := q.db.QueryRow(ctx, regionHasEarlyAccess, arg.RegionID, arg.OrgID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const regionUsage = `-- name: RegionUsage :many
@@ -160,7 +252,7 @@ func (q *Queries) SetProjectRegion(ctx context.Context, arg SetProjectRegionPara
 }
 
 const setProjectResidency = `-- name: SetProjectResidency :one
-UPDATE projects SET data_residency = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles
+UPDATE projects SET data_residency = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles
 `
 
 type SetProjectResidencyParams struct {
@@ -217,12 +309,13 @@ func (q *Queries) SetProjectResidency(ctx context.Context, arg SetProjectResiden
 		&i.ForwardRegion,
 		&i.ForwardUntil,
 		&i.IntegratorRoles,
+		&i.ManageRoles,
 	)
 	return i, err
 }
 
 const setRegionStatus = `-- name: SetRegionStatus :one
-UPDATE regions SET status = $1 WHERE id = $2 RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at
+UPDATE regions SET status = $1 WHERE id = $2 RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain
 `
 
 type SetRegionStatusParams struct {
@@ -246,6 +339,7 @@ func (q *Queries) SetRegionStatus(ctx context.Context, arg SetRegionStatusParams
 		&i.Residency,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ApiDomain,
 	)
 	return i, err
 }
@@ -266,12 +360,12 @@ func (q *Queries) SetStorageTargetRegion(ctx context.Context, arg SetStorageTarg
 }
 
 const upsertRegion = `-- name: UpsertRegion :one
-INSERT INTO regions (id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO regions (id, name, country, pooler_host, api_domain, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, country = EXCLUDED.country, pooler_host = EXCLUDED.pooler_host,
-  provider = EXCLUDED.provider, location = EXCLUDED.location, storage_target_id = EXCLUDED.storage_target_id,
+  api_domain = EXCLUDED.api_domain, provider = EXCLUDED.provider, location = EXCLUDED.location, storage_target_id = EXCLUDED.storage_target_id,
   copy_target_id = EXCLUDED.copy_target_id, floating_ip_id = EXCLUDED.floating_ip_id, residency = EXCLUDED.residency, status = EXCLUDED.status
-RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at
+RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain
 `
 
 type UpsertRegionParams struct {
@@ -279,6 +373,7 @@ type UpsertRegionParams struct {
 	Name            string
 	Country         string
 	PoolerHost      string
+	ApiDomain       string
 	Provider        string
 	Location        string
 	StorageTargetID *uuid.UUID
@@ -294,6 +389,7 @@ func (q *Queries) UpsertRegion(ctx context.Context, arg UpsertRegionParams) (Reg
 		arg.Name,
 		arg.Country,
 		arg.PoolerHost,
+		arg.ApiDomain,
 		arg.Provider,
 		arg.Location,
 		arg.StorageTargetID,
@@ -316,6 +412,7 @@ func (q *Queries) UpsertRegion(ctx context.Context, arg UpsertRegionParams) (Reg
 		&i.Residency,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ApiDomain,
 	)
 	return i, err
 }

@@ -5425,6 +5425,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/manage-roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Role management on a dedicated project, and the owner's logins the poolers accept */
+        get: operations["getProjectManageRoles"];
+        /**
+         * Turn role management on or off (organisation owners; step-up)
+         * @description On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+         *     and later that lets it create roles and manage only those it created;
+         *     it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+         *     owner creates, named <database>_<name>, connect through the poolers
+         *     within about 30 seconds (or at once after a sync), with the project's
+         *     connection limit. Off removes CREATEROLE; roles already created stay.
+         */
+        put: operations["setProjectManageRoles"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/manage-roles/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sync the owner's logins to the poolers now
+         * @description Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+         */
+        post: operations["syncProjectManageRoles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/residency": {
         parameters: {
             query?: never;
@@ -6258,6 +6304,8 @@ export interface components {
             region?: string;
             /** @description Data, backups and branches stay in the project's region's country (V3 §6.3). */
             data_residency?: boolean;
+            /** @description A dedicated project's owner role has CREATEROLE (role management). */
+            manage_roles?: boolean;
             /** @description After a region move, the old region still routing the old hostname. */
             forward_region?: string | null;
             /** Format: date-time */
@@ -6355,6 +6403,8 @@ export interface components {
             residency: boolean;
             /** @description The platform's home region, where projects go by default. */
             home: boolean;
+            /** @description Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens. */
+            early_access_org_ids?: string[];
         };
         RegionList: {
             items: components["schemas"]["Region"][];
@@ -6365,6 +6415,10 @@ export interface components {
             country: string;
             /** @description The hostname in the region's connection strings; empty is the platform's database host. */
             pooler_host: string;
+            /** @description The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN). */
+            api_domain: string;
+            /** @description Organisations that may create projects while the region is hidden. */
+            early_access_org_ids: string[];
             /** @description manual or hetzner. */
             provider: string;
             /** @description The provider's location for new servers (e.g. nbg1); empty for manual. */
@@ -6418,6 +6472,10 @@ export interface components {
             name: string;
             country?: string;
             pooler_host?: string;
+            /** @description The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects. */
+            api_domain?: string;
+            /** @description Replaces the organisations that may create projects while the region is hidden; left out, the list is kept. */
+            early_access_org_ids?: string[];
             /** @description manual (the default) or hetzner. */
             provider?: string;
             location?: string;
@@ -6427,8 +6485,26 @@ export interface components {
             copy_target_id?: string | null;
             floating_ip_id?: string | null;
             residency?: boolean;
-            /** @description Hidden regions take no new projects. */
+            /** @description Hidden regions take new projects only from their early-access organisations. */
             hidden?: boolean;
+        };
+        ManageRolesRequest: {
+            enabled: boolean;
+        };
+        ManageRoles: {
+            /** @description The owner role has CREATEROLE. */
+            enabled: boolean;
+            /** @description The owner's logins the poolers accept. */
+            logins: {
+                name: string;
+                /** Format: date-time */
+                synced_at: string;
+            }[];
+            /** @description After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password). */
+            skipped?: {
+                name: string;
+                reason: string;
+            }[];
         };
         ProjectResidencyRequest: {
             enabled: boolean;
@@ -20421,7 +20497,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Active regions. */
+            /** @description Active regions, and hidden ones the caller's organisations have early access to. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -20595,6 +20671,79 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Operation"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getProjectManageRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The setting and the synced logins. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManageRoles"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    setProjectManageRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManageRolesRequest"];
+            };
+        };
+        responses: {
+            /** @description Changed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManageRoles"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    syncProjectManageRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Synced. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManageRoles"];
                 };
             };
             default: components["responses"]["Error"];

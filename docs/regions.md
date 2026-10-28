@@ -36,8 +36,18 @@ Regions are managed under **Platform → Regions** (or
    (Platform → Regions says "served by the home poolers").
 5. **Data residency** (optional): tick **Offer data residency**. It needs
    the country and an in-country backup target.
+6. **API domain** (optional, for backend services): set the region's own
+   **API domain** (`ng.api.example.com`) and run an edge in the region
+   for it (below), so its projects' API traffic stays in the region.
 
-Hidden regions take no new projects; existing ones keep running.
+Hidden regions take no new projects except from their **early-access
+organisations**; existing ones keep running. List your own organisation
+there to rehearse on the region before it opens, or a first customer to
+start on it before everyone can (Platform → Regions → the region →
+**Early-access organisations**, one organisation ID per line, or
+`early_access_org_ids` in the `PUT`). Those organisations see the region
+in New project, marked "early access"; nobody else does. Left out of a
+`PUT`, the list is kept; opening the region doesn't clear it.
 A hidden region shows its **launch checks** in its panel (and at
 `GET /api/v1/admin/regions/{id}/readiness`): healthy nodes, the pooler
 pair and its failure domains, the floating IP, the hostname, backup and
@@ -68,6 +78,39 @@ can't offer HA.
 Each region's pooler hosts get their own configuration: their projects'
 routes and logins, plus those forwarded to them, with their own
 generation and floating IP in the arbiter.
+
+## A region's API domain
+
+A project's backend services (data API, auth, files, realtime) are at
+`https://<ref>.<api-domain>`. With one platform API domain
+(`XENIBASE_API_DOMAIN`), every project's API is reached through the same
+wildcard DNS record, usually pointing at the home region, so a Lagos
+project's API calls would cross to the home region and back. Give the
+region its own API domain to keep them there:
+
+1. **DNS and TLS.** A wildcard record `*.ng.api.example.com` pointing at
+   the region's edge (a node in the region, or a floating IP in front of
+   two), and a wildcard certificate for it, obtained the same way as the
+   platform's ([Enabling backend services](enabling-backend-services.md)).
+2. **The edge.** Run xenibase-edge in the region with
+   `XENIBASE_EDGE_DOMAIN=ng.api.example.com` and
+   `XENIBASE_EDGE_REGION=ng-lagos`: it serves the region's projects, and
+   only them. Edge nodes Xenibase adds in the region get the region's
+   domain in their cloud-init.
+3. **Platform → Regions → the region → API domain:** `ng.api.example.com`.
+   It must differ from the platform's domain and from every other
+   region's.
+
+From then on the dashboard, the API page, `xenibase services env`,
+branches, auth emails and signed file URLs give the region's projects
+their `https://<ref>.ng.api.example.com` URL. Set it **before** the
+region's first project enables backend services: changing it later
+changes those projects' API URL, and their apps, OAuth redirect URLs and
+saved links need the new one. A project already reachable at
+`<ref>.<platform domain>` keeps working there as long as an edge without
+a region (`XENIBASE_EDGE_REGION` empty) serves the platform domain; an
+edge limited to another region doesn't serve it. A project moved to
+another region takes that region's API URL.
 
 ## Data residency
 

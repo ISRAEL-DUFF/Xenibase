@@ -279,6 +279,7 @@ func (s *Server) toAPIProject(p store.Project) (gen.Project, error) {
 		Connection:             toAPIConnection(s.projects.ConnectionFor(p), ""),
 		Region:                 &p.Region,
 		DataResidency:          &p.DataResidency,
+		ManageRoles:            &p.ManageRoles,
 		ForwardRegion:          p.ForwardRegion,
 		ForwardUntil:           p.ForwardUntil,
 		StorageState:           ptrTo(gen.StorageState(p.StorageState)),

@@ -114,6 +114,7 @@ export function ProjectComputePage() {
       {p.tier === "dedicated" && p.instance && (
         <InstancePanel projectId={p.id} instance={p.instance} />
       )}
+      {p.tier === "dedicated" && <ManageRolesPanel p={p} />}
       <ResizeCard p={p} />
       <HACard p={p} />
       <ReplicasCard p={p} />
@@ -227,6 +228,100 @@ function GeneralPanel({ p }: { p: Project }) {
         </FormRow>
       </Panel>
     </form>
+  );
+}
+
+/** Role management on a dedicated project: the owner role's CREATEROLE,
+ * for applications whose migrations create roles, and the logins it
+ * created that the poolers accept. */
+function ManageRolesPanel({ p }: { p: Project }) {
+  const qc = useQueryClient();
+  const { org } = useCurrentOrg();
+  const owner = org?.role === "owner";
+  const key = ["project", p.id, "manage-roles"];
+  const mr = useQuery({ queryKey: key, queryFn: () => api.manageRoles(p.id) });
+  const stepUp = useStepUp(
+    "Role management lets this project's owner create database roles: confirm with your password.",
+  );
+  const [err, setErr] = useState<string | null>(null);
+  const [skipped, setSkipped] = useState<{ name: string; reason: string }[]>(
+    [],
+  );
+  const toggle = async (on: boolean) => {
+    setErr(null);
+    try {
+      await stepUp.run(async () => {
+        await api.setManageRoles(p.id, on);
+        await qc.invalidateQueries({ queryKey: key });
+        await qc.invalidateQueries({ queryKey: ["project", p.id] });
+      });
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
+  const sync = async () => {
+    setErr(null);
+    try {
+      const res = await api.syncManageRoles(p.id);
+      setSkipped(res.skipped ?? []);
+      await qc.invalidateQueries({ queryKey: key });
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
+  const logins = mr.data?.logins ?? [];
+  return (
+    <Panel title="Database roles">
+      <FormRow
+        label="Let the owner create roles"
+        description={
+          owner
+            ? `Gives the owner role CREATEROLE, for migrations that create their own roles. It can manage only the roles it creates. Logins named ${p.db_name}_<name> connect through the poolers within 30 seconds.`
+            : "Only organisation owners can change this."
+        }
+      >
+        <Switch
+          checked={!!mr.data?.enabled}
+          disabled={!owner || mr.isLoading}
+          onCheckedChange={(v) => void toggle(v)}
+          aria-label="Let the owner create roles"
+          data-testid="manage-roles"
+        />
+      </FormRow>
+      {(mr.data?.enabled || logins.length > 0) && (
+        <FormRow
+          label="Logins the poolers accept"
+          description="Created by the owner. Each gets the project's connection limit."
+        >
+          <div className="flex flex-col gap-2 text-[13px]">
+            {logins.length === 0 ? (
+              <span className="text-fg-muted">None yet.</span>
+            ) : (
+              <ul className="font-mono">
+                {logins.map((l) => (
+                  <li key={l.name}>{l.name}</li>
+                ))}
+              </ul>
+            )}
+            {skipped.length > 0 && (
+              <ul className="text-fg-muted">
+                {skipped.map((s) => (
+                  <li key={s.name}>
+                    <span className="font-mono">{s.name}</span>: not synced (
+                    {s.reason})
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div>
+              <Button onClick={() => void sync()}>Sync now</Button>
+            </div>
+          </div>
+        </FormRow>
+      )}
+      {err && <Alert>{err}</Alert>}
+      {stepUp.dialog}
+    </Panel>
   );
 }
 

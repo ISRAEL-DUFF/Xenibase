@@ -127,6 +127,7 @@ var expected = map[authz.Action][]string{
 	authz.OrgBillingManage:   {rOwner, rBilling}, // V3 §3.2: not admins
 	authz.ProjectExport:      {rOwner},
 	authz.ProjectResidency:   {rOwner},
+	authz.ProjectManageRoles: {rOwner},
 	authz.PlatformManage:     {rPlatform},
 }
 
@@ -509,6 +510,7 @@ var specMatrix = map[authz.Action][]string{
 	},
 	// "Rotate app password, settings/guardrails, extensions"
 	authz.ProjectSettings: {
+		"GET /api/v1/projects/{id}/manage-roles", "POST /api/v1/projects/{id}/manage-roles/sync",
 		"PATCH /api/v1/projects/{id}/settings", "POST /api/v1/projects/{id}/rotate-password",
 		"POST /api/v1/projects/{id}/extensions", "POST /api/v1/projects/{id}/instance",
 		// §10.2 switch to opaque credentials (a new app password), §10.4 Reclaim space
@@ -592,6 +594,8 @@ var specMatrix = map[authz.Action][]string{
 	authz.ProjectExport: {"GET /api/v1/backups/{id}/download"},
 	// V3 §6.3 the data residency setting: owners only
 	authz.ProjectResidency: {"PUT /api/v1/projects/{id}/residency"},
+	// The owner's CREATEROLE on a dedicated project: owners only
+	authz.ProjectManageRoles: {"PUT /api/v1/projects/{id}/manage-roles"},
 	// The signed-in user's own account
 	authz.Self: {
 		"POST /api/v1/auth/reauth", "POST /api/v1/auth/logout", "GET /api/v1/me", "PATCH /api/v1/me", "POST /api/v1/me/password",

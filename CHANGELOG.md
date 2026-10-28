@@ -7,6 +7,39 @@ bundle share one version (spec §11.5).
 
 ## v4.2.4
 
+### Added
+- **A region's own API domain.** Platform → Regions → **API domain**
+  (`api_domain` on `PUT /api/v1/admin/regions/{id}`) gives a region's projects
+  `https://<ref>.<api-domain>` for their backend services, served by an edge in
+  the region (`XENIBASE_EDGE_DOMAIN` set to it, `XENIBASE_EDGE_REGION` to the
+  region), so a Lagos project's API traffic stays in Lagos instead of crossing
+  to the home region. Edge nodes Xenibase adds in the region get it in their
+  cloud-init. See `docs/regions.md`.
+- **Role management on dedicated projects.** An organisation owner can let a
+  dedicated project's owner role create roles (`CREATEROLE`, Project Settings →
+  Compute → Database roles, or `PUT /api/v1/projects/{id}/manage-roles`), for
+  applications whose migrations create their own roles. Postgres 16+ limits it
+  to the roles the owner creates. Logins it creates named `<database>_<name>`
+  connect through the poolers within 30 seconds (`POST …/manage-roles/sync` for
+  at once), with the project's connection limit; moves and major upgrades take
+  the roles along. See `docs/database-roles.md`.
+- **Early access to hidden regions.** A hidden region takes new projects from
+  the organisations in its **Early-access organisations** list
+  (`early_access_org_ids`), for rehearsals before it opens or a first customer;
+  `GET /api/v1/regions` lists it to their members. Before, a hidden region
+  refused every project, so the Lagos launch rehearsals could not run until it
+  was open.
+
+### Security
+- Built with Go 1.26.10, which distrusts compromised intermediate certificates
+  in `crypto/x509` (GO-2026-6809); the agent's TLS connections reached it.
+
+### Upgrading
+- Migration 00056 adds `regions.api_domain` and `region_early_access`. Nothing
+  changes until a region is given a domain or an early-access list.
+- Migration 00057 adds `projects.manage_roles` and `project_owned_logins`.
+  Nothing changes until an owner turns role management on.
+
 ### Fixed
 - **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.
 - **A source that doesn't answer is explained, not an "internal error".** When the import's preflight (or the import itself) can't read the source in time, for example because a pooler in front of it has no free connection for that login, or a query is refused, the answer is now a clear request error naming the likely cause (the password is redacted). It was a 500 after the preflight's one-minute limit.

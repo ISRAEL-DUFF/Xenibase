@@ -158,7 +158,14 @@ func checkMoveRegion(ctx context.Context, q *store.Queries, pr store.Project, no
 		return err
 	}
 	if r.Status != "active" {
-		return fmt.Errorf("%w: region %s is not open for projects", provision.ErrInvalid, r.ID)
+		// A hidden region takes its early-access organisations' projects.
+		ok, err := q.RegionHasEarlyAccess(ctx, store.RegionHasEarlyAccessParams{RegionID: r.ID, OrgID: pr.OrgID})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: region %s is not open for projects", provision.ErrInvalid, r.ID)
+		}
 	}
 	return nil
 }
@@ -259,6 +266,9 @@ func (s *Service) prepareTarget(ctx context.Context, op store.Operation, p, pt s
 		return err
 	}
 	if err := s.restoreIntegratorRoles(ctx, p, pt, log); err != nil {
+		return err
+	}
+	if err := s.restoreOwnedRoles(ctx, p, pt, log); err != nil {
 		return err
 	}
 	src, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)

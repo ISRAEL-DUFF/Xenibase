@@ -335,11 +335,14 @@ var routeRules = map[string]rule{
 	"GET /api/v1/projects/{id}/backup-key/download":                  {scope: scopeProject, action: authz.BackupStorage},
 	// Restoring in place needs the project admin role; the handler checks
 	// it for that mode.
-	"POST /api/v1/backups/{id}/restore":   {scope: scopeBackup, action: authz.BackupCreate},
-	"GET /api/v1/backups/{id}/download":   {scope: scopeBackup, action: authz.ProjectExport},
-	"PUT /api/v1/projects/{id}/residency": {scope: scopeProject, action: authz.ProjectResidency},
-	"GET /api/v1/operations/{id}":         {scope: scopeOperation, action: authz.ProjectView},
-	"GET /api/v1/operations/{id}/stream":  {scope: scopeOperation, action: authz.ProjectView},
+	"POST /api/v1/backups/{id}/restore":            {scope: scopeBackup, action: authz.BackupCreate},
+	"GET /api/v1/backups/{id}/download":            {scope: scopeBackup, action: authz.ProjectExport},
+	"PUT /api/v1/projects/{id}/residency":          {scope: scopeProject, action: authz.ProjectResidency},
+	"GET /api/v1/projects/{id}/manage-roles":       {scope: scopeProject, action: authz.ProjectSettings, token: authz.ScopeRead},
+	"PUT /api/v1/projects/{id}/manage-roles":       {scope: scopeProject, action: authz.ProjectManageRoles},
+	"POST /api/v1/projects/{id}/manage-roles/sync": {scope: scopeProject, action: authz.ProjectSettings},
+	"GET /api/v1/operations/{id}":                  {scope: scopeOperation, action: authz.ProjectView},
+	"GET /api/v1/operations/{id}/stream":           {scope: scopeOperation, action: authz.ProjectView},
 
 	// The platform.
 	"PUT /api/v1/settings/db-host":             {scope: scopePlatform, action: authz.PlatformManage},
