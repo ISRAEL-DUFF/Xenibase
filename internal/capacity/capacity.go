@@ -60,6 +60,9 @@ type Config struct {
 	// Edge is what an edge node runs besides its agent (V4.1 §11): nil
 	// leaves edge proposals to be provisioned by hand.
 	Edge *cloud.EdgeBootstrap
+	// RegionAPIDomain is a region's own API domain, if it has one, which
+	// an edge node there serves instead of Edge.Domain.
+	RegionAPIDomain func(region string) string
 	// JoinTimeout bounds the wait for a new server's agent (20 minutes).
 	JoinTimeout time.Duration
 	// Poll is how often the provisioning flow checks for the agent (5 s).

@@ -88,6 +88,11 @@ func (s *Service) runProvision(ctx context.Context, op store.Operation, log *job
 				}
 				e := *s.cfg.Edge
 				e.Region = p.Region
+				if s.cfg.RegionAPIDomain != nil {
+					if d := s.cfg.RegionAPIDomain(p.Region); d != "" {
+						e.Domain = d
+					}
+				}
 				b.Edge = &e
 			}
 			userData, err := b.CloudInit()

@@ -110,7 +110,11 @@ func (s *Service) queueEmail(ctx context.Context, projectID uuid.UUID, ref strin
 	}
 	site := st.Resolve().SiteURL
 	if site == "" {
-		site = s.URL(ref, "")
+		region := ""
+		if p, err := store.New(s.db).GetProject(ctx, projectID); err == nil {
+			region = p.Region
+		}
+		site = s.URL(ref, region)
 	}
 	vars := TemplateVars{Code: m.Code, Link: m.Link, Email: m.To, SiteURL: site}
 	subject, body, err := Render(m.Kind, tpl[m.Kind], vars)

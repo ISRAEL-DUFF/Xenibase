@@ -19,6 +19,7 @@ var tenantTables = []string{
 	"tickets", "ticket_messages", "org_support_phones", "legal_documents", "legal_acceptances", "mrr_snapshots",
 	"rebalance_moves", "cost_allocations",
 	"query_stats", "query_texts", "query_snapshots", "slow_queries",
+	"region_early_access",
 }
 
 // TestTenantQueriesAreScoped is the V2 §2.6 lint: every query on a tenant

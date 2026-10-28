@@ -288,6 +288,7 @@ func Start(t testing.TB, opts Options) *Env {
 	pp, _ := strconv.Atoi(pport)
 	st := settings.New(db, host)
 	regionSvc := regions.New(db, "eu-central", log)
+	regionSvc.SetPlatformDomain(EdgeDomain)
 	if err := regionSvc.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +393,7 @@ func Start(t testing.TB, opts Options) *Env {
 	// (Env.StartEdge).
 	turnstile := NewFakeTurnstile()
 	t.Cleanup(turnstile.Close)
-	servicesSvc := services.New(db, svc, services.Config{Domain: EdgeDomain, EdgeSecret: EdgeSecret, CaptchaVerifyURL: turnstile.URL}, log)
+	servicesSvc := services.New(db, svc, services.Config{Domain: EdgeDomain, RegionDomain: regionSvc.APIDomain, EdgeSecret: EdgeSecret, CaptchaVerifyURL: turnstile.URL}, log)
 	branchSvc.API = servicesSvc
 	servicesSvc.Mail = mailSvc
 	servicesSvc.Files = backups.FilesTarget

@@ -6355,6 +6355,8 @@ export interface components {
             residency: boolean;
             /** @description The platform's home region, where projects go by default. */
             home: boolean;
+            /** @description Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens. */
+            early_access_org_ids?: string[];
         };
         RegionList: {
             items: components["schemas"]["Region"][];
@@ -6365,6 +6367,10 @@ export interface components {
             country: string;
             /** @description The hostname in the region's connection strings; empty is the platform's database host. */
             pooler_host: string;
+            /** @description The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN). */
+            api_domain: string;
+            /** @description Organisations that may create projects while the region is hidden. */
+            early_access_org_ids: string[];
             /** @description manual or hetzner. */
             provider: string;
             /** @description The provider's location for new servers (e.g. nbg1); empty for manual. */
@@ -6418,6 +6424,10 @@ export interface components {
             name: string;
             country?: string;
             pooler_host?: string;
+            /** @description The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects. */
+            api_domain?: string;
+            /** @description Replaces the organisations that may create projects while the region is hidden; left out, the list is kept. */
+            early_access_org_ids?: string[];
             /** @description manual (the default) or hetzner. */
             provider?: string;
             location?: string;
@@ -6427,7 +6437,7 @@ export interface components {
             copy_target_id?: string | null;
             floating_ip_id?: string | null;
             residency?: boolean;
-            /** @description Hidden regions take no new projects. */
+            /** @description Hidden regions take new projects only from their early-access organisations. */
             hidden?: boolean;
         };
         ProjectResidencyRequest: {
@@ -20421,7 +20431,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Active regions. */
+            /** @description Active regions, and hidden ones the caller's organisations have early access to. */
             200: {
                 headers: {
                     [name: string]: unknown;

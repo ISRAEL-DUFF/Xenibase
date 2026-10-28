@@ -26,6 +26,11 @@ from the web UI's. The edge reads the hostname to know which project a request
 is for, so one project's key can't be used on another, and browsers keep each
 project's cookies and storage apart.
 
+This page sets up the platform's API domain, served here in the home
+region. A region elsewhere (Lagos) can have its own, `<ref>.ng.<api-domain>`,
+served by an edge in that region so its projects' API traffic stays there:
+see [Regions](regions.md#a-regions-api-domain).
+
 ```text
 app ──HTTPS──▶ <ref>.api.example.com
                   │  DNS: *.api.example.com  A  → this server

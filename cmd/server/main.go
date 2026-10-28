@@ -207,6 +207,7 @@ func run() error {
 	kinds := map[string]jobs.Kind{jobs.KindNoop: jobs.Noop()}
 	// Regions (V3 §6.1): the home region is where projects go by default.
 	regionSvc := regions.New(pool, cfg.Cloud.Region, log)
+	regionSvc.SetPlatformDomain(cfg.Edge.Domain)
 	if err := regionSvc.Ensure(ctx); err != nil {
 		return fmt.Errorf("regions: %w", err)
 	}
@@ -391,7 +392,7 @@ func run() error {
 	// xenibase-edge follows.
 	var servicesSvc *services.Service
 	if projects != nil {
-		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, EdgeSecret: cfg.Edge.Secret}, log)
+		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret}, log)
 		if branchSvc != nil {
 			branchSvc.API = servicesSvc // branches get an API of their own (V4.1 §9.5)
 		}
@@ -466,7 +467,7 @@ func run() error {
 			Network: cfg.Cloud.HetznerNetworkID, PlacementGroup: cfg.Cloud.HetznerPlacementGroup, SSHKeys: cfg.Cloud.HetznerSSHKeys,
 			Bootstrap: cloud.Bootstrap{ServerURL: cfg.Cloud.ServerURL, ServerCA: cfg.Cloud.ServerCA, AgentImage: cfg.Cloud.AgentImage,
 				PGImage: cfg.Cloud.PGImage, PrivateCIDR: cfg.Cloud.PrivateCIDR},
-			Edge: edgeBoot,
+			Edge: edgeBoot, RegionAPIDomain: regionSvc.APIDomain,
 		}, log)
 		for name, k := range capacitySvc.Kinds() {
 			kinds[name] = k

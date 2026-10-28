@@ -39,6 +39,9 @@ type Service struct {
 	db   *pgxpool.Pool
 	home string
 	log  *slog.Logger
+	// platformDomain is XENIBASE_API_DOMAIN, which a region's own domain
+	// may not repeat.
+	platformDomain string
 
 	mu    sync.RWMutex
 	cache map[string]store.Region
@@ -50,6 +53,17 @@ func New(db *pgxpool.Pool, home string, log *slog.Logger) *Service {
 		home = "eu-central"
 	}
 	return &Service{db: db, home: home, log: log, cache: map[string]store.Region{}}
+}
+
+// SetPlatformDomain records XENIBASE_API_DOMAIN.
+func (s *Service) SetPlatformDomain(d string) {
+	s.platformDomain = strings.ToLower(strings.Trim(d, "."))
+}
+
+// EarlyAccess is the organisations that may create projects in a hidden
+// region.
+func (s *Service) EarlyAccess(ctx context.Context, id string) ([]uuid.UUID, error) {
+	return store.New(s.db).RegionEarlyAccessOrgs(ctx, id)
 }
 
 // Home is the home region.
@@ -114,6 +128,15 @@ func (s *Service) Host(id string) string {
 	return r.PoolerHost
 }
 
+// APIDomain is region's own API domain, or "" for XENIBASE_API_DOMAIN.
+func (s *Service) APIDomain(id string) string {
+	r, ok := s.Cached(id)
+	if !ok {
+		return ""
+	}
+	return r.ApiDomain
+}
+
 // List returns every region.
 func (s *Service) List(ctx context.Context) ([]store.Region, error) {
 	return store.New(s.db).ListRegions(ctx)
@@ -130,10 +153,13 @@ func (s *Service) Get(ctx context.Context, id string) (store.Region, error) {
 
 // Input is a region to create or change.
 type Input struct {
-	ID              string
-	Name            string
-	Country         string
-	PoolerHost      string
+	ID         string
+	Name       string
+	Country    string
+	PoolerHost string
+	// APIDomain is the region's own API domain (<ref>.<APIDomain>), served
+	// by the region's edge; empty is the platform's.
+	APIDomain       string
 	Provider        string
 	Location        string
 	StorageTargetID *uuid.UUID
@@ -141,6 +167,9 @@ type Input struct {
 	FloatingIPID    *string
 	Residency       bool
 	Hidden          bool
+	// EarlyAccess, when not nil, replaces the organisations that may create
+	// projects while the region is hidden.
+	EarlyAccess []uuid.UUID
 }
 
 var (
@@ -151,6 +180,7 @@ var (
 // Save creates or updates a region.
 func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 	in.Name, in.PoolerHost, in.Country = strings.TrimSpace(in.Name), strings.TrimSpace(in.PoolerHost), strings.ToUpper(strings.TrimSpace(in.Country))
+	in.APIDomain = strings.ToLower(strings.Trim(strings.TrimSpace(in.APIDomain), "."))
 	switch {
 	case !idRe.MatchString(in.ID):
 		return store.Region{}, invalid("a region ID is lowercase letters, digits and dashes (ng-lagos)")
@@ -158,6 +188,10 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 		return store.Region{}, invalid("a region needs a name")
 	case in.PoolerHost != "" && !hostRe.MatchString(in.PoolerHost):
 		return store.Region{}, invalid("the pooler hostname %q isn't a hostname", in.PoolerHost)
+	case in.APIDomain != "" && (!hostRe.MatchString(in.APIDomain) || !strings.Contains(in.APIDomain, ".")):
+		return store.Region{}, invalid("the API domain %q isn't a domain name", in.APIDomain)
+	case in.APIDomain != "" && s.platformDomain != "" && in.APIDomain == s.platformDomain:
+		return store.Region{}, invalid("the API domain is the platform's (XENIBASE_API_DOMAIN); leave it empty for that")
 	case in.Country != "" && !regexp.MustCompile(`^[A-Z]{2}$`).MatchString(in.Country):
 		return store.Region{}, invalid("the country is a two-letter code (NG)")
 	case in.Residency && in.Country == "":
@@ -174,6 +208,24 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 		return store.Region{}, invalid("the provider is manual or hetzner")
 	}
 	q := store.New(s.db)
+	if in.APIDomain != "" {
+		rs, err := q.ListRegions(ctx)
+		if err != nil {
+			return store.Region{}, err
+		}
+		for _, o := range rs {
+			if o.ID != in.ID && o.ApiDomain == in.APIDomain {
+				return store.Region{}, invalid("%s already uses the API domain %s", o.Name, in.APIDomain)
+			}
+		}
+	}
+	for _, id := range in.EarlyAccess {
+		if _, err := q.GetOrg(ctx, id); errors.Is(err, pgx.ErrNoRows) {
+			return store.Region{}, invalid("no organisation %s", id)
+		} else if err != nil {
+			return store.Region{}, err
+		}
+	}
 	for _, id := range []*uuid.UUID{in.StorageTargetID, in.CopyTargetID} {
 		if id == nil {
 			continue
@@ -202,11 +254,21 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 		return store.Region{}, err
 	}
 	r, err := q.UpsertRegion(ctx, store.UpsertRegionParams{
-		ID: in.ID, Name: in.Name, Country: in.Country, PoolerHost: in.PoolerHost, Provider: in.Provider, Location: in.Location,
+		ID: in.ID, Name: in.Name, Country: in.Country, PoolerHost: in.PoolerHost, ApiDomain: in.APIDomain, Provider: in.Provider, Location: in.Location,
 		StorageTargetID: in.StorageTargetID, CopyTargetID: in.CopyTargetID, FloatingIpID: in.FloatingIPID, Residency: in.Residency, Status: status,
 	})
 	if err != nil {
 		return r, err
+	}
+	if in.EarlyAccess != nil {
+		if err := q.ClearRegionEarlyAccess(ctx, in.ID); err != nil {
+			return r, err
+		}
+		for _, id := range in.EarlyAccess {
+			if err := q.AddRegionEarlyAccess(ctx, store.AddRegionEarlyAccessParams{RegionID: in.ID, OrgID: id}); err != nil {
+				return r, err
+			}
+		}
 	}
 	// The region's own target is in the region: residency projects may use it.
 	if in.StorageTargetID != nil {

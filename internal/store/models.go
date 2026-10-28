@@ -1184,6 +1184,13 @@ type Region struct {
 	Residency       bool
 	Status          string
 	CreatedAt       time.Time
+	ApiDomain       string
+}
+
+type RegionEarlyAccess struct {
+	RegionID  string
+	OrgID     uuid.UUID
+	CreatedAt time.Time
 }
 
 type RetiredDatabase struct {

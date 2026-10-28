@@ -5,6 +5,25 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+### Added
+- **A region's own API domain.** Platform → Regions → **API domain**
+  (`api_domain` on `PUT /api/v1/admin/regions/{id}`) gives a region's projects
+  `https://<ref>.<api-domain>` for their backend services, served by an edge in
+  the region (`XENIBASE_EDGE_DOMAIN` set to it, `XENIBASE_EDGE_REGION` to the
+  region), so a Lagos project's API traffic stays in Lagos instead of crossing
+  to the home region. Edge nodes Xenibase adds in the region get it in their
+  cloud-init. See `docs/regions.md`.
+- **Early access to hidden regions.** A hidden region takes new projects from
+  the organisations in its **Early-access organisations** list
+  (`early_access_org_ids`), for rehearsals before it opens or a first customer;
+  `GET /api/v1/regions` lists it to their members. Before, a hidden region
+  refused every project, so the Lagos launch rehearsals could not run until it
+  was open.
+
+### Upgrading
+- Migration 00056 adds `regions.api_domain` and `region_early_access`. Nothing
+  changes until a region is given a domain or an early-access list.
+
 ## v4.2.3
 
 - **Upgrades rebuild the edge.** `install.sh` built the server and agent images but not the edge, so a deployment with backend services on kept running the old edge after `upgrade.sh` (v4.2.2's browser preflight fix never reached it). The edge is rebuilt on every install and upgrade while the `services` profile is on. If you upgraded to v4.2.2 and use backend services, upgrade again.

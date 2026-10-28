@@ -4134,10 +4134,16 @@ type AdminOrgSummaryStatus string
 
 // AdminRegion defines model for AdminRegion.
 type AdminRegion struct {
+	// ApiDomain The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN).
+	ApiDomain string `json:"api_domain"`
+
 	// CopyTargetId Where backups on platform targets are copied (V3 §2.5).
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      string              `json:"country"`
 	CreatedAt    time.Time           `json:"created_at"`
+
+	// EarlyAccessOrgIds Organisations that may create projects while the region is hidden.
+	EarlyAccessOrgIds []openapi_types.UUID `json:"early_access_org_ids"`
 
 	// FloatingIpId The region's pooler floating IP at the provider.
 	FloatingIpId *string `json:"floating_ip_id,omitempty"`
@@ -4184,11 +4190,16 @@ type AdminRegionListCopiesStatus string
 
 // AdminRegionRequest defines model for AdminRegionRequest.
 type AdminRegionRequest struct {
+	// ApiDomain The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects.
+	ApiDomain    *string             `json:"api_domain,omitempty"`
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      *string             `json:"country,omitempty"`
-	FloatingIpId *string             `json:"floating_ip_id,omitempty"`
 
-	// Hidden Hidden regions take no new projects.
+	// EarlyAccessOrgIds Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
+	FloatingIpId      *string               `json:"floating_ip_id,omitempty"`
+
+	// Hidden Hidden regions take new projects only from their early-access organisations.
 	Hidden     *bool   `json:"hidden,omitempty"`
 	Location   *string `json:"location,omitempty"`
 	Name       string  `json:"name"`
@@ -8389,6 +8400,9 @@ type RecoveryCodesStatus struct {
 type Region struct {
 	// Country ISO 3166 two-letter code; empty when not tied to one.
 	Country string `json:"country"`
+
+	// EarlyAccessOrgIds Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
 
 	// Home The platform's home region, where projects go by default.
 	Home bool `json:"home"`
