@@ -186,12 +186,14 @@ func (s *Service) memberConn(ctx context.Context, inst store.Instance, member uu
 	if err != nil {
 		return nil, err
 	}
-	host, port := "", 0
-	if m.AdminHost != nil && *m.AdminHost != "" && m.AdminPort != nil && *m.AdminPort > 0 {
+	var host string
+	var port int
+	switch {
+	case m.AdminHost != nil && *m.AdminHost != "" && m.AdminPort != nil && *m.AdminPort > 0:
 		host, port = *m.AdminHost, int(*m.AdminPort)
-	} else if m.Host != nil && m.Port != nil {
+	case m.Host != nil && m.Port != nil:
 		host, port = *m.Host, int(*m.Port)
-	} else {
+	default:
 		return nil, errors.New("the member has no address yet")
 	}
 	cfg, err := pgx.ParseConfig(fmt.Sprintf("host=%s port=%d sslmode=prefer", host, port))

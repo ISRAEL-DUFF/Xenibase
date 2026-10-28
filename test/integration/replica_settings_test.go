@@ -95,8 +95,7 @@ func TestReplicaStandbySettings(t *testing.T) {
 	waitFor(t, 40*time.Second, "the replica's xmin on the primary", xminHeld)
 
 	// A change applies to the running replica: no restart.
-	var startedBefore string
-	startedBefore = memberSQL(t, rep.Id, "postgres", "SELECT pg_postmaster_start_time()")
+	startedBefore := memberSQL(t, rep.Id, "postgres", "SELECT pg_postmaster_start_time()")
 	off, short := false, 5
 	var got gen.ReadReplica
 	if code := e.Do("PATCH", path+"/"+rep.Id.String(), gen.ReplicaSettings{HotStandbyFeedback: &off, MaxStandbyDelaySeconds: &short}, &got); code != http.StatusOK {
