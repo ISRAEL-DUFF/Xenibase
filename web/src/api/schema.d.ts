@@ -1078,7 +1078,11 @@ export interface paths {
         delete: operations["deleteProjectReplica"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Change a read replica's standby settings
+         * @description Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+         */
+        patch: operations["updateProjectReplica"];
         trace?: never;
     };
     "/api/v1/projects/{id}/replicas/{replica_id}/detach": {
@@ -7208,6 +7212,17 @@ export interface components {
             node_id?: string;
             /** @description The region it goes in (default the project's). */
             region?: string;
+            /** @description See ReplicaSettings (default false). */
+            hot_standby_feedback?: boolean;
+            /** @description See ReplicaSettings (default 30). */
+            max_standby_delay_seconds?: number;
+        };
+        /** @description A read replica's standby settings. Omitted fields keep their value. */
+        ReplicaSettings: {
+            /** @description The replica tells the primary which rows its running queries still read, so the primary's vacuum keeps them and long queries on the replica aren't cancelled for it. The cost is on the primary: dead rows stay longer, so a long query on the replica can bloat tables. */
+            hot_standby_feedback?: boolean;
+            /** @description How long replay waits for a query that conflicts with it before cancelling the query (max_standby_streaming_delay and max_standby_archive_delay). Longer lets long queries finish but lets the replica fall further behind; one behind by more than the rotation threshold leaves the read route until it catches up. */
+            max_standby_delay_seconds?: number;
         };
         ReplicaDetachRequest: {
             /** @description The new project's name. */
@@ -7236,6 +7251,15 @@ export interface components {
             error?: string;
             /** Format: date-time */
             rotation_changed_at?: string;
+            hot_standby_feedback: boolean;
+            max_standby_delay_seconds: number;
+            /**
+             * Format: date-time
+             * @description When the replica last confirmed its settings.
+             */
+            settings_applied_at?: string;
+            /** @description Why the settings couldn't be applied yet (retried). */
+            settings_error?: string;
             /** Format: date-time */
             created_at: string;
         };
@@ -13044,6 +13068,34 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Operation"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    updateProjectReplica: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+                replica_id: components["parameters"]["ReplicaID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicaSettings"];
+            };
+        };
+        responses: {
+            /** @description The replica with its new settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadReplica"];
                 };
             };
             default: components["responses"]["Error"];

@@ -8288,20 +8288,28 @@ type QuotaItem struct {
 
 // ReadReplica defines model for ReadReplica.
 type ReadReplica struct {
-	CreatedAt time.Time          `json:"created_at"`
-	Error     *string            `json:"error,omitempty"`
-	Id        openapi_types.UUID `json:"id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	Error              *string            `json:"error,omitempty"`
+	HotStandbyFeedback bool               `json:"hot_standby_feedback"`
+	Id                 openapi_types.UUID `json:"id"`
 
 	// InRotation The read-only route sends reads to it.
 	InRotation bool   `json:"in_rotation"`
 	LagBytes   *int64 `json:"lag_bytes,omitempty"`
 
 	// LagMs How long ago the primary wrote what it has not replayed yet.
-	LagMs             *int64             `json:"lag_ms,omitempty"`
-	NodeId            openapi_types.UUID `json:"node_id"`
-	NodeName          string             `json:"node_name"`
-	Region            string             `json:"region"`
-	RotationChangedAt *time.Time         `json:"rotation_changed_at,omitempty"`
+	LagMs                  *int64             `json:"lag_ms,omitempty"`
+	MaxStandbyDelaySeconds int                `json:"max_standby_delay_seconds"`
+	NodeId                 openapi_types.UUID `json:"node_id"`
+	NodeName               string             `json:"node_name"`
+	Region                 string             `json:"region"`
+	RotationChangedAt      *time.Time         `json:"rotation_changed_at,omitempty"`
+
+	// SettingsAppliedAt When the replica last confirmed its settings.
+	SettingsAppliedAt *time.Time `json:"settings_applied_at,omitempty"`
+
+	// SettingsError Why the settings couldn't be applied yet (retried).
+	SettingsError *string `json:"settings_error,omitempty"`
 
 	// Size The instance profile it runs with (the primary's).
 	Size   string            `json:"size"`
@@ -8568,6 +8576,12 @@ type ReplayResult struct {
 
 // ReplicaCreateRequest defines model for ReplicaCreateRequest.
 type ReplicaCreateRequest struct {
+	// HotStandbyFeedback See ReplicaSettings (default false).
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds See ReplicaSettings (default 30).
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
+
 	// NodeId Where the replica goes (default the least loaded eligible node in the region).
 	NodeId *openapi_types.UUID `json:"node_id,omitempty"`
 
@@ -8593,6 +8607,15 @@ type ReplicaList struct {
 	// ReadUrl The read-only route's connection string, without a password.
 	ReadUrl  *string       `json:"read_url,omitempty"`
 	Replicas []ReadReplica `json:"replicas"`
+}
+
+// ReplicaSettings A read replica's standby settings. Omitted fields keep their value.
+type ReplicaSettings struct {
+	// HotStandbyFeedback The replica tells the primary which rows its running queries still read, so the primary's vacuum keeps them and long queries on the replica aren't cancelled for it. The cost is on the primary: dead rows stay longer, so a long query on the replica can bloat tables.
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds How long replay waits for a query that conflicts with it before cancelling the query (max_standby_streaming_delay and max_standby_archive_delay). Longer lets long queries finish but lets the replica fall further behind; one behind by more than the rotation threshold leaves the read route until it catches up.
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
 }
 
 // ResizePlan defines model for ResizePlan.
@@ -11364,6 +11387,9 @@ type ReclaimSpaceJSONRequestBody = ReclaimSpaceRequest
 // CreateProjectReplicaJSONRequestBody defines body for CreateProjectReplica for application/json ContentType.
 type CreateProjectReplicaJSONRequestBody = ReplicaCreateRequest
 
+// UpdateProjectReplicaJSONRequestBody defines body for UpdateProjectReplica for application/json ContentType.
+type UpdateProjectReplicaJSONRequestBody = ReplicaSettings
+
 // DetachProjectReplicaJSONRequestBody defines body for DetachProjectReplica for application/json ContentType.
 type DetachProjectReplicaJSONRequestBody = ReplicaDetachRequest
 
@@ -12476,6 +12502,9 @@ type ServerInterface interface {
 	// DeleteProjectReplica Remove a read replica
 	// (DELETE /api/v1/projects/{id}/replicas/{replica_id})
 	DeleteProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID)
+	// UpdateProjectReplica Change a read replica's standby settings
+	// (PATCH /api/v1/projects/{id}/replicas/{replica_id})
+	UpdateProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID)
 	// DetachProjectReplica Promote a read replica into a standalone project
 	// (POST /api/v1/projects/{id}/replicas/{replica_id}/detach)
 	DetachProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID)
@@ -14726,6 +14755,12 @@ func (_ Unimplemented) CreateProjectReplica(w http.ResponseWriter, r *http.Reque
 // DeleteProjectReplica Remove a read replica
 // (DELETE /api/v1/projects/{id}/replicas/{replica_id})
 func (_ Unimplemented) DeleteProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdateProjectReplica Change a read replica's standby settings
+// (PATCH /api/v1/projects/{id}/replicas/{replica_id})
+func (_ Unimplemented) UpdateProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -24302,6 +24337,41 @@ func (siw *ServerInterfaceWrapper) DeleteProjectReplica(w http.ResponseWriter, r
 	handler.ServeHTTP(w, r)
 }
 
+// UpdateProjectReplica operation middleware
+func (siw *ServerInterfaceWrapper) UpdateProjectReplica(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "replica_id" -------------
+	var replicaId ReplicaID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "replica_id", chi.URLParam(r, "replica_id"), &replicaId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "replica_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateProjectReplica(w, r, id, replicaId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DetachProjectReplica operation middleware
 func (siw *ServerInterfaceWrapper) DetachProjectReplica(w http.ResponseWriter, r *http.Request) {
 
@@ -26916,6 +26986,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/v1/projects/{id}/replicas/{replica_id}", wrapper.DeleteProjectReplica)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/v1/projects/{id}/replicas/{replica_id}", wrapper.UpdateProjectReplica)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/projects/{id}/replicas/{replica_id}/detach", wrapper.DetachProjectReplica)

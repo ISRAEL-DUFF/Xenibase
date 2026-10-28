@@ -1,8 +1,20 @@
 -- name: InsertReadReplica :one
 -- tenant: system - read replicas of a project the caller already resolved.
-INSERT INTO read_replicas (id, project_id, instance_member_id, node_id, region_id, size)
-VALUES (@id, @project_id, @instance_member_id, @node_id, sqlc.narg(region_id), @size)
+INSERT INTO read_replicas (id, project_id, instance_member_id, node_id, region_id, size, hot_standby_feedback, max_standby_delay_s)
+VALUES (@id, @project_id, @instance_member_id, @node_id, sqlc.narg(region_id), @size, @hot_standby_feedback, @max_standby_delay_s)
 RETURNING *;
+
+-- name: SetReplicaSettings :one
+-- tenant: system - read replicas of a project the caller already resolved.
+UPDATE read_replicas SET hot_standby_feedback = @hot_standby_feedback, max_standby_delay_s = @max_standby_delay_s, updated_at = now()
+WHERE id = @id AND project_id = @project_id AND deleted_at IS NULL
+RETURNING *;
+
+-- name: SetReplicaSettingsApplied :exec
+-- tenant: system - read replicas of a project the caller already resolved.
+UPDATE read_replicas SET settings_applied_at = CASE WHEN sqlc.narg(error)::text IS NULL THEN now() ELSE settings_applied_at END,
+  settings_error = sqlc.narg(error)
+WHERE id = @id;
 
 -- name: GetReadReplica :one
 -- tenant: system - read replicas of a project the caller already resolved.

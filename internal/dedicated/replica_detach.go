@@ -233,7 +233,11 @@ func (s *Service) ensureDetached(ctx context.Context, inst store.Instance, p sto
 	}
 	if err == nil {
 		// A promoted former standby still names the source's primary.
-		for _, stmt := range []string{"ALTER SYSTEM RESET primary_conninfo", "ALTER SYSTEM RESET primary_slot_name", "SELECT pg_reload_conf()"} {
+		// So do the replica's standby settings, which would otherwise pass
+		// to the new project's own standbys.
+		for _, stmt := range []string{"ALTER SYSTEM RESET primary_conninfo", "ALTER SYSTEM RESET primary_slot_name",
+			"ALTER SYSTEM RESET hot_standby_feedback", "ALTER SYSTEM RESET max_standby_streaming_delay",
+			"ALTER SYSTEM RESET max_standby_archive_delay", "SELECT pg_reload_conf()"} {
 			if _, err = conn.Exec(ctx, stmt); err != nil {
 				break
 			}

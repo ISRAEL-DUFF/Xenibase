@@ -1332,6 +1332,34 @@ paths:
         default:
           $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/replicas/{replica_id}:
+    patch:
+      operationId: updateProjectReplica
+      summary: Change a read replica's standby settings
+      description: >-
+        Sets hot_standby_feedback and how long replay waits for a conflicting
+        query (max_standby_streaming_delay and max_standby_archive_delay) on
+        this replica only. Applied at once with a configuration reload, no
+        restart; if the replica can't be reached the settings are stored and
+        applied when it is (settings_error says why).
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ReplicaID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplicaSettings"
+      responses:
+        "200":
+          description: The replica with its new settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadReplica"
+        default:
+          $ref: "#/components/responses/Error"
     delete:
       operationId: deleteProjectReplica
       summary: Remove a read replica
@@ -10923,6 +10951,36 @@ components:
         region:
           type: string
           description: The region it goes in (default the project's).
+        hot_standby_feedback:
+          type: boolean
+          description: See ReplicaSettings (default false).
+        max_standby_delay_seconds:
+          type: integer
+          minimum: 0
+          maximum: 900
+          description: See ReplicaSettings (default 30).
+    ReplicaSettings:
+      type: object
+      description: >-
+        A read replica's standby settings. Omitted fields keep their value.
+      properties:
+        hot_standby_feedback:
+          type: boolean
+          description: >-
+            The replica tells the primary which rows its running queries still
+            read, so the primary's vacuum keeps them and long queries on the
+            replica aren't cancelled for it. The cost is on the primary: dead
+            rows stay longer, so a long query on the replica can bloat tables.
+        max_standby_delay_seconds:
+          type: integer
+          minimum: 0
+          maximum: 900
+          description: >-
+            How long replay waits for a query that conflicts with it before
+            cancelling the query (max_standby_streaming_delay and
+            max_standby_archive_delay). Longer lets long queries finish but
+            lets the replica fall further behind; one behind by more than the
+            rotation threshold leaves the read route until it catches up.
     ReplicaDetachRequest:
       type: object
       required: [name]
@@ -10932,7 +10990,7 @@ components:
           description: The new project's name.
     ReadReplica:
       type: object
-      required: [id, node_id, node_name, region, size, status, in_rotation, created_at]
+      required: [id, node_id, node_name, region, size, status, in_rotation, hot_standby_feedback, max_standby_delay_seconds, created_at]
       properties:
         id:
           type: string
@@ -10965,6 +11023,17 @@ components:
         rotation_changed_at:
           type: string
           format: date-time
+        hot_standby_feedback:
+          type: boolean
+        max_standby_delay_seconds:
+          type: integer
+        settings_applied_at:
+          type: string
+          format: date-time
+          description: When the replica last confirmed its settings.
+        settings_error:
+          type: string
+          description: Why the settings couldn't be applied yet (retried).
         created_at:
           type: string
           format: date-time

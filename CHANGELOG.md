@@ -5,6 +5,22 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+### Added
+- **Standby settings per read replica.** Hot standby feedback (off by
+  default) and how long replay waits for a conflicting query before cancelling
+  it (30 s by default, 0 to 900; `max_standby_streaming_delay` and
+  `max_standby_archive_delay`), set when a replica is added
+  (`hot_standby_feedback`, `max_standby_delay_seconds` on
+  `POST /api/v1/projects/{id}/replicas`) or changed later
+  (`PATCH /api/v1/projects/{id}/replicas/{replica_id}`, the replica's
+  **Settings…** in the dashboard, `xenibase replicas set`). A change applies to
+  that replica alone with a reload, without a restart; the primary and HA
+  standbys keep Postgres's defaults. See `docs/read-replicas.md`.
+
+### Upgrading
+- Migration 00059 adds the settings to `read_replicas`. Existing replicas keep
+  Postgres's defaults (feedback off, 30 s), which they already ran with.
+
 ## v4.2.4
 
 ### Added

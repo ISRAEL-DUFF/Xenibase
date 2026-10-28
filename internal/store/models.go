@@ -1123,22 +1123,26 @@ type QuotaPlan struct {
 }
 
 type ReadReplica struct {
-	ID                uuid.UUID
-	ProjectID         uuid.UUID
-	InstanceMemberID  *uuid.UUID
-	NodeID            uuid.UUID
-	RegionID          *string
-	Size              string
-	Status            string
-	InRotation        bool
-	LagBytes          *int64
-	LagMs             *int64
-	Error             *string
-	DetachedProjectID *uuid.UUID
-	RotationChangedAt *time.Time
-	UpdatedAt         time.Time
-	CreatedAt         time.Time
-	DeletedAt         *time.Time
+	ID                 uuid.UUID
+	ProjectID          uuid.UUID
+	InstanceMemberID   *uuid.UUID
+	NodeID             uuid.UUID
+	RegionID           *string
+	Size               string
+	Status             string
+	InRotation         bool
+	LagBytes           *int64
+	LagMs              *int64
+	Error              *string
+	DetachedProjectID  *uuid.UUID
+	RotationChangedAt  *time.Time
+	UpdatedAt          time.Time
+	CreatedAt          time.Time
+	DeletedAt          *time.Time
+	HotStandbyFeedback bool
+	MaxStandbyDelayS   int32
+	SettingsAppliedAt  *time.Time
+	SettingsError      *string
 }
 
 type ReapedSession struct {

@@ -77,7 +77,7 @@ func (q *Queries) GetInstanceMember(ctx context.Context, id uuid.UUID) (Instance
 }
 
 const getReadReplica = `-- name: GetReadReplica :one
-SELECT id, project_id, instance_member_id, node_id, region_id, size, status, in_rotation, lag_bytes, lag_ms, error, detached_project_id, rotation_changed_at, updated_at, created_at, deleted_at FROM read_replicas WHERE id = $1
+SELECT id, project_id, instance_member_id, node_id, region_id, size, status, in_rotation, lag_bytes, lag_ms, error, detached_project_id, rotation_changed_at, updated_at, created_at, deleted_at, hot_standby_feedback, max_standby_delay_s, settings_applied_at, settings_error FROM read_replicas WHERE id = $1
 `
 
 // tenant: system - read replicas of a project the caller already resolved.
@@ -101,6 +101,10 @@ func (q *Queries) GetReadReplica(ctx context.Context, id uuid.UUID) (ReadReplica
 		&i.UpdatedAt,
 		&i.CreatedAt,
 		&i.DeletedAt,
+		&i.HotStandbyFeedback,
+		&i.MaxStandbyDelayS,
+		&i.SettingsAppliedAt,
+		&i.SettingsError,
 	)
 	return i, err
 }
@@ -167,18 +171,20 @@ func (q *Queries) HourlyReplicas(ctx context.Context, arg HourlyReplicasParams) 
 }
 
 const insertReadReplica = `-- name: InsertReadReplica :one
-INSERT INTO read_replicas (id, project_id, instance_member_id, node_id, region_id, size)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, project_id, instance_member_id, node_id, region_id, size, status, in_rotation, lag_bytes, lag_ms, error, detached_project_id, rotation_changed_at, updated_at, created_at, deleted_at
+INSERT INTO read_replicas (id, project_id, instance_member_id, node_id, region_id, size, hot_standby_feedback, max_standby_delay_s)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, project_id, instance_member_id, node_id, region_id, size, status, in_rotation, lag_bytes, lag_ms, error, detached_project_id, rotation_changed_at, updated_at, created_at, deleted_at, hot_standby_feedback, max_standby_delay_s, settings_applied_at, settings_error
 `
 
 type InsertReadReplicaParams struct {
-	ID               uuid.UUID
-	ProjectID        uuid.UUID
-	InstanceMemberID *uuid.UUID
-	NodeID           uuid.UUID
-	RegionID         *string
-	Size             string
+	ID                 uuid.UUID
+	ProjectID          uuid.UUID
+	InstanceMemberID   *uuid.UUID
+	NodeID             uuid.UUID
+	RegionID           *string
+	Size               string
+	HotStandbyFeedback bool
+	MaxStandbyDelayS   int32
 }
 
 // tenant: system - read replicas of a project the caller already resolved.
@@ -190,6 +196,8 @@ func (q *Queries) InsertReadReplica(ctx context.Context, arg InsertReadReplicaPa
 		arg.NodeID,
 		arg.RegionID,
 		arg.Size,
+		arg.HotStandbyFeedback,
+		arg.MaxStandbyDelayS,
 	)
 	var i ReadReplica
 	err := row.Scan(
@@ -209,12 +217,16 @@ func (q *Queries) InsertReadReplica(ctx context.Context, arg InsertReadReplicaPa
 		&i.UpdatedAt,
 		&i.CreatedAt,
 		&i.DeletedAt,
+		&i.HotStandbyFeedback,
+		&i.MaxStandbyDelayS,
+		&i.SettingsAppliedAt,
+		&i.SettingsError,
 	)
 	return i, err
 }
 
 const instanceReplicas = `-- name: InstanceReplicas :many
-SELECT r.id, r.project_id, r.instance_member_id, r.node_id, r.region_id, r.size, r.status, r.in_rotation, r.lag_bytes, r.lag_ms, r.error, r.detached_project_id, r.rotation_changed_at, r.updated_at, r.created_at, r.deleted_at FROM read_replicas r JOIN projects p ON p.id = r.project_id
+SELECT r.id, r.project_id, r.instance_member_id, r.node_id, r.region_id, r.size, r.status, r.in_rotation, r.lag_bytes, r.lag_ms, r.error, r.detached_project_id, r.rotation_changed_at, r.updated_at, r.created_at, r.deleted_at, r.hot_standby_feedback, r.max_standby_delay_s, r.settings_applied_at, r.settings_error FROM read_replicas r JOIN projects p ON p.id = r.project_id
 WHERE p.instance_id = $1 AND r.deleted_at IS NULL
 ORDER BY r.created_at, r.id
 `
@@ -246,6 +258,10 @@ func (q *Queries) InstanceReplicas(ctx context.Context, instanceID uuid.UUID) ([
 			&i.UpdatedAt,
 			&i.CreatedAt,
 			&i.DeletedAt,
+			&i.HotStandbyFeedback,
+			&i.MaxStandbyDelayS,
+			&i.SettingsAppliedAt,
+			&i.SettingsError,
 		); err != nil {
 			return nil, err
 		}
@@ -258,7 +274,7 @@ func (q *Queries) InstanceReplicas(ctx context.Context, instanceID uuid.UUID) ([
 }
 
 const listProjectReplicas = `-- name: ListProjectReplicas :many
-SELECT r.id, r.project_id, r.instance_member_id, r.node_id, r.region_id, r.size, r.status, r.in_rotation, r.lag_bytes, r.lag_ms, r.error, r.detached_project_id, r.rotation_changed_at, r.updated_at, r.created_at, r.deleted_at, n.name AS node_name, n.region AS node_region, m.host, m.port, m.state AS member_state
+SELECT r.id, r.project_id, r.instance_member_id, r.node_id, r.region_id, r.size, r.status, r.in_rotation, r.lag_bytes, r.lag_ms, r.error, r.detached_project_id, r.rotation_changed_at, r.updated_at, r.created_at, r.deleted_at, r.hot_standby_feedback, r.max_standby_delay_s, r.settings_applied_at, r.settings_error, n.name AS node_name, n.region AS node_region, m.host, m.port, m.state AS member_state
 FROM read_replicas r
 JOIN nodes n ON n.id = r.node_id
 LEFT JOIN instance_members m ON m.id = r.instance_member_id AND m.deleted_at IS NULL
@@ -267,27 +283,31 @@ ORDER BY r.created_at, r.id
 `
 
 type ListProjectReplicasRow struct {
-	ID                uuid.UUID
-	ProjectID         uuid.UUID
-	InstanceMemberID  *uuid.UUID
-	NodeID            uuid.UUID
-	RegionID          *string
-	Size              string
-	Status            string
-	InRotation        bool
-	LagBytes          *int64
-	LagMs             *int64
-	Error             *string
-	DetachedProjectID *uuid.UUID
-	RotationChangedAt *time.Time
-	UpdatedAt         time.Time
-	CreatedAt         time.Time
-	DeletedAt         *time.Time
-	NodeName          string
-	NodeRegion        string
-	Host              *string
-	Port              *int32
-	MemberState       *string
+	ID                 uuid.UUID
+	ProjectID          uuid.UUID
+	InstanceMemberID   *uuid.UUID
+	NodeID             uuid.UUID
+	RegionID           *string
+	Size               string
+	Status             string
+	InRotation         bool
+	LagBytes           *int64
+	LagMs              *int64
+	Error              *string
+	DetachedProjectID  *uuid.UUID
+	RotationChangedAt  *time.Time
+	UpdatedAt          time.Time
+	CreatedAt          time.Time
+	DeletedAt          *time.Time
+	HotStandbyFeedback bool
+	MaxStandbyDelayS   int32
+	SettingsAppliedAt  *time.Time
+	SettingsError      *string
+	NodeName           string
+	NodeRegion         string
+	Host               *string
+	Port               *int32
+	MemberState        *string
 }
 
 // tenant: system - read replicas of a project the caller already resolved.
@@ -317,6 +337,10 @@ func (q *Queries) ListProjectReplicas(ctx context.Context, projectID uuid.UUID) 
 			&i.UpdatedAt,
 			&i.CreatedAt,
 			&i.DeletedAt,
+			&i.HotStandbyFeedback,
+			&i.MaxStandbyDelayS,
+			&i.SettingsAppliedAt,
+			&i.SettingsError,
 			&i.NodeName,
 			&i.NodeRegion,
 			&i.Host,
@@ -450,6 +474,70 @@ func (q *Queries) SetReplicaLag(ctx context.Context, arg SetReplicaLagParams) er
 		arg.LagMs,
 		arg.ID,
 	)
+	return err
+}
+
+const setReplicaSettings = `-- name: SetReplicaSettings :one
+UPDATE read_replicas SET hot_standby_feedback = $1, max_standby_delay_s = $2, updated_at = now()
+WHERE id = $3 AND project_id = $4 AND deleted_at IS NULL
+RETURNING id, project_id, instance_member_id, node_id, region_id, size, status, in_rotation, lag_bytes, lag_ms, error, detached_project_id, rotation_changed_at, updated_at, created_at, deleted_at, hot_standby_feedback, max_standby_delay_s, settings_applied_at, settings_error
+`
+
+type SetReplicaSettingsParams struct {
+	HotStandbyFeedback bool
+	MaxStandbyDelayS   int32
+	ID                 uuid.UUID
+	ProjectID          uuid.UUID
+}
+
+// tenant: system - read replicas of a project the caller already resolved.
+func (q *Queries) SetReplicaSettings(ctx context.Context, arg SetReplicaSettingsParams) (ReadReplica, error) {
+	row := q.db.QueryRow(ctx, setReplicaSettings,
+		arg.HotStandbyFeedback,
+		arg.MaxStandbyDelayS,
+		arg.ID,
+		arg.ProjectID,
+	)
+	var i ReadReplica
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.InstanceMemberID,
+		&i.NodeID,
+		&i.RegionID,
+		&i.Size,
+		&i.Status,
+		&i.InRotation,
+		&i.LagBytes,
+		&i.LagMs,
+		&i.Error,
+		&i.DetachedProjectID,
+		&i.RotationChangedAt,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.HotStandbyFeedback,
+		&i.MaxStandbyDelayS,
+		&i.SettingsAppliedAt,
+		&i.SettingsError,
+	)
+	return i, err
+}
+
+const setReplicaSettingsApplied = `-- name: SetReplicaSettingsApplied :exec
+UPDATE read_replicas SET settings_applied_at = CASE WHEN $1::text IS NULL THEN now() ELSE settings_applied_at END,
+  settings_error = $1
+WHERE id = $2
+`
+
+type SetReplicaSettingsAppliedParams struct {
+	Error *string
+	ID    uuid.UUID
+}
+
+// tenant: system - read replicas of a project the caller already resolved.
+func (q *Queries) SetReplicaSettingsApplied(ctx context.Context, arg SetReplicaSettingsAppliedParams) error {
+	_, err := q.db.Exec(ctx, setReplicaSettingsApplied, arg.Error, arg.ID)
 	return err
 }
 
