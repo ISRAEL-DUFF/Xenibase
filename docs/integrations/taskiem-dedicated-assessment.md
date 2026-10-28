@@ -9,6 +9,10 @@ migrations and installer run unchanged on a dedicated project with it on,
 as long as the installer names its logins `<database>_app` and
 `<database>_public`, which it does.
 
+**Update:** the per-project IP allowlist is built too
+([Network access](../network-access.md)): Taskiem lists its servers'
+addresses and the poolers refuse its logins from anywhere else.
+
 ## The short answer
 
 Xenibase covers almost everything Taskiem asks for, for any business on a
@@ -28,7 +32,7 @@ the change works for every dedicated project, not just Taskiem's.
 | `LISTEN` on a session connection | Yes | The session pooler (5432) keeps one server connection per client, so `LISTEN/NOTIFY` works; the transaction pooler (6543) doesn't, as Taskiem says. |
 | 100 to 150 connections | Check | The dedicated default connection limit is 90 (`internal/store/settings.go`); it's a per-plan setting. Raise it for Taskiem's plan. |
 | `sslmode=verify-full` | Yes | The pooler hostname has a certificate from a public CA by ACME (or a self-signed one we'd hand over). |
-| Reachable only from Taskiem's servers | **No** | There is no per-project IP allowlist or private peering. The pooler is open to the internet, protected by TLS and SCRAM passwords. |
+| Reachable only from Taskiem's servers | Yes (built) | A per-project IP allowlist at the poolers (`docs/network-access.md`). No private peering: traffic still crosses the internet, over TLS. |
 | WAL archiving, daily base backups, another zone | Mostly | WAL-G archives continuously, with configurable retention and PITR window (V4.1-M3). Copies to another zone need a copy target; with Nigerian residency on, that has to be a second in-country bucket. |
 | Synchronous standby, automatic failover | Yes | HA with synchronous replication (`docs/ha.md`): nothing acknowledged is lost; writes came back in 17 to 20 s in the tests. Clients keep one address (the pooler moves the route). Needs the region's etcd cluster: 3 nodes in 3 failure domains. |
 | Self-service restore to a new server at a chosen time | Yes | Restores go to a new project, in the same region; the original is untouched. |
@@ -70,8 +74,7 @@ for an operator who wants to pre-create roles without opening this up.
 
 ## Smaller gaps worth closing
 
-- **IP allowlist per project** on the poolers: a CIDR list checked on
-  connect, applied in each region's pooler configuration.
+- ~~**IP allowlist per project** on the poolers~~: built.
 - **Replica settings**: `hot_standby_feedback` and
   `max_standby_streaming_delay` as read-replica options.
 - **Connection limit** on the plan Taskiem buys: at least 150.

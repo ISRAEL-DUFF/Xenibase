@@ -42,7 +42,7 @@ UPDATE projects SET status = @status, deleted_at = now() WHERE id = @id;
 -- tenant: system - provisioning workers and the poolers, or a project the request already authorized.
 SELECT p.db_name, p.alias_db_name, p.owner_role, p.scram_verifier, p.legacy_owner_role, p.legacy_scram_verifier,
        p.settings, COALESCE(i.host, n.private_addr)::text AS host, i.port, p.lifecycle,
-       p.region, p.forward_region, p.forward_until
+       p.region, p.forward_region, p.forward_until, p.allowed_cidrs
 FROM projects p
 JOIN instances i ON i.id = p.instance_id
 JOIN nodes n ON n.id = i.node_id
@@ -137,3 +137,7 @@ FROM project_owned_logins l JOIN projects p ON p.id = l.project_id JOIN organiza
 WHERE p.deleted_at IS NULL AND o.status = 'active' AND p.storage_state <> 'hard'
   AND p.status IN ('active', 'moving', 'upgrading', 'restoring')
 ORDER BY l.role_name;
+
+-- name: SetProjectAllowedCIDRs :one
+-- tenant: system - the project was authorized by the caller.
+UPDATE projects SET allowed_cidrs = @allowed_cidrs::text[] WHERE id = @id RETURNING *;

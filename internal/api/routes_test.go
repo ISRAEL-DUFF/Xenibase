@@ -511,6 +511,7 @@ var specMatrix = map[authz.Action][]string{
 	// "Rotate app password, settings/guardrails, extensions"
 	authz.ProjectSettings: {
 		"GET /api/v1/projects/{id}/manage-roles", "POST /api/v1/projects/{id}/manage-roles/sync",
+		"GET /api/v1/projects/{id}/network", "PUT /api/v1/projects/{id}/network",
 		"PATCH /api/v1/projects/{id}/settings", "POST /api/v1/projects/{id}/rotate-password",
 		"POST /api/v1/projects/{id}/extensions", "POST /api/v1/projects/{id}/instance",
 		// §10.2 switch to opaque credentials (a new app password), §10.4 Reclaim space

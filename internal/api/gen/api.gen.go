@@ -7978,8 +7978,10 @@ type ProfileList struct {
 
 // Project defines model for Project.
 type Project struct {
-	ArchivedAt *time.Time  `json:"archived_at,omitempty"`
-	Branch     *BranchInfo `json:"branch,omitempty"`
+	// AllowedCidrs The project's IP allowlist; empty allows any address.
+	AllowedCidrs *[]string   `json:"allowed_cidrs,omitempty"`
+	ArchivedAt   *time.Time  `json:"archived_at,omitempty"`
+	Branch       *BranchInfo `json:"branch,omitempty"`
 
 	// BranchCount Live branches of this project.
 	BranchCount *int `json:"branch_count,omitempty"`
@@ -8125,6 +8127,24 @@ type ProjectMembership struct {
 	ProjectId   openapi_types.UUID `json:"project_id"`
 	ProjectName string             `json:"project_name"`
 	Role        ProjectRole        `json:"role"`
+}
+
+// ProjectNetwork defines model for ProjectNetwork.
+type ProjectNetwork struct {
+	// AllowedCidrs The networks, normalised; empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
+
+	// YourIp The address this request came from, as Xenibase sees it (your database client's address may differ).
+	YourIp *string `json:"your_ip,omitempty"`
+
+	// YourIpAllowed Whether your_ip is in the allowlist (always true when the list is empty).
+	YourIpAllowed *bool `json:"your_ip_allowed,omitempty"`
+}
+
+// ProjectNetworkRequest defines model for ProjectNetworkRequest.
+type ProjectNetworkRequest struct {
+	// AllowedCidrs Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
 }
 
 // ProjectResidencyRequest defines model for ProjectResidencyRequest.
@@ -11314,6 +11334,9 @@ type UpdateProjectMemberJSONRequestBody = ProjectRoleRequest
 // MigrateSupabaseJSONRequestBody defines body for MigrateSupabase for application/json ContentType.
 type MigrateSupabaseJSONRequestBody = SupabaseMigrationRequest
 
+// SetProjectNetworkJSONRequestBody defines body for SetProjectNetwork for application/json ContentType.
+type SetProjectNetworkJSONRequestBody = ProjectNetworkRequest
+
 // RestoreProjectPITRJSONRequestBody defines body for RestoreProjectPITR for application/json ContentType.
 type RestoreProjectPITRJSONRequestBody = PitrRequest
 
@@ -12396,6 +12419,12 @@ type ServerInterface interface {
 	// ListProjectMoves The project's recent moves between instances, newest first
 	// (GET /api/v1/projects/{id}/moves)
 	ListProjectMoves(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// GetProjectNetwork The project's IP allowlist
+	// (GET /api/v1/projects/{id}/network)
+	GetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// SetProjectNetwork Replace the project's IP allowlist (project admins)
+	// (PUT /api/v1/projects/{id}/network)
+	SetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID)
 	// RestoreProjectPITR Point-in-time recovery of a dedicated project into a new one
 	// (POST /api/v1/projects/{id}/pitr)
 	RestoreProjectPITR(w http.ResponseWriter, r *http.Request, id ProjectID)
@@ -14583,6 +14612,18 @@ func (_ Unimplemented) MigrateSupabase(w http.ResponseWriter, r *http.Request, i
 // ListProjectMoves The project's recent moves between instances, newest first
 // (GET /api/v1/projects/{id}/moves)
 func (_ Unimplemented) ListProjectMoves(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetProjectNetwork The project's IP allowlist
+// (GET /api/v1/projects/{id}/network)
+func (_ Unimplemented) GetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// SetProjectNetwork Replace the project's IP allowlist (project admins)
+// (PUT /api/v1/projects/{id}/network)
+func (_ Unimplemented) SetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -23704,6 +23745,58 @@ func (siw *ServerInterfaceWrapper) ListProjectMoves(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// GetProjectNetwork operation middleware
+func (siw *ServerInterfaceWrapper) GetProjectNetwork(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetProjectNetwork(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetProjectNetwork operation middleware
+func (siw *ServerInterfaceWrapper) SetProjectNetwork(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetProjectNetwork(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // RestoreProjectPITR operation middleware
 func (siw *ServerInterfaceWrapper) RestoreProjectPITR(w http.ResponseWriter, r *http.Request) {
 
@@ -27738,6 +27831,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/projects/{id}/manage-roles/sync", wrapper.SyncProjectManageRoles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{id}/network", wrapper.GetProjectNetwork)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/projects/{id}/network", wrapper.SetProjectNetwork)
 	})
 	r.Group(func(r chi.Router) {
 		r.Put(options.BaseURL+"/api/v1/projects/{id}/residency", wrapper.SetProjectResidency)

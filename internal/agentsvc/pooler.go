@@ -121,7 +121,7 @@ func (p *poolerHost) apply(b agentapi.PoolerBundle) error {
 	// The auth file first: a new route is only useful once its user can log
 	// in. The key before the certificate, so the pair never mismatches in
 	// the direction PgBouncer can't load.
-	for _, name := range []string{"userlist.txt", "server.key", "server.crt", "databases.ini"} {
+	for _, name := range []string{"userlist.txt", "hba.conf", "server.key", "server.crt", "databases.ini"} {
 		data, ok := b.Files[name]
 		if !ok {
 			continue

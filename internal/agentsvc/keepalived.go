@@ -171,6 +171,9 @@ func SeedPoolerDir(dir string, mode os.FileMode) error {
 	if err := write("userlist.txt", nil); err != nil {
 		return err
 	}
+	if err := write("hba.conf", []byte("host all all 0.0.0.0/0 scram-sha-256\nhost all all ::/0 scram-sha-256\n")); err != nil {
+		return err
+	}
 	if exists("server.crt") && exists("server.key") {
 		return nil
 	}

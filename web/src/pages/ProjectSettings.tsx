@@ -115,6 +115,7 @@ export function ProjectComputePage() {
         <InstancePanel projectId={p.id} instance={p.instance} />
       )}
       {p.tier === "dedicated" && <ManageRolesPanel p={p} />}
+      <NetworkPanel p={p} />
       <ResizeCard p={p} />
       <HACard p={p} />
       <ReplicasCard p={p} />
@@ -228,6 +229,82 @@ function GeneralPanel({ p }: { p: Project }) {
         </FormRow>
       </Panel>
     </form>
+  );
+}
+
+/** The project's IP allowlist: the addresses its poolers accept the
+ * project's own logins from. Xenibase's services connect from anywhere. */
+function NetworkPanel({ p }: { p: Project }) {
+  const qc = useQueryClient();
+  const key = ["project", p.id, "network"];
+  const net = useQuery({
+    queryKey: key,
+    queryFn: () => api.projectNetwork(p.id),
+  });
+  const [text, setText] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (net.data) setText(net.data.allowed_cidrs.join("\n"));
+  }, [net.data]);
+  const entries = text.split(/[\s,]+/).filter(Boolean);
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setErr(null);
+    setSaving(true);
+    try {
+      const res = await api.setProjectNetwork(p.id, entries);
+      qc.setQueryData(key, res);
+      await qc.invalidateQueries({ queryKey: ["project", p.id] });
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const d = net.data;
+  return (
+    <Panel title="Network access">
+      <form onSubmit={save}>
+        <FormRow
+          label="Allowed IP addresses"
+          htmlFor="allowed-cidrs"
+          description="One address or CIDR range per line, up to 50. Empty accepts connections from anywhere. Applies to the poolers within seconds; connections already open stay open."
+        >
+          <div className="flex flex-col gap-2 text-[13px]">
+            <textarea
+              id="allowed-cidrs"
+              rows={4}
+              value={text}
+              placeholder="203.0.113.10\n198.51.100.0/24"
+              onChange={(e) => {
+                setText(e.target.value);
+                setErr(null);
+              }}
+              disabled={net.isLoading || saving}
+              data-testid="allowed-cidrs"
+              className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-fg focus:border-accent focus:outline-none disabled:opacity-50"
+            />
+            {d?.your_ip && (
+              <span
+                className={d.your_ip_allowed ? "text-fg-muted" : "text-warn-text"}
+              >
+                Your address is <span className="font-mono">{d.your_ip}</span>
+                {d.your_ip_allowed
+                  ? "; it is allowed."
+                  : "; it is not on the list, so you can't connect from here."}
+              </span>
+            )}
+            <div>
+              <Button type="submit" disabled={saving || net.isLoading}>
+                Save
+              </Button>
+            </div>
+          </div>
+        </FormRow>
+      </form>
+      {err && <Alert>{err}</Alert>}
+    </Panel>
   );
 }
 

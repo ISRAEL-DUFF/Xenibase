@@ -23,6 +23,13 @@ bundle share one version (spec §11.5).
   connect through the poolers within 30 seconds (`POST …/manage-roles/sync` for
   at once), with the project's connection limit; moves and major upgrades take
   the roles along. See `docs/database-roles.md`.
+- **An IP allowlist per project.** Project Settings → Network access (or
+  `PUT /api/v1/projects/{id}/network` with `allowed_cidrs`, up to 50 addresses
+  or CIDR ranges) makes the poolers accept the project's logins only from
+  those addresses; Xenibase's own services (backend services, the dashboard's
+  SQL editor, probes) still connect. `GET` returns the caller's address and
+  whether it is allowed. Enforced by PgBouncer HBA rules in each region's
+  pooler configuration. See `docs/network-access.md`.
 - **Early access to hidden regions.** A hidden region takes new projects from
   the organisations in its **Early-access organisations** list
   (`early_access_org_ids`), for rehearsals before it opens or a first customer;
@@ -39,6 +46,14 @@ bundle share one version (spec §11.5).
   changes until a region is given a domain or an early-access list.
 - Migration 00057 adds `projects.manage_roles` and `project_owned_logins`.
   Nothing changes until an owner turns role management on.
+- Migration 00058 adds `projects.allowed_cidrs`. The poolers now use
+  `auth_type = hba` with an `hba.conf` xenibase-server writes next to
+  `databases.ini` and `userlist.txt`. **Upgrade the pooler hosts first**
+  (agent and PgBouncer configuration, `xenibase-pooler-host` image), then
+  xenibase-server: an older pooler-host agent refuses bundles that carry
+  `hba.conf`. A compose install with the poolers in the bundle gets both
+  together from `./upgrade.sh`; for a dev checkout, run `make pooler-seed` and
+  recreate the poolers.
 
 ### Fixed
 - **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.

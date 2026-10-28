@@ -369,6 +369,22 @@ func (m *Manager) Sync(ctx context.Context) error {
 			mark(*r.AliasDbName, regs)
 		}
 	}
+	// IP allowlists: the project's routes take its customer logins only
+	// from the listed networks; its edge, request-role and SLA probe
+	// logins are Xenibase's own and connect from wherever Xenibase runs.
+	for _, r := range rows {
+		if len(r.AllowedCidrs) == 0 {
+			continue
+		}
+		res := Restriction{Databases: []string{r.DbName, r.DbName + ReadOnlySuffix}, CIDRs: r.AllowedCidrs,
+			Platform: append(store.ServiceRoles(r.DbName), store.ProbeRole(r.DbName))}
+		if r.AliasDbName != nil {
+			res.Databases = append(res.Databases, *r.AliasDbName)
+		}
+		add(served(r.Region, r.ForwardRegion, r.ForwardUntil), func(cfg *Config) {
+			cfg.Restrictions = append(cfg.Restrictions, res)
+		})
+	}
 	members, err := q.PoolerDBUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("pooler sync: load personal logins: %w", err)
@@ -431,13 +447,18 @@ func (m *Manager) Sync(ctx context.Context) error {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("pooler sync: %w", err)
 		}
-		databases, userlist, err := Render(*cfg)
+		databases, userlist, hba, err := Render(*cfg)
 		if err != nil {
 			return err
 		}
 		// Users first: a new route is only useful once its user can log in.
 		usersChanged, err := WriteFileAtomic(filepath.Join(dir, UserlistFile), userlist, m.mode)
 		if err != nil {
+			return fmt.Errorf("pooler sync: %w", err)
+		}
+		// Then who may log in from where, so a new route never opens
+		// wider than its allowlist.
+		if _, err := WriteFileAtomic(filepath.Join(dir, HBAFile), hba, m.mode); err != nil {
 			return fmt.Errorf("pooler sync: %w", err)
 		}
 		routesChanged, err := WriteFileAtomic(filepath.Join(dir, DatabasesFile), databases, m.mode)

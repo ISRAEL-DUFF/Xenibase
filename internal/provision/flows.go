@@ -235,6 +235,11 @@ func (s *Service) syncPooler(ctx context.Context, log *jobs.StepLogger, step, ms
 // A project in a region with its own pooler hosts is tested through one
 // of them.
 func (s *Service) smokeTest(ctx context.Context, p store.Project, password string, log *jobs.StepLogger) error {
+	if len(p.AllowedCidrs) > 0 {
+		// The poolers take the owner only from the project's allowlist, and
+		// xenibase-server isn't on it.
+		return log.Info(ctx, "smoke", "skipped: the poolers take %s only from the project's IP allowlist", p.OwnerRole)
+	}
 	session, pooled := s.cfg.SmokeSessionAddr, s.cfg.SmokePooledAddr
 	if s.pooler != nil {
 		if rs, rp, ok := s.pooler.SmokeAddrs(p.Region); ok {

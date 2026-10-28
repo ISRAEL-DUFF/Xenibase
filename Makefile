@@ -57,7 +57,7 @@ dev-up: pooler-seed
 pooler-seed:
 	@for d in $(POOLER_DIR) $(TEST_POOLER_DIR); do \
 		mkdir -p $$d; \
-		for f in userlist.txt databases.ini; do \
+		for f in userlist.txt databases.ini hba.conf; do \
 			[ -f $$d/$$f ] || install -m 644 deploy/dev/pgbouncer/bootstrap/$$f $$d/$$f; \
 		done; \
 		[ -f $$d/server.crt ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \

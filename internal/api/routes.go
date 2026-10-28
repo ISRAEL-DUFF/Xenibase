@@ -338,6 +338,8 @@ var routeRules = map[string]rule{
 	"POST /api/v1/backups/{id}/restore":            {scope: scopeBackup, action: authz.BackupCreate},
 	"GET /api/v1/backups/{id}/download":            {scope: scopeBackup, action: authz.ProjectExport},
 	"PUT /api/v1/projects/{id}/residency":          {scope: scopeProject, action: authz.ProjectResidency},
+	"GET /api/v1/projects/{id}/network":            {scope: scopeProject, action: authz.ProjectSettings, token: authz.ScopeRead},
+	"PUT /api/v1/projects/{id}/network":            {scope: scopeProject, action: authz.ProjectSettings},
 	"GET /api/v1/projects/{id}/manage-roles":       {scope: scopeProject, action: authz.ProjectSettings, token: authz.ScopeRead},
 	"PUT /api/v1/projects/{id}/manage-roles":       {scope: scopeProject, action: authz.ProjectManageRoles},
 	"POST /api/v1/projects/{id}/manage-roles/sync": {scope: scopeProject, action: authz.ProjectSettings},

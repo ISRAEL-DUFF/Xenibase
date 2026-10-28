@@ -16,7 +16,7 @@ const (
 
 // PoolerFiles are the only files a pooler bundle may carry: the routes,
 // the auth file, and the TLS pair the PgBouncers present.
-var PoolerFiles = []string{"databases.ini", "userlist.txt", "server.crt", "server.key"}
+var PoolerFiles = []string{"databases.ini", "userlist.txt", "hba.conf", "server.crt", "server.key"}
 
 // PoolerBundle is a complete pooler configuration. Generation goes up each
 // time the content changes; Hash is PoolerHash(Files).
