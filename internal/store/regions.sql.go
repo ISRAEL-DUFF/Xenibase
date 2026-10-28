@@ -252,7 +252,7 @@ func (q *Queries) SetProjectRegion(ctx context.Context, arg SetProjectRegionPara
 }
 
 const setProjectResidency = `-- name: SetProjectResidency :one
-UPDATE projects SET data_residency = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles
+UPDATE projects SET data_residency = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs
 `
 
 type SetProjectResidencyParams struct {
@@ -310,6 +310,7 @@ func (q *Queries) SetProjectResidency(ctx context.Context, arg SetProjectResiden
 		&i.ForwardUntil,
 		&i.IntegratorRoles,
 		&i.ManageRoles,
+		&i.AllowedCidrs,
 	)
 	return i, err
 }

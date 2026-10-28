@@ -7699,6 +7699,50 @@ paths:
                 $ref: "#/components/schemas/ManageRoles"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/network:
+    get:
+      operationId: getProjectNetwork
+      summary: The project's IP allowlist
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: The allowlist, and the caller's own address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectNetwork"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setProjectNetwork
+      summary: Replace the project's IP allowlist (project admins)
+      description: |
+        With networks listed, the poolers accept the project's logins (the
+        owner, members' and its own) only from those addresses; an empty list
+        allows any address. Xenibase's own logins for the project (backend
+        services, the SLA probe) aren't limited. Takes effect within seconds
+        on every pooler of the project's region; existing connections stay
+        until they close.
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectNetworkRequest"
+      responses:
+        "200":
+          description: Saved and applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectNetwork"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/residency:
     put:
       operationId: setProjectResidency
@@ -9278,6 +9322,11 @@ components:
         manage_roles:
           type: boolean
           description: A dedicated project's owner role has CREATEROLE (role management).
+        allowed_cidrs:
+          type: array
+          description: The project's IP allowlist; empty allows any address.
+          items:
+            type: string
         forward_region:
           type: string
           nullable: true
@@ -9622,6 +9671,31 @@ components:
                 type: string
               reason:
                 type: string
+    ProjectNetworkRequest:
+      type: object
+      required: [allowed_cidrs]
+      properties:
+        allowed_cidrs:
+          type: array
+          maxItems: 50
+          description: Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address.
+          items:
+            type: string
+    ProjectNetwork:
+      type: object
+      required: [allowed_cidrs]
+      properties:
+        allowed_cidrs:
+          type: array
+          description: The networks, normalised; empty allows any address.
+          items:
+            type: string
+        your_ip:
+          type: string
+          description: The address this request came from, as Xenibase sees it (your database client's address may differ).
+        your_ip_allowed:
+          type: boolean
+          description: Whether your_ip is in the allowlist (always true when the list is empty).
     ProjectResidencyRequest:
       type: object
       required: [enabled]

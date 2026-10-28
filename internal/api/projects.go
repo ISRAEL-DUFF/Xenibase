@@ -280,6 +280,7 @@ func (s *Server) toAPIProject(p store.Project) (gen.Project, error) {
 		Region:                 &p.Region,
 		DataResidency:          &p.DataResidency,
 		ManageRoles:            &p.ManageRoles,
+		AllowedCidrs:           allowedOrEmpty(p.AllowedCidrs),
 		ForwardRegion:          p.ForwardRegion,
 		ForwardUntil:           p.ForwardUntil,
 		StorageState:           ptrTo(gen.StorageState(p.StorageState)),
@@ -380,4 +381,70 @@ func provisionUpdate(req gen.UpdateProjectRequest) provision.UpdateParams {
 		}
 	}
 	return p
+}
+
+// networkOut is a project's IP allowlist as the API shows it.
+func (s *Server) networkOut(r *http.Request, cidrs []string) gen.ProjectNetwork {
+	if cidrs == nil {
+		cidrs = []string{}
+	}
+	out := gen.ProjectNetwork{AllowedCidrs: cidrs}
+	if ip := s.clientIP(r); ip.IsValid() {
+		str, ok := ip.Unmap().String(), provision.AllowedFrom(cidrs, ip)
+		out.YourIp, out.YourIpAllowed = &str, &ok
+	}
+	return out
+}
+
+// GetProjectNetwork implements GET /api/v1/projects/{id}/network.
+func (s *Server) GetProjectNetwork(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "project network", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.networkOut(r, p.AllowedCidrs))
+}
+
+// SetProjectNetwork implements PUT /api/v1/projects/{id}/network: the
+// project's IP allowlist, applied to every pooler of its region.
+func (s *Server) SetProjectNetwork(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	var req gen.ProjectNetworkRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	cidrs, err := provision.NormalizeAllowedCIDRs(req.AllowedCidrs)
+	if err != nil {
+		s.provisionError(w, "project network", err)
+		return
+	}
+	a := auditFrom(r.Context())
+	a.target("project", id.String())
+	a.projectID = id
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "project network", err)
+		return
+	}
+	a.set("before", p.AllowedCidrs)
+	a.set("allowed_cidrs", cidrs)
+	p, err = store.New(s.db).SetProjectAllowedCIDRs(r.Context(), store.SetProjectAllowedCIDRsParams{ID: id, AllowedCidrs: cidrs})
+	if err != nil {
+		s.internalError(w, "project network", err)
+		return
+	}
+	if pm := s.projects.Pooler(); pm != nil {
+		if err := pm.Sync(r.Context()); err != nil {
+			s.internalError(w, "project network: pooler sync", err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, s.networkOut(r, p.AllowedCidrs))
+}
+
+func allowedOrEmpty(c []string) *[]string {
+	if c == nil {
+		c = []string{}
+	}
+	return &c
 }

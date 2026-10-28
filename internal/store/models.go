@@ -972,6 +972,7 @@ type Project struct {
 	ForwardUntil        *time.Time
 	IntegratorRoles     []string
 	ManageRoles         bool
+	AllowedCidrs        []string
 }
 
 type ProjectApiKey struct {

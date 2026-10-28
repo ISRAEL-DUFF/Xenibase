@@ -175,6 +175,7 @@ export type AdminRegionRequest = S["AdminRegionRequest"];
 export type RegionReadiness = S["RegionReadiness"];
 export type ProjectResidencyResult = S["ProjectResidencyResult"];
 export type ManageRoles = S["ManageRoles"];
+export type ProjectNetwork = S["ProjectNetwork"];
 export type RebalanceMove = S["RebalanceMove"];
 export type Margins = S["Margins"];
 export type CostSettings = S["CostSettings"];
@@ -1654,6 +1655,12 @@ export const api = {
       `/api/v1/admin/regions/${encodeURIComponent(id)}`,
       b,
     ),
+  projectNetwork: (projectId: string) =>
+    getJSON<ProjectNetwork>(`/api/v1/projects/${projectId}/network`),
+  setProjectNetwork: (projectId: string, allowed_cidrs: string[]) =>
+    request<ProjectNetwork>("PUT", `/api/v1/projects/${projectId}/network`, {
+      allowed_cidrs,
+    }),
   manageRoles: (projectId: string) =>
     getJSON<ManageRoles>(`/api/v1/projects/${projectId}/manage-roles`),
   setManageRoles: (projectId: string, enabled: boolean) =>

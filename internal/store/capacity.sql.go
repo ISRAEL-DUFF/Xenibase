@@ -813,7 +813,7 @@ func (q *Queries) NodeProjectSizes(ctx context.Context, nodeID uuid.UUID) ([]Nod
 }
 
 const nodeProjects = `-- name: NodeProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles FROM projects p JOIN instances i ON i.id = p.instance_id
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p JOIN instances i ON i.id = p.instance_id
 WHERE i.node_id = $1 AND p.deleted_at IS NULL AND i.deleted_at IS NULL
 ORDER BY p.created_at
 `
@@ -874,6 +874,7 @@ func (q *Queries) NodeProjects(ctx context.Context, nodeID uuid.UUID) ([]Project
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
 			&i.ManageRoles,
+			&i.AllowedCidrs,
 		); err != nil {
 			return nil, err
 		}

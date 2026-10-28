@@ -5471,6 +5471,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's IP allowlist */
+        get: operations["getProjectNetwork"];
+        /**
+         * Replace the project's IP allowlist (project admins)
+         * @description With networks listed, the poolers accept the project's logins (the
+         *     owner, members' and its own) only from those addresses; an empty list
+         *     allows any address. Xenibase's own logins for the project (backend
+         *     services, the SLA probe) aren't limited. Takes effect within seconds
+         *     on every pooler of the project's region; existing connections stay
+         *     until they close.
+         */
+        put: operations["setProjectNetwork"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/residency": {
         parameters: {
             query?: never;
@@ -6306,6 +6332,8 @@ export interface components {
             data_residency?: boolean;
             /** @description A dedicated project's owner role has CREATEROLE (role management). */
             manage_roles?: boolean;
+            /** @description The project's IP allowlist; empty allows any address. */
+            allowed_cidrs?: string[];
             /** @description After a region move, the old region still routing the old hostname. */
             forward_region?: string | null;
             /** Format: date-time */
@@ -6505,6 +6533,18 @@ export interface components {
                 name: string;
                 reason: string;
             }[];
+        };
+        ProjectNetworkRequest: {
+            /** @description Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address. */
+            allowed_cidrs: string[];
+        };
+        ProjectNetwork: {
+            /** @description The networks, normalised; empty allows any address. */
+            allowed_cidrs: string[];
+            /** @description The address this request came from, as Xenibase sees it (your database client's address may differ). */
+            your_ip?: string;
+            /** @description Whether your_ip is in the allowlist (always true when the list is empty). */
+            your_ip_allowed?: boolean;
         };
         ProjectResidencyRequest: {
             enabled: boolean;
@@ -20744,6 +20784,56 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ManageRoles"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getProjectNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The allowlist, and the caller's own address. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectNetwork"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    setProjectNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectNetworkRequest"];
+            };
+        };
+        responses: {
+            /** @description Saved and applied. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectNetwork"];
                 };
             };
             default: components["responses"]["Error"];

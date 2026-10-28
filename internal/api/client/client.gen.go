@@ -7982,8 +7982,10 @@ type ProfileList struct {
 
 // Project defines model for Project.
 type Project struct {
-	ArchivedAt *time.Time  `json:"archived_at,omitempty"`
-	Branch     *BranchInfo `json:"branch,omitempty"`
+	// AllowedCidrs The project's IP allowlist; empty allows any address.
+	AllowedCidrs *[]string   `json:"allowed_cidrs,omitempty"`
+	ArchivedAt   *time.Time  `json:"archived_at,omitempty"`
+	Branch       *BranchInfo `json:"branch,omitempty"`
 
 	// BranchCount Live branches of this project.
 	BranchCount *int `json:"branch_count,omitempty"`
@@ -8129,6 +8131,24 @@ type ProjectMembership struct {
 	ProjectId   openapi_types.UUID `json:"project_id"`
 	ProjectName string             `json:"project_name"`
 	Role        ProjectRole        `json:"role"`
+}
+
+// ProjectNetwork defines model for ProjectNetwork.
+type ProjectNetwork struct {
+	// AllowedCidrs The networks, normalised; empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
+
+	// YourIp The address this request came from, as Xenibase sees it (your database client's address may differ).
+	YourIp *string `json:"your_ip,omitempty"`
+
+	// YourIpAllowed Whether your_ip is in the allowlist (always true when the list is empty).
+	YourIpAllowed *bool `json:"your_ip_allowed,omitempty"`
+}
+
+// ProjectNetworkRequest defines model for ProjectNetworkRequest.
+type ProjectNetworkRequest struct {
+	// AllowedCidrs Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
 }
 
 // ProjectResidencyRequest defines model for ProjectResidencyRequest.
@@ -11317,6 +11337,9 @@ type UpdateProjectMemberJSONRequestBody = ProjectRoleRequest
 
 // MigrateSupabaseJSONRequestBody defines body for MigrateSupabase for application/json ContentType.
 type MigrateSupabaseJSONRequestBody = SupabaseMigrationRequest
+
+// SetProjectNetworkJSONRequestBody defines body for SetProjectNetwork for application/json ContentType.
+type SetProjectNetworkJSONRequestBody = ProjectNetworkRequest
 
 // RestoreProjectPITRJSONRequestBody defines body for RestoreProjectPITR for application/json ContentType.
 type RestoreProjectPITRJSONRequestBody = PitrRequest
@@ -14798,6 +14821,39 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /api/v1/projects/{id}/moves (the `ListProjectMoves` operationId).
 	ListProjectMoves(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetProjectNetwork The project's IP allowlist
+	//
+	// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+	GetProjectNetwork(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectNetworkWithBody Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetworkWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectNetwork Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetwork(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RestoreProjectPITRWithBody Point-in-time recovery of a dedicated project into a new one
 	//
@@ -23714,6 +23770,69 @@ func (c *Client) MigrateSupabase(ctx context.Context, id ProjectID, body Migrate
 // Corresponds with GET /api/v1/projects/{id}/moves (the `ListProjectMoves` operationId).
 func (c *Client) ListProjectMoves(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListProjectMovesRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetProjectNetwork The project's IP allowlist
+//
+// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+func (c *Client) GetProjectNetwork(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetProjectNetworkRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectNetworkWithBody Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *Client) SetProjectNetworkWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectNetworkRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectNetwork Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *Client) SetProjectNetwork(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectNetworkRequest(c.Server, id, body)
 	if err != nil {
 		return nil, err
 	}
@@ -39873,6 +39992,87 @@ func NewListProjectMovesRequest(server string, id ProjectID) (*http.Request, err
 	return req, nil
 }
 
+// NewGetProjectNetworkRequest constructs an http.Request for the GetProjectNetwork method
+func NewGetProjectNetworkRequest(server string, id ProjectID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/network", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetProjectNetworkRequest calls the generic SetProjectNetwork builder with application/json body
+func NewSetProjectNetworkRequest(server string, id ProjectID, body SetProjectNetworkJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetProjectNetworkRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewSetProjectNetworkRequestWithBody constructs an http.Request for the SetProjectNetwork method, with any body, and a specified content type
+func NewSetProjectNetworkRequestWithBody(server string, id ProjectID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/network", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRestoreProjectPITRRequest calls the generic RestoreProjectPITR builder with application/json body
 func NewRestoreProjectPITRRequest(server string, id ProjectID, body RestoreProjectPITRJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -47867,6 +48067,41 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /api/v1/projects/{id}/moves (the `ListProjectMoves` operationId).
 	ListProjectMovesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*ListProjectMovesResponse, error)
+
+	// GetProjectNetworkWithResponse The project's IP allowlist
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+	GetProjectNetworkWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectNetworkResponse, error)
+
+	// SetProjectNetworkWithBodyWithResponse Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetworkWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error)
+
+	// SetProjectNetworkWithResponse Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetworkWithResponse(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error)
 
 	// RestoreProjectPITRWithBodyWithResponse Point-in-time recovery of a dedicated project into a new one
 	//
@@ -64039,6 +64274,102 @@ func (r ListProjectMovesResponse) ContentType() string {
 	return ""
 }
 
+type GetProjectNetworkResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ProjectNetwork
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetProjectNetworkResponse) GetJSON200() *ProjectNetwork {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetProjectNetworkResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetProjectNetworkResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetProjectNetworkResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetProjectNetworkResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetProjectNetworkResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetProjectNetworkResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ProjectNetwork
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetProjectNetworkResponse) GetJSON200() *ProjectNetwork {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetProjectNetworkResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetProjectNetworkResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetProjectNetworkResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetProjectNetworkResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetProjectNetworkResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type RestoreProjectPITRResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -74907,6 +75238,59 @@ func (c *ClientWithResponses) ListProjectMovesWithResponse(ctx context.Context, 
 		return nil, err
 	}
 	return ParseListProjectMovesResponse(rsp)
+}
+
+// GetProjectNetworkWithResponse The project's IP allowlist
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+func (c *ClientWithResponses) GetProjectNetworkWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectNetworkResponse, error) {
+	rsp, err := c.GetProjectNetwork(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetProjectNetworkResponse(rsp)
+}
+
+// SetProjectNetworkWithBodyWithResponse Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *ClientWithResponses) SetProjectNetworkWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error) {
+	rsp, err := c.SetProjectNetworkWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectNetworkResponse(rsp)
+}
+
+// SetProjectNetworkWithResponse Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *ClientWithResponses) SetProjectNetworkWithResponse(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error) {
+	rsp, err := c.SetProjectNetwork(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectNetworkResponse(rsp)
 }
 
 // RestoreProjectPITRWithBodyWithResponse Point-in-time recovery of a dedicated project into a new one
@@ -87259,6 +87643,72 @@ func ParseListProjectMovesResponse(rsp *http.Response) (*ListProjectMovesRespons
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest MoveList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetProjectNetworkResponse parses an HTTP response from a GetProjectNetworkWithResponse call
+func ParseGetProjectNetworkResponse(rsp *http.Response) (*GetProjectNetworkResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetProjectNetworkResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ProjectNetwork
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetProjectNetworkResponse parses an HTTP response from a SetProjectNetworkWithResponse call
+func ParseSetProjectNetworkResponse(rsp *http.Response) (*SetProjectNetworkResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetProjectNetworkResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ProjectNetwork
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
