@@ -5,22 +5,6 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
-### Added
-- **Standby settings per read replica.** Hot standby feedback (off by
-  default) and how long replay waits for a conflicting query before cancelling
-  it (30 s by default, 0 to 900; `max_standby_streaming_delay` and
-  `max_standby_archive_delay`), set when a replica is added
-  (`hot_standby_feedback`, `max_standby_delay_seconds` on
-  `POST /api/v1/projects/{id}/replicas`) or changed later
-  (`PATCH /api/v1/projects/{id}/replicas/{replica_id}`, the replica's
-  **Settings…** in the dashboard, `xenibase replicas set`). A change applies to
-  that replica alone with a reload, without a restart; the primary and HA
-  standbys keep Postgres's defaults. See `docs/read-replicas.md`.
-
-### Upgrading
-- Migration 00059 adds the settings to `read_replicas`. Existing replicas keep
-  Postgres's defaults (feedback off, 30 s), which they already ran with.
-
 ## v4.2.4
 
 ### Added
@@ -52,6 +36,16 @@ bundle share one version (spec §11.5).
   `GET /api/v1/regions` lists it to their members. Before, a hidden region
   refused every project, so the Lagos launch rehearsals could not run until it
   was open.
+- **Standby settings per read replica.** Hot standby feedback (off by
+  default) and how long replay waits for a conflicting query before cancelling
+  it (30 s by default, 0 to 900; `max_standby_streaming_delay` and
+  `max_standby_archive_delay`), set when a replica is added
+  (`hot_standby_feedback`, `max_standby_delay_seconds` on
+  `POST /api/v1/projects/{id}/replicas`) or changed later
+  (`PATCH /api/v1/projects/{id}/replicas/{replica_id}`, the replica's
+  **Settings…** in the dashboard, `xenibase replicas set`). A change applies to
+  that replica alone with a reload, without a restart; the primary and HA
+  standbys keep Postgres's defaults. See `docs/read-replicas.md`.
 
 ### Security
 - Built with Go 1.26.10, which distrusts compromised intermediate certificates
@@ -70,6 +64,8 @@ bundle share one version (spec §11.5).
   `hba.conf`. A compose install with the poolers in the bundle gets both
   together from `./upgrade.sh`; for a dev checkout, run `make pooler-seed` and
   recreate the poolers.
+- Migration 00059 adds the settings to `read_replicas`. Existing replicas keep
+  Postgres's defaults (feedback off, 30 s), which they already ran with.
 
 ### Fixed
 - **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.
