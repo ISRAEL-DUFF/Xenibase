@@ -212,9 +212,17 @@ func (c *SupabaseS3) target(bucket string) storage.Target {
 }
 
 // sourceGuard checks a migration source's address against org's
-// outbound rules (outbound.CheckSource): Xenibase connects from an address
-// the clusters trust, so the source must not be one of its own.
+// outbound rules: Xenibase connects from an address the clusters trust, so
+// the source must not be one of its own. It is the import's check
+// (CheckSource, the backup service's), which also refuses the platform's
+// private networks for a host allow-listed for the organisation;
+// outbound.CheckSource without them only when that is not set.
 func (s *Service) sourceGuard(org uuid.UUID) pgsource.Guard {
+	if s.CheckSource != nil {
+		return func(ctx context.Context, host string, port int) (netip.Addr, error) {
+			return s.CheckSource(ctx, org, host, port)
+		}
+	}
 	ob := s.Outbound
 	if ob == nil {
 		ob = outbound.New(s.db, outbound.Config{}, s.log)

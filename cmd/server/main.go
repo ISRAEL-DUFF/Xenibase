@@ -445,6 +445,9 @@ func run() error {
 		servicesSvc.Phone = platformPhone(cfg, log)
 		if backups != nil {
 			servicesSvc.Files = backups.FilesTarget
+			// A Supabase migration's source passes the import's check,
+			// platform networks included.
+			servicesSvc.CheckSource = backups.CheckSource
 		}
 		if cfg.CDN.On() {
 			servicesSvc.CDN = cdn.Cloudflare{ZoneID: cfg.CDN.CloudflareZoneID, Token: cfg.CDN.CloudflareToken}

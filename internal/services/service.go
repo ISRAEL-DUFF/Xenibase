@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
@@ -87,6 +88,10 @@ type Service struct {
 	Phone PlatformPhone
 	// Outbound makes hook calls (V4 §6.5).
 	Outbound *outbound.Service
+	// CheckSource checks a Supabase migration's source address for an
+	// organisation: the backup service's import check
+	// (backup.Service.CheckSource), with the platform's own networks.
+	CheckSource func(ctx context.Context, org uuid.UUID, host string, port int) (netip.Addr, error)
 	// Files resolves the object store for files of projects in a region
 	// (V4 §5.1); nil turns storage off.
 	Files func(ctx context.Context, region string, residency bool) (storage.Target, error)

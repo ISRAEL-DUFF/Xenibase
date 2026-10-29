@@ -162,6 +162,12 @@ bundle share one version (spec §11.5).
   so a source login allowed to read only the imported schemas failed it
   with "permission denied" and the import rolled back after the copy. It
   now reads only the chosen schemas.
+- **A Supabase migration's source could be in the platform's private
+  network.** Its address check, unlike an import's, did not refuse the
+  cloud private network or `XENIBASE_OUTBOUND_BLOCK` for a host the
+  platform admin allow-listed for the organisation, so a tenant who
+  controls that host's DNS could point it at platform services. It now
+  uses the import's check.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

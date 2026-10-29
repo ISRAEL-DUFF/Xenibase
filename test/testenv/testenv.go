@@ -462,6 +462,7 @@ func Start(t testing.TB, opts Options) *Env {
 	autoNow := func() time.Time { return time.Now().Add(time.Duration(e.automationOffset.Load())) }
 	outboundSvc := outbound.New(db, outbound.Config{Now: autoNow}, log)
 	servicesSvc.Outbound = outboundSvc
+	servicesSvc.CheckSource = backups.CheckSource
 	// The auth message and hook sender starts once its outbound client is set.
 	wg.Add(1)
 	go func() { defer wg.Done(); servicesSvc.RunAuthEmail(ctx) }()
