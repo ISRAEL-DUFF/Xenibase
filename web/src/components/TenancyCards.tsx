@@ -11,7 +11,7 @@ const STATE_TEXT: Record<string, { tone: "warn" | "danger"; title: string; body:
   warn: {
     tone: "warn",
     title: "Nearly full",
-    body: "This project is over 90% of its storage limit. At 100% it becomes read-only; at 120% apps can no longer connect.",
+    body: "This project is over 90% of its storage limit. At 100% it becomes read-only; at 120%, or if it keeps growing while read-only, apps can no longer connect.",
   },
   soft: {
     tone: "danger",

@@ -4,7 +4,7 @@
 -- name: SharedProjectSizes :many
 -- size_bytes is -1 for a project not measured in the last 30 minutes.
 -- tenant: system - storage enforcement checks every shared-tier project.
-SELECT p.id, p.org_id, p.name, p.db_name, p.storage_state,
+SELECT p.id, p.org_id, p.name, p.db_name, p.instance_id, p.storage_state,
        COALESCE((SELECT m.value FROM metric_points m
         WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'size_bytes' AND m.resolution = '1m'
           AND m.ts > now() - interval '30 minutes'

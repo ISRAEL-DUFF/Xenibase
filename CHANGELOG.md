@@ -684,6 +684,16 @@ bundle share one version (spec §11.5).
   roles other than the tenant's, apart from Xenibase's own in the `xb_*`
   and `xenibase` schemas with a pinned `search_path`. The live probes also
   try a cross-project grant.
+- **One tenant can no longer fill a shared node's disk between size
+  samples.** Storage enforcement used only the 5-minute size sample, and
+  the soft lock lets a tenant write in a read-write transaction, so a
+  tenant at 99% could insert at disk speed for up to six minutes before
+  the hard lock, tens of gigabytes past its limit. Projects at the warning
+  or the soft lock are now measured with `pg_database_size` on every
+  enforcement pass (each minute); one that reaches 120%, or grows by 5% of
+  its limit while soft-locked, is hard-locked at once. A hard lock now
+  lifts only when the project is back under its limit (it used to drop to
+  the soft lock under 120%, letting the tenant write again).
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its

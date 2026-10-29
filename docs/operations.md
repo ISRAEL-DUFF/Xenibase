@@ -203,11 +203,16 @@ Shared-tier projects are measured every minute:
 - **90%** of the project's storage limit: a warning email and banner.
 - **100%**: read-only by default. Apps can still delete in a read-write
   transaction (`BEGIN READ WRITE`), and the SQL console works.
-- **120%** (or 100% with the node's disk 95% full): apps cannot log in.
-  The console and table browser still work; delete data there, then
-  **Reclaim space** (Project Settings → Database) to give the space back.
+- **120%** (or 100% with the node's disk 95% full), or growth of 5% of
+  the limit while read-only (writes in read-write transactions): apps
+  cannot log in. The console and table browser still work; delete data
+  there, then **Reclaim space** (Project Settings → Database) to give the
+  space back.
 
-Locks lift at the next check once the project is under the limit.
+Projects at 90% or over are measured on every check (every minute), not
+only from the 5-minute size sample, so one that keeps writing is locked
+within a minute. Locks lift at the next check once the project is under
+the limit; a project whose logins are off stays so until then.
 Statements running over 10 minutes are cancelled, a statement that keeps
 running after its cancel (PL/pgSQL can catch it) is ended with its session
 15 seconds later, and transactions idle over 5 minutes are ended; the

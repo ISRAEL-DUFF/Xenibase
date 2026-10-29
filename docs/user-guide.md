@@ -208,8 +208,10 @@ storage:
 - at **90%** of a project's limit you get an email and a banner;
 - at **100%** it is read-only by default (apps can still delete inside
   `BEGIN READ WRITE`; the console works, scheduled jobs' writes fail);
-- at **120%** apps can't connect, but the console still works so you can
-  delete data and **Reclaim space**.
+- at **120%**, or if it keeps growing while read-only (by 5% of the
+  limit), apps can't connect, but the console still works so you can
+  delete data and **Reclaim space**. Apps can connect again once the
+  project is back under its limit.
 
 Statements running over 10 minutes, and transactions idle over 5, are
 ended on the shared tier.

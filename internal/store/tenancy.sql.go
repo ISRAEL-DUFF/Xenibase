@@ -1650,7 +1650,7 @@ func (q *Queries) SharedInstanceProjects(ctx context.Context) ([]SharedInstanceP
 
 const sharedProjectSizes = `-- name: SharedProjectSizes :many
 
-SELECT p.id, p.org_id, p.name, p.db_name, p.storage_state,
+SELECT p.id, p.org_id, p.name, p.db_name, p.instance_id, p.storage_state,
        COALESCE((SELECT m.value FROM metric_points m
         WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'size_bytes' AND m.resolution = '1m'
           AND m.ts > now() - interval '30 minutes'
@@ -1669,6 +1669,7 @@ type SharedProjectSizesRow struct {
 	OrgID        uuid.UUID
 	Name         string
 	DbName       string
+	InstanceID   uuid.UUID
 	StorageState string
 	SizeBytes    float64
 	NodeDiskUsed float64
@@ -1692,6 +1693,7 @@ func (q *Queries) SharedProjectSizes(ctx context.Context) ([]SharedProjectSizesR
 			&i.OrgID,
 			&i.Name,
 			&i.DbName,
+			&i.InstanceID,
 			&i.StorageState,
 			&i.SizeBytes,
 			&i.NodeDiskUsed,
