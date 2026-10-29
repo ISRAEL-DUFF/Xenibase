@@ -110,6 +110,28 @@ func (q *Queries) CountOrgBranches(ctx context.Context, orgID uuid.UUID) (int32,
 	return column_1, err
 }
 
+const deleteBranchMemberships = `-- name: DeleteBranchMemberships :execrows
+DELETE FROM project_members m USING projects b
+WHERE b.id = m.project_id AND b.parent_project_id = $1 AND b.org_id = $2 AND b.deleted_at IS NULL
+  AND m.user_id = $3 AND m.org_id = $2
+`
+
+type DeleteBranchMembershipsParams struct {
+	ParentID *uuid.UUID
+	OrgID    uuid.UUID
+	UserID   uuid.UUID
+}
+
+// Someone removed from a project leaves its live branches too: they hold
+// its data, and their members are a copy of its own (V2 s8.1).
+func (q *Queries) DeleteBranchMemberships(ctx context.Context, arg DeleteBranchMembershipsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBranchMemberships, arg.ParentID, arg.OrgID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const detachBranch = `-- name: DetachBranch :one
 UPDATE projects SET parent_project_id = NULL, expires_at = NULL, expiry_notified_at = NULL, branch_backups = false
 WHERE id = $1 AND parent_project_id IS NOT NULL

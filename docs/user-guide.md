@@ -106,7 +106,11 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   after a TTL (1 hour to 30 days, 7 days by default); the creator is emailed
   a day before.
 - **Reset** refills it from the parent, keeping its name, URL and
-  passwords, so `.env` files and pipelines keep working.
+  passwords, so `.env` files and pipelines keep working. Since it copies
+  the parent again, it needs the developer role on the parent as well as
+  on the branch, and refilling a full-data branch of a project marked
+  *contains sensitive data* needs the parent's admin role. Removing
+  someone from a project removes them from its branches too.
 - **Detach** makes it an ordinary project (which can then be promoted).
 - **With backend services** on the parent, the branch gets an API of its
   own: a new URL (ref), new publishable and secret keys and a new signing

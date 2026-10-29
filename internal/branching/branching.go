@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
+	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/mail"
@@ -386,6 +387,11 @@ type ResetParams struct {
 	BranchID uuid.UUID
 	Source   string
 	By       *uuid.UUID
+	// Actor is who asks. A reset copies the parent again, so they must
+	// still be allowed to branch it, and only its project admin may refill
+	// a full-data branch of a parent that contains sensitive data (V2
+	// §8.5), as for a new branch.
+	Actor authz.Actor
 }
 
 // Reset queues re-creating a branch's data from its parent, keeping its
@@ -395,6 +401,25 @@ func (s *Service) Reset(ctx context.Context, p ResetParams) (store.Operation, er
 		func(tx pgx.Tx, b store.Project) (any, error) {
 			if b.ParentProjectID == nil {
 				return nil, fmt.Errorf("%w: %w", provision.ErrInvalid, ErrNotBranch)
+			}
+			q := store.New(tx)
+			parent, err := q.GetProject(ctx, *b.ParentProjectID)
+			if err != nil {
+				return nil, err
+			}
+			if parent.DeletedAt != nil {
+				return nil, fmt.Errorf("%w: the parent %s was deleted; detach or delete the branch", ErrConflict, parent.Name)
+			}
+			d, err := authz.Can(ctx, q, p.Actor, authz.BranchManage, authz.Resource{OrgID: parent.OrgID, ProjectID: parent.ID})
+			if err != nil {
+				return nil, err
+			}
+			if !d.Allowed {
+				return nil, fmt.Errorf("%w: a reset copies %s again, which needs the developer role (or above) on it", ErrForbidden, parent.Name)
+			}
+			schemaOnly := b.BranchSchemaOnly != nil && *b.BranchSchemaOnly
+			if !schemaOnly && parent.SensitiveData && d.ProjectRole != authz.ProjectAdmin {
+				return nil, fmt.Errorf("%w: %s contains sensitive data; refilling a full-data branch needs the project admin role on it", ErrForbidden, parent.Name)
 			}
 			src := p.Source
 			if src == "" && b.BranchSource != nil {
@@ -408,13 +433,12 @@ func (s *Service) Reset(ctx context.Context, p ResetParams) (store.Operation, er
 				return nil, fmt.Errorf("%w: source must be backup or live", provision.ErrInvalid)
 			}
 			if src == SourceBackup {
-				if _, err := store.New(tx).LatestSucceededBackup(ctx, b.ParentProjectID); errors.Is(err, pgx.ErrNoRows) {
+				if _, err := q.LatestSucceededBackup(ctx, b.ParentProjectID); errors.Is(err, pgx.ErrNoRows) {
 					return nil, fmt.Errorf("%w: the parent has no backup yet; reset from live instead", provision.ErrConflict)
 				} else if err != nil {
 					return nil, err
 				}
 			}
-			schemaOnly := b.BranchSchemaOnly != nil && *b.BranchSchemaOnly
 			return map[string]any{"branch": fillParams{Parent: *b.ParentProjectID, Source: src, SchemaOnly: schemaOnly}}, nil
 		})
 }

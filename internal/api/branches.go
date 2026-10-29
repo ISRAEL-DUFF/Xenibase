@@ -182,7 +182,9 @@ func (s *Server) ResetBranch(w http.ResponseWriter, r *http.Request, id gen.Proj
 	}
 	a := auditFrom(r.Context())
 	a.target("project", id.String())
-	p := branching.ResetParams{BranchID: id, By: userID(r.Context())}
+	// The parent is checked again in Reset: the caller must still be
+	// allowed to branch it (a token restricted to it covers its branches).
+	p := branching.ResetParams{BranchID: id, By: userID(r.Context()), Actor: accessFrom(r.Context()).Actor}
 	if req.Source != nil {
 		p.Source = string(*req.Source)
 		a.set("source", p.Source)

@@ -529,15 +529,24 @@ func (s *Service) AddProjectMember(ctx context.Context, p store.Project, userID 
 	return s.refreshAccess(ctx, p.OrgID, userID)
 }
 
-// RemoveProjectMember takes p away from userID: the membership, then their
-// login on the project.
+// RemoveProjectMember takes p away from userID: the membership, and their
+// memberships of p's branches, which hold its data (V2 §8.1), then their
+// logins on them.
 func (s *Service) RemoveProjectMember(ctx context.Context, p store.Project, userID uuid.UUID) error {
-	n, err := store.New(s.db).DeleteProjectMember(ctx, store.DeleteProjectMemberParams{ProjectID: p.ID, UserID: userID, OrgID: p.OrgID})
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		n, err := q.DeleteProjectMember(ctx, store.DeleteProjectMemberParams{ProjectID: p.ID, UserID: userID, OrgID: p.OrgID})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		_, err = q.DeleteBranchMemberships(ctx, store.DeleteBranchMembershipsParams{ParentID: &p.ID, OrgID: p.OrgID, UserID: userID})
+		return err
+	})
 	if err != nil {
 		return err
-	}
-	if n == 0 {
-		return ErrNotFound
 	}
 	return s.refreshAccess(ctx, p.OrgID, userID)
 }

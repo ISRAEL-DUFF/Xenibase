@@ -19,6 +19,14 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A branch reset no longer copies a parent the caller has lost.** Reset
+  checked only the branch, so someone removed from the parent could keep
+  refilling a branch with its current data, and a full-data branch of a
+  parent marked sensitive afterwards kept refilling for any developer. A
+  reset now needs `project.branch` on the parent too, and its admin role
+  for a full copy of sensitive data (403 otherwise); a token restricted to
+  the parent still covers its branches. Removing someone from a project
+  also removes them from its live branches and drops their logins there.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
