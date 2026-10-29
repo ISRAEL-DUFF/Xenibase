@@ -55,7 +55,11 @@ From the CLI, run `xenibase resume <project>`. From the API, call
 resume it; they could wake it by connecting anyway.
 
 An organisation that moves to a paid plan has its sleeping projects woken
-by the next sweep.
+by the next sweep. A pause or archive the sweep queued checks the plan
+again when it runs: if the organisation now pays, or is no longer active,
+the project is left as it is (an archive checks again before it drops the
+database, after the backup). Projects of a suspended organisation are
+neither paused nor archived.
 
 ## The waker
 

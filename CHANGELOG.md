@@ -39,6 +39,17 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A Free project whose organisation upgrades is no longer paused or
+  archived on the way.** A pause or archive operation queued by the sweep
+  re-checked only the project's activity when it ran, so an organisation
+  that moved to a paid plan (or was suspended) in between had the project
+  paused, or archived and its database dropped, and then woken or restored
+  by the next sweep. Both now check that the organisation is still active,
+  on the Free plan and not on the Unlimited quota plan, and skip
+  otherwise; the archive checks again after its backup, before the
+  database is dropped, and a pause retried after an earlier attempt paused
+  the project wakes it again. The sweep no longer archives the projects of
+  a suspended organisation either.
 - **An archive retry no longer drops a Free project's database on an
   unverified backup.** The archive backup was marked succeeded before its
   restore test ran, and deleted only if the test failed and the delete

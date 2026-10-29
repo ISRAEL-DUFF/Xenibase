@@ -173,6 +173,35 @@ func (h *harness) hasDatabase(t *testing.T, p store.Project) bool {
 	return ok
 }
 
+// setPlan puts the harness's organisation on billing plan (free, pro,
+// team) with organisation status.
+func (h *harness) setPlan(t *testing.T, plan, status string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO price_books (version, effective_at, prices) VALUES (1, now(), '{}') ON CONFLICT DO NOTHING`, nil},
+		{`INSERT INTO billing_accounts (org_id, plan, price_book_version) VALUES ($1, $2, 1) ON CONFLICT (org_id) DO UPDATE SET plan = $2`, []any{h.org, plan}},
+		{`UPDATE organizations SET status = $2 WHERE id = $1`, []any{h.org, status}},
+	} {
+		if _, err := h.db.Exec(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("%s: %v", stmt.sql, err)
+		}
+	}
+}
+
+// accepts reports whether p's database accepts connections.
+func (h *harness) accepts(t *testing.T, p store.Project) bool {
+	t.Helper()
+	var ok bool
+	if err := h.cluster.QueryRow(context.Background(), `SELECT datallowconn FROM pg_database WHERE datname = $1`, p.DbName).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
 // operation queues kind on p and claims it as a worker would.
 func (h *harness) operation(t *testing.T, p store.Project, kind string) (store.Operation, *jobs.StepLogger) {
 	t.Helper()
@@ -217,10 +246,15 @@ type fakeArchiver struct {
 	fail     error
 	archived int
 	verified []uuid.UUID
+	// take, when set, takes a new backup; otherwise Archive fails.
+	take func(ctx context.Context, p store.Project, opID *uuid.UUID) (store.Backup, error)
 }
 
-func (f *fakeArchiver) Archive(_ context.Context, _ store.Project, _ *uuid.UUID, _ *jobs.StepLogger) (store.Backup, error) {
+func (f *fakeArchiver) Archive(ctx context.Context, p store.Project, opID *uuid.UUID, _ *jobs.StepLogger) (store.Backup, error) {
 	f.archived++
+	if f.take != nil {
+		return f.take(ctx, p, opID)
+	}
 	return store.Backup{}, errors.New("fakeArchiver takes no new backups")
 }
 
