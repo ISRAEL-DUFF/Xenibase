@@ -770,7 +770,7 @@ func (q *Queries) LastBackupTimes(ctx context.Context) ([]LastBackupTimesRow, er
 }
 
 const lastOperationOfKind = `-- name: LastOperationOfKind :one
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations WHERE kind = $1 ORDER BY created_at DESC LIMIT 1
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations WHERE kind = $1 ORDER BY created_at DESC LIMIT 1
 `
 
 // tenant: system - backup workers and the scheduler, or a project the request already authorized.
@@ -792,6 +792,7 @@ func (q *Queries) LastOperationOfKind(ctx context.Context, kind string) (Operati
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.FinishedAt,
+		&i.Exclusive,
 	)
 	return i, err
 }
@@ -1074,7 +1075,7 @@ func (q *Queries) ListProjectBackups(ctx context.Context, arg ListProjectBackups
 }
 
 const listRestoreTests = `-- name: ListRestoreTests :many
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations WHERE kind = 'restore_test' ORDER BY created_at DESC LIMIT $1
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations WHERE kind = 'restore_test' ORDER BY created_at DESC LIMIT $1
 `
 
 // tenant: system - backup workers and the scheduler, or a project the request already authorized.
@@ -1102,6 +1103,7 @@ func (q *Queries) ListRestoreTests(ctx context.Context, maxRows int32) ([]Operat
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}

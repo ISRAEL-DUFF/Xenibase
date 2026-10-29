@@ -304,12 +304,44 @@ func (s *Service) rollbackCreate(ctx context.Context, op store.Operation, log *j
 		return err
 	}
 	err = s.teardown(ctx, p, log)
-	if err != nil && p.Tier == TierDedicated {
+	if err == nil {
+		return nil
+	}
+	if p.Tier == TierDedicated {
 		// The instance record outlives the project; the cleanup loop removes
 		// it once the node answers.
 		_ = log.Warn(ctx, "rollback", "the instance on its node will be removed automatically once the node is reachable")
+		return err
 	}
+	// OnFail runs once, and the project is already gone from every list:
+	// hand the database and roles to an operation that keeps retrying.
+	cleanup, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID, Background: true,
+		Params: map[string]any{"after": op.ID}})
+	if qerr != nil {
+		return fmt.Errorf("%w (and queueing the cleanup failed: %v)", err, qerr)
+	}
+	_ = log.Warn(ctx, "rollback", "operation %s keeps retrying the drop of %s and its roles", cleanup.ID, p.DbName)
 	return err
+}
+
+// KindDropProjectObjects drops what a failed create's rollback could not:
+// the database and roles of a project that is already deleted.
+const KindDropProjectObjects = "drop_project_objects"
+
+// runDropProjectObjects tears down a deleted shared project's database and
+// roles. It refuses a live project.
+func (s *Service) runDropProjectObjects(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
+	p, err := s.project(ctx, op)
+	if err != nil {
+		return err
+	}
+	if p.DeletedAt == nil {
+		return jobs.Permanent(fmt.Errorf("project %s is not deleted; nothing to drop", p.DbName))
+	}
+	if p.Tier != TierShared {
+		return jobs.Permanent(errors.New("only a shared project's objects are dropped here (the reaper removes dedicated instances)"))
+	}
+	return s.teardown(ctx, p, log)
 }
 
 // teardown removes a project's pooler route and drops its database and role.
@@ -388,6 +420,13 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 		if err := log.Warn(ctx, "backup", "final backup skipped"); err != nil {
 			return err
 		}
+	} else if gone, err := s.databaseGone(ctx, p); err != nil {
+		return err
+	} else if gone {
+		// An earlier attempt took the backup and tore the project down.
+		if err := log.Info(ctx, "backup", "final backup not needed: an earlier attempt already dropped the database"); err != nil {
+			return err
+		}
 	} else if err := s.FinalBackup(ctx, p, log); err != nil {
 		return fmt.Errorf("final backup: %w", err)
 	}
@@ -402,6 +441,27 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 		return err
 	}
 	return log.Info(ctx, "done", "project %s deleted", p.DbName)
+}
+
+// databaseGone reports whether p's database no longer exists: a dedicated
+// project's instance is deleted, or a shared project's database is not on
+// its cluster.
+func (s *Service) databaseGone(ctx context.Context, p store.Project) (bool, error) {
+	if p.Tier == TierDedicated {
+		inst, err := store.New(s.db).GetInstance(ctx, p.InstanceID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return true, nil
+		}
+		return err == nil && inst.Status == "deleted", err
+	}
+	conn, err := s.connectInstance(ctx, p.InstanceID, "postgres")
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(context.Background())
+	var exists bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, p.DbName).Scan(&exists)
+	return !exists, err
 }
 
 // failDelete leaves a project whose delete gave up in "error", unrouted,

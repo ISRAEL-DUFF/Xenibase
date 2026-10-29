@@ -174,6 +174,8 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 
 		KindApplySettings: {Handler: s.runApplySettings, MaxAttempts: 5},
 		KindDropDBUser:    {Handler: s.runDropDBUser, MaxAttempts: 10},
+		// Backoff doubles from 2 s to 5 min: about 40 minutes of retries.
+		KindDropProjectObjects: {Handler: s.runDropProjectObjects, MaxAttempts: 15},
 	}
 	for k, v := range s.opaqueKinds() {
 		kinds[k] = v
@@ -630,6 +632,13 @@ func (s *Service) EnqueueExclusive(ctx context.Context, projectID uuid.UUID, all
 	return out, err
 }
 
+// WithIdleProject runs f in a transaction that holds the live project's
+// row lock, once its status is one of allowed and no operation is pending
+// on it: for a change made in place that must not interleave with one.
+func (s *Service) WithIdleProject(ctx context.Context, id uuid.UUID, allowed []string, f func(pgx.Tx, store.Project) error) error {
+	return s.withIdleProject(ctx, id, allowed, f)
+}
+
 // withIdleProject locks a live project, checks its status and that no other
 // operation is pending on it, and runs f in the same transaction. One
 // operation per project at a time keeps the flows from interleaving.
@@ -657,8 +666,43 @@ func (s *Service) withIdleProject(ctx context.Context, id uuid.UUID, allowed []s
 		if busy {
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
-		return f(tx, p)
+		if err := f(tx, p); errors.Is(err, jobs.ErrProjectBusy) {
+			return fmt.Errorf("%w: %w", ErrConflict, err)
+		} else if err != nil {
+			return err
+		}
+		return nil
 	})
+}
+
+// EnqueueIfIdleTx queues an exclusive operation on a project from inside
+// tx, as withIdleProject would: under the project's row lock, only if it
+// is live and active with no operation pending. It reports whether it
+// queued; a busy project is skipped, not an error (the nightly scheduler
+// tries again on its next tick).
+func EnqueueIfIdleTx(ctx context.Context, tx pgx.Tx, ep jobs.EnqueueParams) (bool, error) {
+	if ep.ProjectID == nil {
+		return false, errors.New("EnqueueIfIdleTx needs a project")
+	}
+	q := store.New(tx)
+	p, err := q.GetLiveProjectForUpdate(ctx, *ep.ProjectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if p.Status != StatusActive {
+		return false, nil
+	}
+	// A new statement: it sees what committed while we waited for the lock.
+	if busy, err := q.ProjectHasActiveOperation(ctx, &p.ID); err != nil || busy {
+		return false, err
+	}
+	if _, err := jobs.Enqueue(ctx, tx, ep); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Get returns a live project.

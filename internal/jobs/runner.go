@@ -39,6 +39,10 @@ type RunnerConfig struct {
 	// Paused, when set and true, stops new claims (running operations
 	// finish): the schema is newer than this release (store.SchemaWatcher).
 	Paused func() bool
+	// UnservedAfter is how long a runnable operation of a kind this runner
+	// doesn't serve may wait before it is failed as one no worker runs.
+	// Default 24h.
+	UnservedAfter time.Duration
 }
 
 func (c *RunnerConfig) setDefaults() {
@@ -56,6 +60,9 @@ func (c *RunnerConfig) setDefaults() {
 	}
 	if c.RetryMax <= 0 {
 		c.RetryMax = 5 * time.Minute
+	}
+	if c.UnservedAfter <= 0 {
+		c.UnservedAfter = 24 * time.Hour
 	}
 	if c.WorkerID == "" {
 		host, _ := os.Hostname()
@@ -167,12 +174,25 @@ func (r *Runner) reclaimLoop(ctx context.Context) {
 	t := time.NewTicker(r.cfg.LeaseTTL / 2)
 	defer t.Stop()
 	for {
-		ids, err := r.q.ReclaimStaleOperations(ctx, time.Now().Add(-r.cfg.LeaseTTL))
+		ids, err := r.q.ReclaimStaleOperations(ctx, r.cfg.LeaseTTL.Seconds())
 		if err != nil && ctx.Err() == nil {
 			r.log.Error("reclaim stale operations", "err", err)
 		}
 		for _, id := range ids {
 			r.log.Warn("requeued operation with expired lease", "operation_id", id)
+		}
+		// A runner paused on a newer schema leaves unserved kinds alone: they
+		// are most likely new kinds the newer servers run.
+		if r.cfg.Paused == nil || !r.cfg.Paused() {
+			unserved, err := r.q.FailUnservedOperations(ctx, store.FailUnservedOperationsParams{
+				Kinds: r.names, AfterSeconds: r.cfg.UnservedAfter.Seconds(),
+			})
+			if err != nil && ctx.Err() == nil {
+				r.log.Error("fail unserved operations", "err", err)
+			}
+			for _, u := range unserved {
+				r.log.Error("failed an operation no worker runs", "operation_id", u.ID, "kind", u.Kind)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -193,19 +213,27 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 		timeout = DefaultTimeout
 	}
 	log := r.log.With("operation_id", op.ID, "kind", op.Kind, "attempt", op.Attempts)
-	steps := &StepLogger{q: r.q, id: op.ID, worker: r.cfg.WorkerID, slog: log}
+	steps := &StepLogger{q: r.q, id: op.ID, worker: r.cfg.WorkerID, attempt: op.Attempts, slog: log}
 
 	// Final state writes must happen even when ctx is cancelled for shutdown.
 	finishCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	}
 
-	if int(op.Attempts) > maxAttempts {
-		// Reclaimed after a crash on its last attempt.
+	if int(op.Attempts) > maxAttempts+1 {
+		// Its worker crashed on the last attempt and again on the extra
+		// run below: a crash loop.
 		fctx, cancel := finishCtx()
 		defer cancel()
 		r.fail(fctx, kind, op, steps, fmt.Errorf("gave up after %d attempts", maxAttempts))
 		return
+	}
+	if int(op.Attempts) > maxAttempts {
+		// Reclaimed after a crash on its last attempt, which may have come
+		// after the handler finished but before success was recorded.
+		// Handlers are idempotent, so run once more to finish or find the
+		// work done, rather than roll back what may have succeeded.
+		_ = steps.Warn(ctx, "queue", "the last attempt was cut short; running once more before giving up")
 	}
 
 	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
@@ -234,14 +262,19 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 	defer cancel()
 	switch {
 	case err == nil:
-		if _, werr := r.q.SucceedOperation(fctx, store.SucceedOperationParams{ID: op.ID, Worker: r.cfg.WorkerID}); werr != nil {
+		if _, werr := r.q.SucceedOperation(fctx, store.SucceedOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts}); werr != nil {
 			log.Error("mark operation succeeded", "err", werr)
 		}
 		log.Info("operation succeeded")
 	case ctx.Err() != nil:
-		// Shutting down: hand the operation back for another worker now.
+		// Shutting down: hand the operation back for another worker now,
+		// with the attempt given back (a clean shutdown is not a crash).
 		_ = steps.Warn(fctx, "queue", "interrupted by worker shutdown; requeued")
-		r.retry(fctx, op, err, time.Now())
+		if _, werr := r.q.RequeueInterruptedOperation(fctx, store.RequeueInterruptedOperationParams{
+			ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error(),
+		}); werr != nil {
+			log.Error("requeue interrupted operation", "err", werr)
+		}
 	case IsPermanent(err) || int(op.Attempts) >= maxAttempts:
 		r.fail(fctx, kind, op, steps, err)
 	default:
@@ -271,20 +304,37 @@ func (r *Runner) safeOnFail(ctx context.Context, kind Kind, op store.Operation, 
 	return kind.OnFail(ctx, op, steps, cause)
 }
 
+// heartbeat renews the lease every LeaseTTL/3. It abandons the attempt
+// (closes lost and cancels it) when the row is no longer this attempt's, or
+// when heartbeats have failed for two thirds of the lease: by then another
+// worker may be about to reclaim the operation, and a worker that cannot
+// reach the metadata database must not keep running it alongside.
 func (r *Runner) heartbeat(ctx context.Context, op store.Operation, lost chan<- struct{}, cancel context.CancelFunc) {
-	t := time.NewTicker(r.cfg.LeaseTTL / 3)
+	interval := r.cfg.LeaseTTL / 3
+	t := time.NewTicker(interval)
 	defer t.Stop()
+	lastOK := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		n, err := r.q.HeartbeatOperation(ctx, store.HeartbeatOperationParams{ID: op.ID, Worker: r.cfg.WorkerID})
+		hctx, hcancel := context.WithTimeout(ctx, interval)
+		n, err := r.q.HeartbeatOperation(hctx, store.HeartbeatOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts})
+		hcancel()
 		if err != nil {
-			if ctx.Err() == nil {
-				r.log.Warn("operation heartbeat failed", "operation_id", op.ID, "err", err)
+			if ctx.Err() != nil {
+				return
 			}
+			if since := time.Since(lastOK); since >= 2*r.cfg.LeaseTTL/3 {
+				r.log.Error("operation heartbeats failing; abandoning attempt before its lease expires",
+					"operation_id", op.ID, "since_last_heartbeat", since.Round(time.Millisecond), "err", err)
+				close(lost)
+				cancel()
+				return
+			}
+			r.log.Warn("operation heartbeat failed", "operation_id", op.ID, "err", err)
 			continue
 		}
 		if n == 0 {
@@ -292,6 +342,7 @@ func (r *Runner) heartbeat(ctx context.Context, op store.Operation, lost chan<- 
 			cancel()
 			return
 		}
+		lastOK = time.Now()
 	}
 }
 
@@ -312,7 +363,7 @@ func (r *Runner) fail(parent context.Context, kind Kind, op store.Operation, ste
 	ctx, cancel := context.WithTimeout(base, 10*time.Second)
 	defer cancel()
 	_ = steps.Error(ctx, "queue", "operation failed: %v", err)
-	if _, werr := r.q.FailOperation(ctx, store.FailOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Error: err.Error()}); werr != nil {
+	if _, werr := r.q.FailOperation(ctx, store.FailOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error()}); werr != nil {
 		r.log.Error("mark operation failed", "operation_id", op.ID, "err", werr)
 	}
 	r.log.Warn("operation failed", "operation_id", op.ID, "kind", op.Kind, "err", err)
@@ -320,7 +371,7 @@ func (r *Runner) fail(parent context.Context, kind Kind, op store.Operation, ste
 
 func (r *Runner) retry(ctx context.Context, op store.Operation, err error, at time.Time) {
 	if _, werr := r.q.RetryOperation(ctx, store.RetryOperationParams{
-		ID: op.ID, Worker: r.cfg.WorkerID, Error: err.Error(), RunAfter: at,
+		ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error(), RunAfter: at,
 	}); werr != nil {
 		r.log.Error("requeue operation", "operation_id", op.ID, "err", werr)
 	}

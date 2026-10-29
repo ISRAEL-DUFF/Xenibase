@@ -219,6 +219,26 @@ func (s *Service) Validate(ctx context.Context, p *provision.CreateParams) (prov
 	if n.Status != "healthy" {
 		return prof, fmt.Errorf("%w: node %s is %s; its agent has not answered recently", provision.ErrConflict, n.Name, n.Status)
 	}
+	// And the rest of placeDedicated's checks: in service, with room. A
+	// detached replica's instance is already running there.
+	if p.InstanceID != nil {
+		return prof, nil
+	}
+	if n.Lifecycle != "active" {
+		return prof, fmt.Errorf("%w: node %s is %s and takes no new instances", provision.ErrConflict, n.Name, n.Lifecycle)
+	}
+	nodes, err := q.CapacityNodes(ctx)
+	if err != nil {
+		return prof, err
+	}
+	for _, c := range nodes {
+		if c.ID != n.ID {
+			continue
+		}
+		if ok, why := fits(c, prof.CPUs, int64(prof.MemoryMB), int64(p.VolumeGB)); !ok {
+			return prof, fmt.Errorf("%w: %s", provision.ErrNoCapacity, why)
+		}
+	}
 	return prof, nil
 }
 

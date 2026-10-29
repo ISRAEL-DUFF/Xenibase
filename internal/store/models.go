@@ -754,6 +754,7 @@ type Operation struct {
 	CreatedBy  *uuid.UUID
 	CreatedAt  time.Time
 	FinishedAt *time.Time
+	Exclusive  bool
 }
 
 type OrgMember struct {
