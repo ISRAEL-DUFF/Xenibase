@@ -109,12 +109,12 @@ func (e *Edge) sendPhone(ctx context.Context, p *project, channel, kind, phone s
 // phoneTooSoon refuses a code of kinds for phone if one was asked for
 // within phoneEvery, and otherwise records this request (as tooSoon).
 func phoneTooSoon(ctx context.Context, tx pgx.Tx, phone string, kinds []string) (*apiErr, error) {
-	last, err := projauth.LastCodeRequest(ctx, tx, phone, kinds)
+	r, err := projauth.RecentCodeRequests(ctx, tx, phone, kinds)
 	if err != nil {
 		return nil, err
 	}
-	if last != nil {
-		if wait := phoneEvery - time.Since(*last); wait > 0 {
+	if r.Last != nil {
+		if wait := phoneEvery - time.Since(*r.Last); wait > 0 {
 			a := refuse(http.StatusTooManyRequests, "over_sms_send_rate_limit",
 				fmt.Sprintf("a code was just sent to this number; wait %d seconds", int(wait.Seconds())+1))
 			a.retryAfter = int(wait.Seconds()) + 1

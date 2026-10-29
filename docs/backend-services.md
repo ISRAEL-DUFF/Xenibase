@@ -604,8 +604,9 @@ templates (Authentication → Emails: plain text with `{{.Code}}`,
   (its outbound allow-list); a failed test says only that it
   failed, with the reason in the server's log. A provider's `base_url`
   follows the same rule.
-- One address gets at most one code a minute, counted on requests whether
-  or not the address has a user (so the limit doesn't tell who has an
+- One address gets at most one code a minute, five an hour and twenty a
+  day (`429 over_email_send_rate_limit`), counted on requests whether or
+  not the address has a user (so the limit doesn't tell who has an
   account); sends are counted in the usage (`message_sends`) and shown
   with failures.
 

@@ -31,6 +31,13 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Email codes are capped per address.** Beyond one a minute an address
+  could be sent codes without limit, so with the project's own SMTP a
+  chosen user's sign-in code could take 7,200 guesses a day. An address
+  now gets at most five codes an hour and twenty a day, every kind
+  together (`429 over_email_send_rate_limit` with `Retry-After`), counted
+  on requests whether or not it has a user, as phone numbers have five an
+  hour.
 - **The one-code-a-minute limit no longer tells which addresses have
   users.** It counted codes sent, and only a real user is sent one, so two
   `POST /recover` calls in a minute answered 200 then 429 for an address

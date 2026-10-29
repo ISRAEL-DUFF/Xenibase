@@ -32,9 +32,12 @@ import (
 
 const (
 	maxAuthBody = 64 << 10
-	// emailEvery is how often one address may be sent a code.
-	emailEvery = 60 * time.Second
-	maxPassLen = 256
+	// emailEvery is how often one address may be sent a code, and
+	// emailsPerHour and emailsPerDay how many (every kind together).
+	emailEvery    = 60 * time.Second
+	emailsPerHour = 5
+	emailsPerDay  = 20
+	maxPassLen    = 256
 )
 
 // Per-IP limits on auth endpoints, per minute, on top of the project's.
@@ -620,20 +623,28 @@ func (e *Edge) sendEmail(ctx context.Context, p *project, kind, linkType, to str
 }
 
 // tooSoon refuses a code of kinds for target if one was asked for within
-// emailEvery, and otherwise records this request (of kinds[0]). Requests
-// count whether or not target has a user, so the answer doesn't tell.
+// emailEvery, or the address had emailsPerHour or emailsPerDay already,
+// and otherwise records this request (of kinds[0]). Requests count
+// whether or not target has a user, so the answer doesn't tell.
 func tooSoon(ctx context.Context, tx pgx.Tx, target string, kinds []string) (*apiErr, error) {
-	last, err := projauth.LastCodeRequest(ctx, tx, target, kinds)
+	r, err := projauth.RecentCodeRequests(ctx, tx, target, kinds)
 	if err != nil {
 		return nil, err
 	}
-	if last != nil {
-		if wait := emailEvery - time.Since(*last); wait > 0 {
-			a := refuse(http.StatusTooManyRequests, "over_email_send_rate_limit",
-				fmt.Sprintf("a code was just sent to this address; wait %d seconds", int(wait.Seconds())+1))
-			a.retryAfter = int(wait.Seconds()) + 1
-			return a, nil
-		}
+	wait, msg := time.Duration(0), ""
+	switch {
+	case r.Last != nil && time.Since(*r.Last) < emailEvery:
+		wait = emailEvery - time.Since(*r.Last)
+		msg = fmt.Sprintf("a code was just sent to this address; wait %d seconds", int(wait.Seconds())+1)
+	case r.Hour >= emailsPerHour && r.HourFrom != nil:
+		wait, msg = time.Until(r.HourFrom.Add(time.Hour)), "too many codes were sent to this address this hour; try again later"
+	case r.Day >= emailsPerDay && r.DayFrom != nil:
+		wait, msg = time.Until(r.DayFrom.Add(24*time.Hour)), "too many codes were sent to this address today; try again later"
+	}
+	if msg != "" {
+		a := refuse(http.StatusTooManyRequests, "over_email_send_rate_limit", msg)
+		a.retryAfter = max(int(wait.Seconds())+1, 1)
+		return a, nil
 	}
 	return nil, projauth.RecordCodeRequest(ctx, tx, target, kinds[0])
 }

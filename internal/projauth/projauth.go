@@ -677,17 +677,31 @@ func targetHash(target string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// LastCodeRequest is when a code of one of kinds was last asked for to
-// target. It holds other requests for target until the transaction ends,
-// so two at once can't both pass a limit.
-func LastCodeRequest(ctx context.Context, q Querier, target string, kinds []string) (*time.Time, error) {
+// CodeRequests are the requests for codes to one target in the last day.
+type CodeRequests struct {
+	// Last is the latest of the kinds asked about.
+	Last *time.Time
+	// Hour and Day count requests of any kind; HourFrom and DayFrom are
+	// the oldest of each.
+	Hour, Day         int
+	HourFrom, DayFrom *time.Time
+}
+
+// RecentCodeRequests are the requests for codes to target in the last
+// day, Last among kinds. It holds other requests for target until the
+// transaction ends, so two at once can't both pass a limit.
+func RecentCodeRequests(ctx context.Context, q Querier, target string, kinds []string) (CodeRequests, error) {
 	h := targetHash(target)
 	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "xb_auth.code_requests:"+h); err != nil {
-		return nil, err
+		return CodeRequests{}, err
 	}
-	var at *time.Time
-	err := q.QueryRow(ctx, `SELECT max(at) FROM xb_auth.code_requests WHERE target_hash = $1 AND kind = ANY($2)`, h, kinds).Scan(&at)
-	return at, err
+	var r CodeRequests
+	err := q.QueryRow(ctx, `SELECT max(at) FILTER (WHERE kind = ANY($2)),
+		  count(*) FILTER (WHERE at > now() - interval '1 hour'), min(at) FILTER (WHERE at > now() - interval '1 hour'),
+		  count(*), min(at)
+		FROM xb_auth.code_requests WHERE target_hash = $1 AND at > now() - interval '1 day'`, h, kinds).
+		Scan(&r.Last, &r.Hour, &r.HourFrom, &r.Day, &r.DayFrom)
+	return r, err
 }
 
 // RecordCodeRequest records a request for a code of kind to target (and

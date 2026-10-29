@@ -2,10 +2,57 @@ package edge
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/israel-duff/xenibase/internal/edgeapi"
 )
+
+// TestEmailCodesCappedPerAddress: an address gets at most five codes an
+// hour and twenty a day, whatever their kind, with or without a user.
+func TestEmailCodesCappedPerAddress(t *testing.T) {
+	x := newAuthEdge(t, nil)
+	for _, addr := range []string{"known@example.com", "nobody@example.com"} {
+		if addr == "known@example.com" {
+			if r := x.do("POST", "/auth/v1/signup", map[string]any{"email": addr, "password": "correct horse 1"}, ""); r.Code != http.StatusOK {
+				t.Fatalf("signup: %d %s", r.Code, r.Body)
+			}
+			x.later(2 * time.Minute)
+		}
+		ask := func(i int) authResp {
+			t.Helper()
+			if i%2 == 0 {
+				return x.do("POST", "/auth/v1/recover", map[string]any{"email": addr}, "")
+			}
+			return x.do("POST", "/auth/v1/signin/otp", map[string]any{"email": addr, "create_user": false}, "")
+		}
+		n := 0
+		if addr == "known@example.com" {
+			n = 1 // the sign-up's confirmation
+		}
+		for ; n < 5; n++ {
+			if r := ask(n); r.Code != http.StatusOK {
+				t.Fatalf("%s: code %d: %d %s", addr, n+1, r.Code, r.Body)
+			}
+			x.later(2 * time.Minute)
+		}
+		r := ask(n)
+		if r.Code != http.StatusTooManyRequests || !strings.Contains(r.Body, "this hour") || r.Header.Get("Retry-After") == "" {
+			t.Fatalf("%s: a sixth code in an hour: %d %s", addr, r.Code, r.Body)
+		}
+		x.later(time.Hour)
+		for ; n < 20; n++ {
+			if r := ask(n); r.Code != http.StatusOK {
+				t.Fatalf("%s: code %d: %d %s", addr, n+1, r.Code, r.Body)
+			}
+			x.later(15 * time.Minute)
+		}
+		if r := ask(n); r.Code != http.StatusTooManyRequests || !strings.Contains(r.Body, "today") {
+			t.Fatalf("%s: a 21st code in a day: %d %s", addr, r.Code, r.Body)
+		}
+	}
+}
 
 // TestCodeLimitsDontRevealUsers: asking twice in a minute for a reset, a
 // sign-in code without creating the user, or a confirmation answers the
