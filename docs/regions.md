@@ -23,7 +23,9 @@ Regions are managed under **Platform → Regions** (or
 2. **Storage.** Add an S3-compatible bucket in the region as a platform
    storage target (Settings → Platform storage targets) and choose it as the
    region's **backup target**. Choose a **copy target** in another region
-   or provider for cross-region copies (below).
+   or provider for cross-region copies (below). For backend services, add
+   a second target for files and choose it as the **files target**
+   ([below](#files-target)).
 3. **Nodes.** Record each node's [failure domain](failure-domains.md)
    (its rack) as you add it. HA standbys, etcd members and pooler hosts
    are kept in different ones. Add the region's nodes (`POST /api/v1/nodes` with
@@ -80,7 +82,12 @@ can't offer HA.
   project's region changes and so does its hostname. **The old hostname
   keeps routing for 30 days**: the old region's poolers keep a forward to
   it, and Project Settings shows when it ends. Tell the customer to update
-  their connection strings within that time.
+  their connection strings within that time. **A project with stored files
+  can't move regions** (409): its files are in its region's object store
+  and a move doesn't copy them, so it is refused while the project has
+  files or an upload in progress, when asked and again at the cutover.
+  Delete the files first (or download and upload them again after the
+  move), or move it within its region.
 
 Each region's pooler hosts get their own configuration: their projects'
 routes and logins, plus those forwarded to them, with their own
@@ -147,6 +154,53 @@ backups only on machines and buckets in the region. Whether a regulator
 requires in-country hosting is the customer's determination. A residency
 region should have its own pooler hosts, or client connections pass
 through the home region's poolers.
+
+## Files target
+
+Backend services keep projects' files (V4 §5) in the region's **files
+target**. Every edge serving the region holds that target's credentials,
+and the edge is the process that faces the internet, so the files target
+must not be able to reach the region's backups:
+
+- **A bucket of its own** (recommended): a second bucket in the region,
+  with an access key allowed only on it; or
+- **the backup bucket with credentials scoped to `files/`**, where the
+  provider supports prefix conditions (an AWS IAM or MinIO policy on
+  `arn:aws:s3:::<bucket>/<prefix>files/*`, with `s3:prefix` limited to
+  `<prefix>files/` for listing). Cloudflare R2's API tokens are per bucket,
+  so on R2 use a bucket of its own.
+
+Add it as a platform storage target, then choose it as the region's
+**Files target** (Platform → Regions → the region, or `files_target_id` in
+the region's `PUT`). It can't be the platform default or any region's
+backup or copy target, can't be deleted while it is a region's files
+target, and for a data-residency region must be marked as in the region.
+
+A region without a files target keeps its files in its backup target, as
+every region did before files targets: xenibase-server logs "file storage uses the region's backup
+target" and the **files_share_backups** alert fires for the region while
+any project there has backend services. The region's launch checks warn
+too.
+
+**Setting it doesn't move files already stored.** For a region whose
+projects already have files, copy them across around the switch, with any
+S3 tool (`rclone` here, remotes `old` for the backup target and `new` for
+the files target, `<prefix>` each target's prefix if it has one):
+
+1. `rclone copy old:<bucket>/<prefix>files/ new:<bucket>/<prefix>files/`
+   (the bulk, while the region keeps serving).
+2. Set the region's files target. Within a minute the edges and the sweep
+   use it; uploads go to the new target from then on.
+3. Run the same `rclone copy` again: it copies what was uploaded between
+   the two steps (object keys never change, so nothing is overwritten).
+   Until it finishes, those few files answer "the object's data is
+   missing". Large uploads in progress at the switch fail; the app starts
+   them again.
+4. Check Project → Storage shows no missing files after the next nightly
+   reconcile, then delete `files/` from the backup target, and remove the
+   edge's access to it if you rotated its key.
+
+Changing a region's files target later needs the same copy.
 
 ## Cross-region backup copies
 

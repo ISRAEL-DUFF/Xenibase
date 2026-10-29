@@ -66,6 +66,7 @@ export function AdminRegionsPage() {
             "Hostname",
             "Backups",
             "Copies to",
+            "Files",
             "Residency",
             "Nodes",
             "Projects",
@@ -103,6 +104,13 @@ export function AdminRegionsPage() {
                   targetName(r.copy_target_id)
                 ) : (
                   <span className="text-muted">No copies</span>
+                )}
+              </td>
+              <td className="px-3 py-2">
+                {r.files_target_id ? (
+                  targetName(r.files_target_id)
+                ) : (
+                  <Badge tone="warn">In the backup target</Badge>
                 )}
               </td>
               <td className="px-3 py-2">
@@ -174,6 +182,7 @@ function RegionPanel({
     location: r?.location ?? "",
     storage_target_id: r?.storage_target_id ?? null,
     copy_target_id: r?.copy_target_id ?? null,
+    files_target_id: r?.files_target_id ?? null,
     floating_ip_id: r?.floating_ip_id ?? null,
     residency: r?.residency ?? false,
     hidden: r?.status === "hidden",
@@ -203,11 +212,16 @@ function RegionPanel({
       setBusy(false);
     }
   };
+  const targetLabel = {
+    storage_target_id: "Backup target",
+    copy_target_id: "Copy target",
+    files_target_id: "Files target",
+  };
   const targetSelect = (
-    k: "storage_target_id" | "copy_target_id",
+    k: "storage_target_id" | "copy_target_id" | "files_target_id",
     none: string,
   ) => (
-    <Field label={k === "storage_target_id" ? "Backup target" : "Copy target"}>
+    <Field label={targetLabel[k]}>
       {(fid) => (
         <Select
           id={fid}
@@ -338,6 +352,13 @@ function RegionPanel({
         </Field>
         {targetSelect("storage_target_id", "Platform default")}
         {targetSelect("copy_target_id", "No cross-region copies")}
+        {targetSelect("files_target_id", "The backup target (not recommended)")}
+        <p className="text-xs text-muted">
+          Every edge holds the files target's credentials: give files a bucket,
+          or credentials limited to files/, that can't reach the backups. Copy
+          the files/ prefix there first; files already stored don't move
+          (docs/regions.md).
+        </p>
         <label className="flex items-start gap-2 text-[13px]">
           <input
             type="checkbox"

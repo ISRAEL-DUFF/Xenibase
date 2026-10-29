@@ -10,11 +10,12 @@ SELECT * FROM regions WHERE id = @id;
 INSERT INTO regions (id, name) VALUES (@id, @name) ON CONFLICT DO NOTHING;
 
 -- name: UpsertRegion :one
-INSERT INTO regions (id, name, country, pooler_host, api_domain, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status)
-VALUES (@id, @name, @country, @pooler_host, @api_domain, @provider, @location, sqlc.narg(storage_target_id), sqlc.narg(copy_target_id), sqlc.narg(floating_ip_id), @residency, @status)
+INSERT INTO regions (id, name, country, pooler_host, api_domain, provider, location, storage_target_id, copy_target_id, files_target_id, floating_ip_id, residency, status)
+VALUES (@id, @name, @country, @pooler_host, @api_domain, @provider, @location, sqlc.narg(storage_target_id), sqlc.narg(copy_target_id), sqlc.narg(files_target_id), sqlc.narg(floating_ip_id), @residency, @status)
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, country = EXCLUDED.country, pooler_host = EXCLUDED.pooler_host,
   api_domain = EXCLUDED.api_domain, provider = EXCLUDED.provider, location = EXCLUDED.location, storage_target_id = EXCLUDED.storage_target_id,
-  copy_target_id = EXCLUDED.copy_target_id, floating_ip_id = EXCLUDED.floating_ip_id, residency = EXCLUDED.residency, status = EXCLUDED.status
+  copy_target_id = EXCLUDED.copy_target_id, files_target_id = EXCLUDED.files_target_id, floating_ip_id = EXCLUDED.floating_ip_id,
+  residency = EXCLUDED.residency, status = EXCLUDED.status
 RETURNING *;
 
 -- name: SetRegionStatus :one
@@ -65,3 +66,11 @@ DELETE FROM region_early_access WHERE region_id = @region_id;
 
 -- name: AddRegionEarlyAccess :exec
 INSERT INTO region_early_access (region_id, org_id) VALUES (@region_id, @org_id) ON CONFLICT DO NOTHING;
+
+-- name: RegionsFilesOnBackupTarget :many
+-- tenant: system - the files_share_backups alert: regions whose projects' files share the backup target, with how many projects have storage.
+SELECT r.id, r.name, count(*)::int AS projects
+FROM regions r JOIN projects p ON p.region = r.id AND p.deleted_at IS NULL
+JOIN project_services s ON s.project_id = p.id AND s.schema_version >= 4
+WHERE r.files_target_id IS NULL
+GROUP BY r.id, r.name ORDER BY r.id;

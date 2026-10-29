@@ -582,6 +582,66 @@ bundle share one version (spec §11.5).
   output and restored the result even after a failure; it now uses
   `--out`, which leaves no file on failure, and `&&`
   (`docs/disaster-recovery.md`).
+- **A signed thumbnail URL opened the original.** A signed URL with a
+  transform carried an ordinary download token, so changing `render/sign`
+  to `object/sign` in it downloaded the full-size file. A token with a
+  transform now serves only that render (`400 invalid_signature` on the
+  download route).
+- **A signed upload URL skipped the storage policies on what it wrote, and
+  could be used again and again.** The upload's row was written with the
+  edge's own login, so a policy on the type, size or metadata never
+  applied, and an upsert URL could overwrite its path as often as its
+  holder liked, for up to 7 days. A signed upload is now written as the
+  user who signed it (their role and claims are kept with the URL in the
+  new `xb_storage.upload_tokens`, project schema version 8), the URL
+  uploads once (only an upload that commits uses it up, on any edge), and
+  it lasts 2 hours at most, as documented.
+- **A large upload's parts were neither bounded nor counted.** A part's
+  presigned URL signed no length, so each took up to the store's part limit
+  (5 GiB) whatever the upload declared, and uploads in progress were not in
+  the quota check: a 50 MB upload could hold about 20 GB for a day, and
+  uploads started together each passed against the same total. Each part's
+  URL now signs its exact length, uploads in progress hold their declared
+  size against the quota (direct and dashboard uploads count them too, and
+  starting one takes its turn on the project's usage row), and a project
+  may have 100 open at once (`429 too_many_uploads`).
+- **A CDN purge was tried once, and only when a bucket went private.** A
+  purge Cloudflare refused was only logged, so the CDN could keep serving
+  the now-private files for the bucket's cache time (up to a year), and
+  deleting, replacing or moving a public bucket's file, or deleting or
+  emptying the bucket, purged nothing. Every such change now purges the
+  files' URLs (and their image renders'), and a purge waits in the new
+  `cdn_purges` table until Cloudflare takes it: the storage sweep retries
+  it from every minute to every hour.
+- **Some stored files were never billed, and the storage reconciler could
+  never run.** File storage (`storage_gb_hours`) was metered only for
+  projects with backend services on, so turning them off, which keeps the
+  files, stopped the metering; cached image renders were never measured.
+  Every live project holding files is now metered each hour from its last
+  measurement, and the nightly reconciler measures the renders, which are
+  metered with the files. The reconciler's last run was kept in memory and
+  it waited a day from each start, so servers deployed more often never
+  ran it; the last run is now kept in the metadata database and one server
+  runs it each day.
+- **A move to another region left every stored file behind.** The move
+  copied the database and switched the project's region, but its files
+  stayed in the old region's object store, so every file answered "the
+  object's data is missing" afterwards and the old bytes were never
+  removed or billed. A region move is now refused (409) while the project
+  has files or an upload in progress, when it is asked for and again once
+  writes are frozen for the cutover; delete the files first, or move within
+  the region (`docs/regions.md`).
+- **Every edge held credentials that could delete its region's backups.**
+  Files were kept in the region's backup target, so the edge, the process
+  that faces the internet and parses uploads and images, was handed the
+  access key and secret of the bucket holding the region's backups, WAL-G
+  archives and metadata backups. A region can now have a **files target**
+  of its own (Platform → Regions; a bucket for files, or credentials
+  limited to `files/`), which the edges and the storage sweep use instead;
+  it can't be any region's backup or copy target or the default, and can't
+  be deleted while it holds files. A region without one keeps working as
+  before, with a warning in the server's log, a launch-check warning and
+  the new `files_share_backups` alert.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
@@ -609,6 +669,21 @@ bundle share one version (spec §11.5).
 - Migration 00075 gives the nightly and archive backups of projects deleted
   before the upgrade, on platform targets, their final backup's expiry, and
   at least seven days: they are deleted from a week after the upgrade.
+- Signed upload URLs made before the upgrade stop working (`400
+  invalid_signature`): they have no row in `xb_storage.upload_tokens`, so
+  they can't be used once. Apps sign a new URL; they last 2 hours at most.
+  A project's signed uploads fail until its schema reaches version 8, which
+  the backend services reconciler applies within minutes of the upgrade.
+- Migration 00083 adds `cdn_purges`, the CDN purges the storage sweep
+  retries; `project_storage.transform_bytes`, the cached renders' size; and
+  `storage_reconciler`, the reconciler's last run. The first server to
+  start runs the reconciler straight away. Projects whose backend services
+  are off have their files metered from the next sweep.
+- Migration 00082 adds `regions.files_target_id`. Existing regions have
+  none, so their files stay in the backup target and the
+  `files_share_backups` alert fires for each region with backend services:
+  give each a files target, copying `files/` across around the switch
+  (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
 
 ## v4.2.4
 

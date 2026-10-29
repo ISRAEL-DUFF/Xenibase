@@ -549,13 +549,21 @@ const (
 	// EventBucketPrivate: a public bucket went private; its files leave
 	// the CDN's cache.
 	EventBucketPrivate = "bucket_private"
+	// EventBucketDeleted and EventBucketEmptied: a public bucket was
+	// deleted or emptied; its files leave the CDN's cache.
+	EventBucketDeleted = "bucket_deleted"
+	EventBucketEmptied = "bucket_emptied"
+	// EventObjectsChanged: objects of a public bucket were deleted,
+	// replaced or moved away (Paths); their URLs leave the CDN's cache.
+	EventObjectsChanged = "objects_changed"
 )
 
 // StorageEvent is a storage change for xenibase-server.
 type StorageEvent struct {
-	Ref    string `json:"ref"`
-	Event  string `json:"event"`
-	Bucket string `json:"bucket"`
+	Ref    string   `json:"ref"`
+	Event  string   `json:"event"`
+	Bucket string   `json:"bucket"`
+	Paths  []string `json:"paths,omitempty"`
 }
 
 // StorageEvent sends a storage change.

@@ -6482,6 +6482,11 @@ export interface components {
              * @description Where backups on platform targets are copied (V3 §2.5).
              */
             copy_target_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
+             */
+            files_target_id?: string | null;
             /** @description The region's pooler floating IP at the provider. */
             floating_ip_id?: string | null;
             residency: boolean;
@@ -6532,6 +6537,11 @@ export interface components {
             storage_target_id?: string | null;
             /** Format: uuid */
             copy_target_id?: string | null;
+            /**
+             * Format: uuid
+             * @description A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
+             */
+            files_target_id?: string | null;
             floating_ip_id?: string | null;
             residency?: boolean;
             /** @description Hidden regions take new projects only from their early-access organisations. */

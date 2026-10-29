@@ -285,6 +285,16 @@ type CapacityProposal struct {
 	UpdatedAt        time.Time
 }
 
+type CdnPurge struct {
+	ID        int64
+	ProjectID uuid.UUID
+	Prefixes  []string
+	Attempts  int32
+	LastError *string
+	NextAt    time.Time
+	CreatedAt time.Time
+}
+
 type CostAllocation struct {
 	Day         pgtype.Date
 	OrgID       uuid.UUID
@@ -1091,6 +1101,7 @@ type ProjectStorage struct {
 	MissingSample  []string
 	OrphansRemoved int64
 	ReconciledAt   *time.Time
+	TransformBytes int64
 }
 
 type QuerySnapshot struct {
@@ -1213,6 +1224,7 @@ type Region struct {
 	Status          string
 	CreatedAt       time.Time
 	ApiDomain       string
+	FilesTargetID   *uuid.UUID
 }
 
 type RegionEarlyAccess struct {
@@ -1307,6 +1319,11 @@ type StorageCleanup struct {
 	Attempts  int32
 	LastError *string
 	CreatedAt time.Time
+}
+
+type StorageReconciler struct {
+	ID        bool
+	LastRunAt time.Time
 }
 
 type StorageTarget struct {

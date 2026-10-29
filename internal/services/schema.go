@@ -625,6 +625,23 @@ END $$`,
 		`REVOKE ALL ON FUNCTION xb_auth.sync_grants(text[]) FROM PUBLIC, {{owner}}, {{anon}}, {{user}}, {{service}}, {{hook}}`,
 		`GRANT EXECUTE ON FUNCTION xb_auth.sync_grants(text[]) TO {{edge}}`,
 	}},
+	{8, []string{
+		// Signed upload URLs not used yet (V4 §5.4), with the signer's role
+		// and claims: the upload's row is written as them, and using the URL
+		// removes its row in the same step, so a URL uploads once.
+		`CREATE TABLE IF NOT EXISTS xb_storage.upload_tokens (
+		  id         uuid PRIMARY KEY,
+		  bucket     text NOT NULL,
+		  path       text NOT NULL,
+		  role       text NOT NULL,
+		  claims     jsonb NOT NULL DEFAULT '{}',
+		  created_at timestamptz NOT NULL DEFAULT now(),
+		  expires_at timestamptz NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS upload_tokens_expiry ON xb_storage.upload_tokens (expires_at)`,
+		`REVOKE ALL ON xb_storage.upload_tokens FROM PUBLIC`,
+		`GRANT SELECT, INSERT, DELETE ON xb_storage.upload_tokens TO {{edge}}`,
+	}},
 	{9, []string{
 		// Whether a persisted broadcast was sent on the private channel or
 		// the public one of its topic: history reads one or the other.
@@ -753,4 +770,16 @@ func expand(stmt string, p store.Project) string {
 		"{{hook}}", q(store.AuthHookRole(p.DbName)),
 		"{{owner}}", q(p.OwnerRole),
 	).Replace(stmt)
+}
+
+// SchemaStatements are every version's statements for p, in order: what
+// applySchema runs, for tests that build a project database by hand.
+func SchemaStatements(p store.Project) []string {
+	var out []string
+	for _, v := range schemaVersions {
+		for _, st := range v.stmts {
+			out = append(out, expand(st, p))
+		}
+	}
+	return out
 }

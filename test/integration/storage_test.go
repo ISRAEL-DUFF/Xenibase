@@ -347,6 +347,9 @@ func TestStorage(t *testing.T) {
 	if r := anon.do("GET", "/storage/v1/object/avatars/"+sp.aliceID.String()+"/via-url.png", nil, alice); r.Code != 200 || !bytes.Equal(r.Body, me) {
 		t.Fatalf("read the signed upload: %d", r.Code)
 	}
+	if r := keyless.do("PUT", uu.RequestURI(), bytes.NewReader(me), "", "Content-Type", "image/png"); r.Code != 400 {
+		t.Fatalf("a signed upload URL used twice: %s", r)
+	}
 
 	// ---- Public buckets ----------------------------------------------------------
 	if r := admin.json("POST", "/storage/v1/bucket", `{"id":"site","public":true,"cache_seconds":600}`, ""); r.Code != 201 {

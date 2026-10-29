@@ -740,9 +740,10 @@ month) are recorded as usage (`auth_mau`) and shown on the Users tab.
 
 Files live in **buckets**. A file's metadata is a row in the project's own
 database (`xb_storage.objects`: bucket, path, size, MIME type, checksum,
-owner, your metadata), and its bytes are in the region's object store (the
-same store as the region's backups; for data-residency projects, the
-in-country one). Who may read, upload, overwrite and delete files is decided
+owner, your metadata), and its bytes are in the region's object store (its
+files target, kept apart from the backups, or without one the region's
+backup store; for data-residency projects, in the country; see
+[regions](regions.md#files-target)). Who may read, upload, overwrite and delete files is decided
 by **row-level security on `xb_storage.objects`**, the same policies as
 your tables. The project's owner role owns the table, so you write the
 policies:
@@ -788,9 +789,9 @@ too.
 | `GET /storage/v1/object/<bucket>/<path>` | Download, as the caller's policies allow; `Range` works |
 | `GET /storage/v1/object/info/<bucket>/<path>` | The file's metadata |
 | `GET /storage/v1/public/<bucket>/<path>` | A public bucket's file, no key |
-| `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size) |
+| `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size, a `/render/sign/` URL that serves only that render, never the original) |
 | `POST /storage/v1/object/sign/<bucket>` | Signed URLs for several `paths` |
-| `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL (2 hours) for a client without a session |
+| `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL for a client without a session: 2 hours at most, used once, and written as the signer, so their policies apply to what is uploaded |
 | `POST /storage/v1/upload/<bucket>/<path>` | Start a large upload (`size`, `mime_type`) |
 | `GET`, `DELETE /storage/v1/upload/<id>`; `POST …/<id>/complete` | Its status and the parts still to send; abort; finish |
 | `GET /storage/v1/list/<bucket>?prefix=&cursor=&limit=` | Files and folders under a prefix (`POST /storage/v1/object/list/<bucket>` takes the same as JSON) |
@@ -818,7 +819,11 @@ quota as an upload would, and answers with presigned URLs for its parts
  "expires_at": "…"}
 ```
 
-`PUT` each part's bytes to its URL; a failed part can be sent again.
+`PUT` each part's bytes to its URL, exactly the part's `size` (the URL is
+signed for that length, and the store refuses any other); a failed part
+can be sent again. An upload in progress holds its declared size against
+the quota until it completes, is aborted or expires, and a project may have
+100 open at once (`429 too_many_uploads`).
 `GET /storage/v1/upload/<id>` lists the parts not yet received (with fresh
 URLs), so an app can resume after a restart. `POST …/complete` checks the
 parts and sizes and writes the file's row as the user who started the
@@ -835,7 +840,10 @@ buckets, `private` otherwise, for the bucket's cache time), and
 `Content-Disposition: attachment` with `?download` (or `?download=<name>`). Put a CDN in front of
 the edge's hostname to cache public files; with Cloudflare, set
 `XENIBASE_CDN_CLOUDFLARE_ZONE_ID` and `XENIBASE_CDN_CLOUDFLARE_TOKEN` (a token
-with Cache Purge) on xenibase-server so a bucket made private is purged.
+with Cache Purge) on xenibase-server so files that leave a public bucket's
+URLs are purged: the bucket made private, deleted or emptied, or a file
+deleted, replaced or moved. A purge Cloudflare refuses is retried every
+few minutes until it succeeds.
 
 ### Image transforms
 
@@ -866,16 +874,20 @@ worker.
   `xb_storage.objects` queues the bytes to remove and keeps the project's
   totals.
 - **The sweep** (every 5 minutes, xenibase-server) removes queued bytes and
-  abandoned uploads, records storage used (`storage_gb_hours`) and the
-  month's downloads and transforms, and sends the edges each project's
-  remaining quota.
-- **The reconciler** (nightly) removes bytes with no row after 7 days and
-  counts rows whose bytes are missing; Project → Storage shows them.
+  abandoned uploads, records storage used (`storage_gb_hours`: files and
+  their cached image renders, also while backend services are off, since
+  turning them off keeps the files) and the month's downloads and
+  transforms, and sends the edges each project's remaining quota.
+- **The reconciler** (nightly, on one server) removes bytes with no row
+  after 7 days, counts rows whose bytes are missing (Project → Storage shows
+  them) and measures what the cached renders take.
 - **Deleting a project** removes its files once its final backup's
   retention ends (30 days).
 - **Branches and restores** copy the database, so file rows come along but
   not the bytes: a branch's files show as missing until uploaded again.
-  Moving a project to another region doesn't move its files yet.
+  A project with files can't be moved to another region: its files stay
+  in its region's object store, so the move is refused until they are
+  deleted.
 
 ### The dashboard and the CLI
 

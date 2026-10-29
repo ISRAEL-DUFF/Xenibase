@@ -9576,6 +9576,11 @@ components:
           format: uuid
           nullable: true
           description: Where backups on platform targets are copied (V3 §2.5).
+        files_target_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
         floating_ip_id:
           type: string
           nullable: true
@@ -9677,6 +9682,11 @@ components:
           type: string
           format: uuid
           nullable: true
+        files_target_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
         floating_ip_id:
           type: string
           nullable: true

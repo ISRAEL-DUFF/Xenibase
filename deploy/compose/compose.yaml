@@ -172,7 +172,7 @@ services:
       XENIBASE_STATUS_PUSH_SECRET: ${XENIBASE_STATUS_PUSH_SECRET:-}
       XENIBASE_STATUS_REGION: ${XENIBASE_STATUS_REGION:-}
       XENIBASE_STATUS_COMPONENTS: ${XENIBASE_STATUS_COMPONENTS:-}
-      # Purge a Cloudflare CDN when a bucket goes private (docs/backend-services.md).
+      # Purge a Cloudflare CDN of files that leave public buckets (docs/backend-services.md).
       XENIBASE_CDN_CLOUDFLARE_ZONE_ID: ${XENIBASE_CDN_CLOUDFLARE_ZONE_ID:-}
       XENIBASE_CDN_CLOUDFLARE_TOKEN: ${XENIBASE_CDN_CLOUDFLARE_TOKEN:-}
       # Rotating the master key (docs/operations.md).
