@@ -98,6 +98,7 @@ func (s *Service) PITR(ctx context.Context, p PITRParams) (provision.Created, er
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)
 	}
+	cp.MinMaxConnections = int(inst.MaxConnections)
 	return s.projects.Create(ctx, cp)
 }
 

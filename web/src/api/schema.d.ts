@@ -8165,6 +8165,10 @@ export interface components {
             cpus?: number | null;
             memory_mb?: number | null;
             volume_gb?: number | null;
+            /** @description Dedicated only. Postgres's max_connections, which grows with the instance's memory (50 per GB, 100 to 500). */
+            max_connections?: number;
+            /** @description Dedicated only. The highest connection limit the project can have on this instance: max_connections less what Xenibase keeps for its own connections (backups, replication, probes, backend services). */
+            connection_limit_max?: number;
         };
         /** @description Dedicated only. Any time in [from, to] can be restored. */
         PitrWindow: {

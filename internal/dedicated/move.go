@@ -123,9 +123,13 @@ func (s *Service) Move(ctx context.Context, mp MoveParams) (store.Operation, err
 			target := uuid.New()
 			prefix := "instances/" + target.String() + "/wal-g"
 			mem, vol, name := int32(size.MemoryMB), int32(size.DiskGB), profileName(size)
+			maxConns := int32(provision.MaxConnectionsFor(size.MemoryMB))
+			if mp.Size == nil {
+				maxConns = max(maxConns, src.MaxConnections) // the same size: what it had
+			}
 			if _, err := q.InsertInstance(ctx, store.InsertInstanceParams{
 				ID: target, NodeID: mp.NodeID, Kind: provision.TierDedicated, PgVersion: src.PgVersion, CpuLimit: numeric(size.CPUs),
-				MemLimitMb: &mem, VolumeGb: &vol, Profile: &name, WalgPrefix: &prefix,
+				MemLimitMb: &mem, VolumeGb: &vol, Profile: &name, WalgPrefix: &prefix, MaxConnections: &maxConns,
 			}); err != nil {
 				return nil, err
 			}
@@ -512,6 +516,13 @@ func (s *Service) finishMove(ctx context.Context, op store.Operation, p store.Pr
 		}
 		if err := log.Info(ctx, "resize", "the project runs at its new size on the new node"); err != nil {
 			return err
+		}
+		if limit, err := s.projects.FitConnectionLimit(ctx, p.ID, log); err != nil {
+			return err
+		} else if limit > 0 {
+			if err := log.Info(ctx, "connections", "the project's connection limit is now %d, the most this size allows", limit); err != nil {
+				return err
+			}
 		}
 	}
 	if p.Tier == provision.TierDedicated {

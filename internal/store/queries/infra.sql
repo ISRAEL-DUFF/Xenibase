@@ -45,8 +45,9 @@ WHERE i.id = @id;
 SELECT * FROM instances WHERE id = @id;
 
 -- name: InsertInstance :one
-INSERT INTO instances (id, node_id, kind, pg_version, port, cpu_limit, mem_limit_mb, volume_gb, profile, walg_prefix, status)
-VALUES (@id, @node_id, @kind, @pg_version, 5432, @cpu_limit, @mem_limit_mb, @volume_gb, @profile, sqlc.narg(walg_prefix), 'provisioning')
+INSERT INTO instances (id, node_id, kind, pg_version, port, cpu_limit, mem_limit_mb, volume_gb, profile, walg_prefix, status, max_connections)
+VALUES (@id, @node_id, @kind, @pg_version, 5432, @cpu_limit, @mem_limit_mb, @volume_gb, @profile, sqlc.narg(walg_prefix), 'provisioning',
+  COALESCE(sqlc.narg(max_connections)::int, 100))
 RETURNING *;
 
 -- name: SetInstanceAdminSecret :exec
@@ -99,7 +100,7 @@ ORDER BY i.created_at;
 
 -- name: ListInstanceSummaries :many
 SELECT i.id, i.kind, i.profile, i.cpu_limit, i.mem_limit_mb, i.volume_gb, i.status, i.error, i.pg_version,
-       i.pg_release, i.pg_release_available, i.ha_enabled, i.pitr_days,
+       i.pg_release, i.pg_release_available, i.ha_enabled, i.pitr_days, i.max_connections,
        n.id AS node_id, n.name AS node_name
 FROM instances i JOIN nodes n ON n.id = i.node_id
 WHERE i.deleted_at IS NULL;

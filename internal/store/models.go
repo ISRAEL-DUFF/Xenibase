@@ -484,6 +484,7 @@ type Instance struct {
 	PatroniSecret      []byte
 	EtcdRegion         *string
 	PitrDays           int32
+	MaxConnections     int32
 }
 
 type InstanceMember struct {

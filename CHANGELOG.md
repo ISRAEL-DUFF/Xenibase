@@ -5,6 +5,27 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+### Added
+- **Connections grow with a dedicated instance's memory.** `max_connections`
+  was 100 for every size; it is now 50 per GB, from 100 (2 GB or less) to 500
+  (10 GB or more): 200 on a 4 GB instance, 400 on 8 GB. A dedicated project's
+  connection limit can go up to that less 10 that Xenibase keeps for its own
+  connections (190 on 4 GB); more is refused with the ceiling named, which the
+  Connections and timeouts panel and `instance.connection_limit_max` show. A resize changes
+  `max_connections` with the restart, in Patroni's cluster configuration for HA
+  and replica clusters, and lowers the project's limit when the new size holds
+  fewer. A point-in-time restore or a detached replica never gets fewer than
+  its source, which Postgres needs to replay the source's WAL. See
+  `docs/user-guide.md` ("Connections").
+
+### Fixed
+- `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
+  the new standby streaming, and failed on a busy host; it now waits.
+
+### Upgrading
+- Migration 00060 adds `instances.max_connections`. Existing instances keep
+  100 until they are resized.
+
 ## v4.2.4
 
 ### Added

@@ -103,6 +103,7 @@ func (s *Service) DetachReplica(ctx context.Context, d DetachParams) (provision.
 	if inst.Profile != nil {
 		cp.Profile = *inst.Profile
 	}
+	cp.MinMaxConnections = int(inst.MaxConnections)
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)
 	}

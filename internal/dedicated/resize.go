@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
+	"github.com/israel-duff/xenibase/internal/ha"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -76,6 +77,10 @@ type ResizePlan struct {
 type resizeParams struct {
 	From Size `json:"from"`
 	To   Size `json:"to"`
+	// The instance's max_connections before and after (absent from
+	// operations queued before it grew with memory).
+	FromMaxConnections int `json:"from_max_connections,omitempty"`
+	ToMaxConnections   int `json:"to_max_connections,omitempty"`
 }
 
 // ErrNoRoom is a resize no node can hold.
@@ -215,8 +220,16 @@ func (s *Service) Resize(ctx context.Context, rp ResizeParams) (store.Operation,
 		op, err := s.Move(ctx, MoveParams{ProjectID: rp.ProjectID, NodeID: *plan.Move, CreatedBy: rp.CreatedBy, Size: &to})
 		return op, plan, err
 	}
+	inst, err := store.New(s.db).GetInstance(ctx, p.InstanceID)
+	if err != nil {
+		return store.Operation{}, plan, err
+	}
+	params := resizeParams{From: plan.From, To: plan.To, FromMaxConnections: int(inst.MaxConnections), ToMaxConnections: int(inst.MaxConnections)}
+	if plan.To.MemoryMB != plan.From.MemoryMB {
+		params.ToMaxConnections = provision.MaxConnectionsFor(plan.To.MemoryMB)
+	}
 	op, err := s.projects.EnqueueExclusive(ctx, rp.ProjectID, []string{provision.StatusActive}, "", KindResize,
-		resizeParams{From: plan.From, To: plan.To}, rp.CreatedBy, nil)
+		params, rp.CreatedBy, nil)
 	return op, plan, err
 }
 
@@ -228,10 +241,42 @@ func opResize(op store.Operation) (resizeParams, error) {
 	return p, nil
 }
 
-// setSize writes sz onto the instance.
-func (s *Service) setSize(ctx context.Context, id uuid.UUID, sz Size) error {
+// setSize writes sz and maxConnections (0: what sz's memory gets) onto
+// the instance.
+func (s *Service) setSize(ctx context.Context, id uuid.UUID, sz Size, maxConnections int) error {
+	if maxConnections <= 0 {
+		maxConnections = provision.MaxConnectionsFor(sz.MemoryMB)
+	}
 	mem, vol, name := int32(sz.MemoryMB), int32(sz.DiskGB), profileName(sz)
-	return store.New(s.db).SetInstanceSize(ctx, store.SetInstanceSizeParams{ID: id, CpuLimit: numeric(sz.CPUs), MemLimitMb: &mem, VolumeGb: &vol, Profile: &name})
+	return store.New(s.db).SetInstanceSize(ctx, store.SetInstanceSizeParams{ID: id, CpuLimit: numeric(sz.CPUs), MemLimitMb: &mem,
+		VolumeGb: &vol, Profile: &name, MaxConnections: int32(maxConnections)})
+}
+
+// setClusterMaxConnections puts max_connections in a Patroni cluster's
+// dynamic configuration (it lives in etcd, not in each member's spec, and
+// must match on every member); members take it when they restart.
+func (s *Service) setClusterMaxConnections(ctx context.Context, inst store.Instance, n int) error {
+	sec, err := s.openHASecret(inst)
+	if err != nil {
+		return err
+	}
+	members, err := store.New(s.db).ListInstanceMembers(ctx, inst.ID)
+	if err != nil {
+		return err
+	}
+	patch := map[string]any{"postgresql": map[string]any{"parameters": map[string]any{"max_connections": n}}}
+	var errs []error
+	for _, m := range members {
+		if m.RestHost == nil || m.RestPort == nil {
+			continue
+		}
+		err := ha.DefaultPatroni.PatchConfig(ctx, *m.RestHost, int(*m.RestPort), sec.RestPassword, patch)
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	return fmt.Errorf("set max_connections in the cluster configuration: %w", errors.Join(errs...))
 }
 
 // runResize recreates the instance's containers at the new size.
@@ -245,7 +290,7 @@ func (s *Service) runResize(ctx context.Context, op store.Operation, log *jobs.S
 	if err != nil {
 		return jobs.Permanent(err)
 	}
-	if err := s.setSize(ctx, p.InstanceID, rp.To); err != nil {
+	if err := s.setSize(ctx, p.InstanceID, rp.To, rp.ToMaxConnections); err != nil {
 		return err
 	}
 	inst, err := q.GetInstance(ctx, p.InstanceID)
@@ -255,6 +300,16 @@ func (s *Service) runResize(ctx context.Context, op store.Operation, log *jobs.S
 	if err := log.Info(ctx, "resize", "%g → %g vCPU, %d → %d MB, disk %d → %d GB", rp.From.CPUs, rp.To.CPUs,
 		rp.From.MemoryMB, rp.To.MemoryMB, rp.From.DiskGB, rp.To.DiskGB); err != nil {
 		return err
+	}
+	if rp.FromMaxConnections > 0 && int(inst.MaxConnections) != rp.FromMaxConnections {
+		if inst.Patroni {
+			if err := s.setClusterMaxConnections(ctx, inst, int(inst.MaxConnections)); err != nil {
+				return err
+			}
+		}
+		if err := log.Info(ctx, "connections", "max_connections %d → %d with the restart", rp.FromMaxConnections, inst.MaxConnections); err != nil {
+			return err
+		}
 	}
 	if rp.To.CPUs != rp.From.CPUs || rp.To.MemoryMB != rp.From.MemoryMB {
 		var pause time.Duration
@@ -304,6 +359,15 @@ func (s *Service) runResize(ctx context.Context, op store.Operation, log *jobs.S
 			return err
 		}
 	}
+	// A smaller instance holds fewer connections: lower the project's
+	// limit to what it allows.
+	if limit, err := s.projects.FitConnectionLimit(ctx, p.ID, log); err != nil {
+		return err
+	} else if limit > 0 {
+		if err := log.Info(ctx, "connections", "the project's connection limit is now %d, the most this size allows", limit); err != nil {
+			return err
+		}
+	}
 	return log.Info(ctx, "done", "instance resized")
 }
 
@@ -318,10 +382,15 @@ func (s *Service) failResize(ctx context.Context, op store.Operation, log *jobs.
 	if err != nil {
 		return cause
 	}
-	if err := s.setSize(ctx, p.InstanceID, rp.From); err != nil {
+	if err := s.setSize(ctx, p.InstanceID, rp.From, rp.FromMaxConnections); err != nil {
 		return errors.Join(cause, err)
 	}
 	inst, err := store.New(s.db).GetInstance(ctx, p.InstanceID)
+	if err == nil && inst.Patroni && rp.FromMaxConnections > 0 && rp.ToMaxConnections != rp.FromMaxConnections {
+		if err := s.setClusterMaxConnections(ctx, inst, rp.FromMaxConnections); err != nil {
+			_ = log.Warn(ctx, "rollback", "putting max_connections back in the cluster configuration failed: %v", err)
+		}
+	}
 	if err == nil && !inst.HaEnabled && (rp.To.CPUs != rp.From.CPUs || rp.To.MemoryMB != rp.From.MemoryMB) {
 		if _, err := s.Recreate(ctx, inst); err != nil {
 			_ = log.Warn(ctx, "rollback", "recreating at the old size failed: %v", err)

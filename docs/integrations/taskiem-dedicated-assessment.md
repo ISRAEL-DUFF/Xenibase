@@ -31,7 +31,7 @@ the change works for every dedicated project, not just Taskiem's.
 | Group roles `taskiem_app`, `taskiem_dispatch`, `taskiem_public` | Partly | A platform admin can create `NOLOGIN` integrator roles on a dedicated instance, granted to the owner `WITH ADMIN OPTION` (`internal/dedicated/integrator.go`). Taskiem's migrations would still run `CREATE ROLE` and fail on "already exists" unless they skip existing roles. |
 | Login roles `<database>_app`, `<database>_public` | **No** | Integrator roles are `NOLOGIN` only, and names starting with the project's database name are refused. A login made any other way isn't in the poolers' auth file, so it can't connect through them (`internal/pooler/render.go`). |
 | `LISTEN` on a session connection | Yes | The session pooler (5432) keeps one server connection per client, so `LISTEN/NOTIFY` works; the transaction pooler (6543) doesn't, as Taskiem says. |
-| 100 to 150 connections | Check | The dedicated default connection limit is 90 (`internal/store/settings.go`); it's a per-plan setting. Raise it for Taskiem's plan. |
+| 100 to 150 connections | Yes (built) | `max_connections` now grows with the instance's memory (200 on 4 GB, 400 on 8 GB), and the project's limit can go to it less 10; set 150 in the guardrails. Most of their traffic can use the transaction pooler, which needs far fewer. |
 | `sslmode=verify-full` | Yes | The pooler hostname has a certificate from a public CA by ACME (or a self-signed one we'd hand over). |
 | Reachable only from Taskiem's servers | Yes (built) | A per-project IP allowlist at the poolers (`docs/network-access.md`). No private peering: traffic still crosses the internet, over TLS. |
 | WAL archiving, daily base backups, another zone | Mostly | WAL-G archives continuously, with configurable retention and PITR window (V4.1-M3). Copies to another zone need a copy target; with Nigerian residency on, that has to be a second in-country bucket. |
@@ -77,4 +77,4 @@ for an operator who wants to pre-create roles without opening this up.
 
 - ~~**IP allowlist per project** on the poolers~~: built.
 - ~~**Replica settings**~~: built.
-- **Connection limit** on the plan Taskiem buys: at least 150.
+- ~~**Connection limit**~~: built (it grows with the instance's size).

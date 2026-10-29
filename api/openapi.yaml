@@ -12711,6 +12711,17 @@ components:
         volume_gb:
           type: integer
           nullable: true
+        max_connections:
+          type: integer
+          description: >-
+            Dedicated only. Postgres's max_connections, which grows with the
+            instance's memory (50 per GB, 100 to 500).
+        connection_limit_max:
+          type: integer
+          description: >-
+            Dedicated only. The highest connection limit the project can have
+            on this instance: max_connections less what Xenibase keeps for its
+            own connections (backups, replication, probes, backend services).
     PitrWindow:
       type: object
       description: Dedicated only. Any time in [from, to] can be restored.
