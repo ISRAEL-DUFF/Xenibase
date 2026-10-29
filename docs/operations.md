@@ -157,6 +157,26 @@ change, not in the same transaction, so what is guaranteed is this:
   and on `xenibase_audit_pending > 0` for more than a few minutes.
 - A crash of xenibase-server (or the machine) loses the rows still waiting.
 
+## What is kept
+
+How long the metadata database keeps what it records:
+
+| Data | Kept |
+| --- | --- |
+| Metrics | 1-minute points 24 hours, hourly points 30 days |
+| Query insights (statistics, slow queries, query texts) | 30 days |
+| Reaped statements (with the statement's text) | 30 days, and removed within 5 minutes of the project's deletion |
+| Data API request logs, edge reports | 7 days |
+| Webhook deliveries | 7 days; dead letters 30 |
+| Scheduled job runs | 30 days, at most 1,000 per job |
+| Operations | A finished operation's parameters and step log for 90 days; then the row stays as a summary (kind, project, status, error, who and when) |
+| Audit log | For good (append-only) |
+| Projects and organisations | For good, marked deleted |
+
+The tenancy sweep (every 5 minutes) removes reaped statements and prunes up
+to 500 operations at a time (about 144,000 a day), so the backlog an
+upgraded install starts with clears gradually.
+
 ## Quotas, storage locks and usage
 
 Each organisation has a plan (Organisations → the org → Plan), with

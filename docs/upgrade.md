@@ -344,6 +344,13 @@ below say what each version changed.
   the sizes these tables have. A 4.2.4 server still running during the
   upgrade can't transfer a project (the transfer fails and changes nothing)
   until it is replaced.
+- **Retention** (migration 00070, two indexes built concurrently): reaped
+  statements are removed after 30 days and with their project, and finished
+  operations lose their parameters and step logs after 90 days, keeping the
+  row as a summary ([what is kept](operations.md#what-is-kept)). On an
+  install with years of operations the sweep prunes 500 every 5 minutes
+  until it has caught up; the metadata backup taken before the upgrade
+  keeps the full history.
 
 ## Rolling back
 

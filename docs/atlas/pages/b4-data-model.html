@@ -74,7 +74,7 @@
 <h2 id="data-model--operations">The operations table</h2>
 <p><code>operations</code> is the queue described on <x-page id="control-plane--queue"/>: <code>kind</code>, <code>project_id</code> (NULL for platform work), <code>params</code> JSON, <code>status</code>, <code>attempts</code>, <code>run_after</code>, the lease (<code>locked_by</code>, <code>locked_at</code>), the step <code>log</code> as a JSON array, <code>error</code> and timestamps. Two triggers send <code>pg_notify</code> on insert and on changes to status, log or <code>run_after</code>:</p>
 <x-code path="internal/store/migrations/00001_init.sql" start="CREATE TRIGGER operations_notify_update" lines="6"/>
-<p>Each log line rewrites the row (<code>log = log || jsonb_build_array(…)</code>), and finished operations are never deleted, so the table and its TOAST grow for the life of the install.</p>
+<p>Each log line rewrites the row (<code>log = log || jsonb_build_array(…)</code>). Finished operations are never deleted, but 90 days after one finishes its parameters and step log are replaced by a summary (<a href="#data-model--retention">below</a>), so the TOAST that the logs fill stops growing with the install's age.</p>
 
 <h2 id="data-model--secrets">What is sealed, hashed, or in the clear</h2>
 <p>Secrets the control plane must read back are sealed with the master key: AES-256-GCM, a key id in the header so old keys keep working after a rotation, and associated data that names the column and row (<code>"nodes.pg_admin_secret:" + id</code>), so a sealed value copied into another row does not open (<x-ref path="internal/crypto/masterkey.go" symbol="func (k *Keyring) Encrypt("><code>Keyring.Encrypt</code></x-ref>). Secrets it only needs to check are hashed.</p>
@@ -107,15 +107,13 @@
     <tr><td><code>webhook_deliveries</code></td><td>7 days; unreplayed dead letters 30</td><td><code>SweepDeliveries</code></td></tr>
     <tr><td><code>job_runs</code></td><td>30 days, at most 1,000 per job</td><td><code>SweepJobRuns</code></td></tr>
     <tr><td><code>sessions</code>, <code>auth_challenges</code></td><td>Until idle or absolute expiry</td><td><code>sweepAuth</code>, every 15 minutes</td></tr>
-    <tr><td><code>operations</code></td><td>Forever, with parameters and step logs</td><td>nothing</td></tr>
+    <tr><td><code>operations</code></td><td>Parameters and step log 90 days after the operation finishes; then the row stays as a summary, keeping only the <code>instance_id</code> and <code>region</code> that alerts and isolation checks group by</td><td><x-ref path="internal/tenancy/retention.go" symbol="func (s *Service) PruneRetention("><code>PruneRetention</code></x-ref>, in the tenancy sweep, 500 at a time</td></tr>
     <tr><td><code>audit_log</code></td><td>Forever (append-only)</td><td>nothing</td></tr>
-    <tr><td><code>reaped_sessions</code></td><td>Forever, including the tenant's own query text, after the project is deleted</td><td>nothing</td></tr>
+    <tr><td><code>reaped_sessions</code></td><td>30 days, and none of a deleted project after the next sweep</td><td><code>PruneRetention</code>, every 5 minutes</td></tr>
     <tr><td><code>projects</code> and their children</td><td>Forever (soft delete)</td><td>nothing</td></tr>
   </tbody>
 </table></div>
-<div class="callout risk"><span class="callout-label">Risk (low): tenant query text outlives the project</span>
-  <p>When the reaper ends a long statement it records the statement's text (truncated) in <code>reaped_sessions</code>. Statements carry literals, so this is customer data, and it is kept with no limit, after the project and even the organisation are deleted, because both are soft deletes and the table's cascade never fires. The same holds for step logs in <code>operations</code>. Fix: prune <code>reaped_sessions</code> (30 days, like slow queries) and drop it with the project; prune finished operations after a set time, keeping a summary row if the history matters.</p>
-</div>
+<div class="callout"><span class="callout-label">Resolved</span><p>When the reaper ends a long statement it records the statement's text (truncated) in <code>reaped_sessions</code>. Statements carry literals, so this is customer data, and it used to be kept with no limit, after the project and even the organisation were deleted (both are soft deletes, so the table's cascade never fires); step logs and parameters in <code>operations</code> were kept the same way. The tenancy sweep now removes reaped sessions after 30 days, like slow queries, and those of a deleted project at the next sweep, and strips finished operations of their parameters and logs after 90 days, keeping the row as a summary. Migration <x-ref path="internal/store/migrations/00070_retention_indexes.sql">00070</x-ref> adds the indexes the sweep needs, built concurrently. <code>TestRetention</code> covers it, and <x-ref path="docs/operations.md" symbol="## What is kept">the operations guide</x-ref> lists every retention.</p></div>
 
 <h2 id="data-model--new">Release 4.2.4's additions</h2>
 <div class="table-wrap"><table>

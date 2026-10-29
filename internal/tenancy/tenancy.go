@@ -142,6 +142,9 @@ func (s *Service) Sweep(ctx context.Context) error {
 	if err := s.FinishOrgDeletions(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("org deletion: %w", err))
 	}
+	if err := s.PruneRetention(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("retention: %w", err))
+	}
 	return errors.Join(errs...)
 }
 
