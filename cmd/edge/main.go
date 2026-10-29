@@ -112,7 +112,7 @@ func run(args []string) error {
 	case cfg.ControlURL == "":
 		return errors.New("XENIBASE_EDGE_CONTROL_URL is required (xenibase-server's URL)")
 	case len(cfg.Secret) < 32:
-		return errors.New("XENIBASE_EDGE_SECRET is required: at least 32 characters, the same as xenibase-server's")
+		return errors.New("XENIBASE_EDGE_SECRET is required: this edge's credential (xenibase-server -issue-edge-credential), or xenibase-server's own XENIBASE_EDGE_SECRET for the regions without their own API domain")
 	case cfg.Domain == "":
 		return errors.New("XENIBASE_EDGE_DOMAIN is required (projects are served at <ref>.<domain>)")
 	}

@@ -20,6 +20,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Pooler host not ready | critical | An edge pooler host can't serve or is stale ([standby edge pooler](edge-poolers.md)) |
   | Pooler split brain | critical | Both edge pooler hosts say keepalived made them MASTER |
   | Isolation check | critical | The nightly tenant-isolation check found a problem |
+  | Agent client certificate | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
 
 - **Operations** shows every long action with its step log.
 - **Metrics** (per project and per node) charts size, connections, TPS,
@@ -414,6 +415,13 @@ organisations allows the host.
   The rotation re-encrypts everything in one transaction and checks the new
   key alone opens it all; on any error nothing changes. Operators sign in
   again afterwards. Back up the new `.env`.
+- Releases before this one skipped part of what is sealed (per-project
+  backup keys, Patroni secrets, webhook secrets and headers, scheduled jobs,
+  projects' auth SMTP settings and queued messages, device sign-in tokens,
+  the etcd CA key) and still reported success. If you rotated with one of
+  them, those values still need the old key: keep it in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (or put it back) and run the rotation again
+  with this release before you drop it.
 - The backup key never changes (old backups need it); keep it offline.
 - `XENIBASE_CONSOLE_DISABLED=true` turns the SQL console and table browser
   off for every project.

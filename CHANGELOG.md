@@ -40,6 +40,47 @@ bundle share one version (spec §11.5).
   for a request with one of its keys; one invalid route or node address is
   skipped and alerted (`pooler_config_skipped`) instead of blocking every
   region's pooler sync.
+- **Master-key rotation re-encrypts everything sealed.** It skipped
+  per-project backup keys, Patroni secrets, webhook secrets and headers,
+  scheduled jobs, projects' auth SMTP settings and queued messages, device
+  sign-in tokens and the etcd CA key, and still reported success. If you
+  rotated before, run the rotation again with the old key in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (`docs/operations.md`, "Secrets").
+- **xenibase-server renews its certificate for agents.** It was issued at
+  start for 30 days and never renewed, so a server that ran longer lost
+  every agent. It is now reissued with 7 days left, and the new
+  `agent_client_cert` alert fires if under 3 days remain.
+- **The agent bootstrap token registers the local node once.**
+  `XENIBASE_AGENT_BOOTSTRAP_TOKEN` could claim any node without an agent by
+  name, including one just added and a removed one. It now registers only
+  the bundle's local node (`XENIBASE_SHARED_NODE_NAME`), never a removed
+  node, and only once; afterwards use a token from Nodes → Re-register.
+- **Each edge can have its own credential, bound to a region.** One
+  platform-wide `XENIBASE_EDGE_SECRET` authenticated every edge, and the edge
+  chose its region, so any edge (and every edge node's cloud-init) could
+  read every region's projects. `xenibase-server -issue-edge-credential
+  <name> -edge-region <region>` issues a credential the server binds to its
+  region; edge nodes Xenibase creates get one. The platform-wide secret now
+  serves only regions without their own API domain
+  (`XENIBASE_EDGE_SECRET_ALL_REGIONS=true` restores the old scope,
+  deprecated). See `docs/upgrade.md` before upgrading an install with a
+  region API domain.
+- **A region's pooler hostname gets its own certificate.** Pooler hosts of a
+  region with its own hostname were sent the home region's certificate,
+  which doesn't name theirs. xenibase-server now keeps one per region, in the
+  `XENIBASE_POOLER_TLS` mode, in the region's directory. In `files` mode
+  the certificate must name every region's hostname (`docs/regions.md`).
+- **No Hetzner token on pooler hosts.** The agent on each internet-facing
+  pooler host held a full-access Hetzner token to assign the floating IP.
+  xenibase-server's arbiter now moves it to keepalived's MASTER and the
+  agent only reports its state; `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`
+  keeps agent-side assignment (faster failover while the control plane is
+  down). See `docs/upgrade.md`.
+- **Password rotations no longer keep SCRAM verifiers.** A rotation kept the
+  owner's new and previous verifiers in its parameters forever (a credential
+  switch the new owner's), and the API returned them to anyone who could
+  view the project. They now travel with the operation's secrets, removed
+  when it ends; migration 00062 removes those already stored.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 - An audit row the metadata database refused was only logged. It is now
@@ -73,6 +114,8 @@ bundle share one version (spec §11.5).
   their project's organisation and add the keys; 00070 builds two indexes
   concurrently for the retention sweep (`docs/upgrade.md`, "Upgrading from
   4.2.4").
+- Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
+  verifiers from finished password rotations and credential switches.
 
 ## v4.2.4
 

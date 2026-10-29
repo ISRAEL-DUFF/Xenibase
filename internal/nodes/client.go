@@ -70,12 +70,10 @@ func (s *Service) dial(n store.Node) (*Agent, error) {
 // transports present a renewed one.
 func (s *Service) agentTLS(n store.Node, host, pin string) *tls.Config {
 	return &tls.Config{
-		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			return &s.clientCert, nil
-		},
-		RootCAs:    s.ca.Pool(),
-		ServerName: host,
-		MinVersion: tls.VersionTLS13,
+		GetClientCertificate: s.certs.getClientCertificate,
+		RootCAs:              s.ca.Pool(),
+		ServerName:           host,
+		MinVersion:           tls.VersionTLS13,
 		VerifyPeerCertificate: func(raw [][]byte, chains [][]*x509.Certificate) error {
 			if len(raw) == 0 || agentca.Fingerprint(raw[0]) != pin {
 				return errors.New("agent certificate does not match the pinned fingerprint")

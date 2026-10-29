@@ -190,8 +190,10 @@ func (p *poolerHost) status() agentapi.PoolerStatus {
 // vrrpStates are keepalived's notify states.
 var vrrpStates = map[string]bool{"MASTER": true, "BACKUP": true, "FAULT": true, "STOP": true}
 
-// setVRRP records keepalived's state. On MASTER it claims the floating IP
-// in the background, retrying until it succeeds or the state changes.
+// setVRRP records keepalived's state, which xenibase-server reads to move
+// the floating IP. Only an agent allowed to assign it itself
+// (--assign-floating-ip) claims it on MASTER, in the background, retrying
+// until it succeeds or the state changes.
 func (p *poolerHost) setVRRP(state string) {
 	p.mu.Lock()
 	prev := p.vrrp
@@ -200,7 +202,7 @@ func (p *poolerHost) setVRRP(state string) {
 		p.claimAbort()
 		p.claimAbort = nil
 	}
-	if state != "MASTER" {
+	if _, none := p.cfg.FloatIP.(floatip.None); state != "MASTER" || none {
 		p.mu.Unlock()
 		if prev != state {
 			p.log.Info("keepalived state", "state", state, "was", prev)

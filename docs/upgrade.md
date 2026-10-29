@@ -367,6 +367,28 @@ below say what each version changed.
   install with years of operations the sweep prunes 500 every 5 minutes
   until it has caught up; the metadata backup taken before the upgrade
   keeps the full history.
+- **Edge credentials** (migration 00061): the platform-wide
+  `XENIBASE_EDGE_SECRET` now serves only the regions without their own API
+  domain. **Before upgrading**, give every edge of a region with its own API
+  domain its own credential: after the upgrade, run
+  `xenibase-server -issue-edge-credential <edge name> -edge-region <region>`
+  for each and put the printed value in that edge's `XENIBASE_EDGE_SECRET`
+  ([Running xenibase-edge](backend-services.md#running-xenibase-edge)).
+  Until you do, such an edge gets `403` for its region's feed and serves
+  nothing; to keep the old behaviour while you switch, set
+  `XENIBASE_EDGE_SECRET_ALL_REGIONS=true` on xenibase-server (deprecated).
+  Edge nodes created before the upgrade carry the platform-wide secret in
+  their cloud-init: issue them credentials too, and if any of them served
+  a region with its own domain, rotate `XENIBASE_EDGE_SECRET` afterwards.
+- **Pooler hosts no longer assign the floating IP.** xenibase-server's
+  arbiter now moves it to the host keepalived makes MASTER, so make sure
+  xenibase-server has `XENIBASE_FLOATING_IP_ID` and a Hetzner token
+  ([edge poolers](edge-poolers.md)) before upgrading the pooler hosts. Then
+  remove `XENIBASE_AGENT_HETZNER_TOKEN` and `XENIBASE_AGENT_FLOATING_IP_ID`
+  from each host's `.env` (an agent that still has them logs a warning and
+  ignores them) and revoke that token in Hetzner if nothing else uses it. To
+  keep agent-side assignment, which also fails over while xenibase-server is
+  down, set `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true` instead.
 
 ## Rolling back
 

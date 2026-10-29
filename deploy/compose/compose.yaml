@@ -150,6 +150,7 @@ services:
       # characters), and the edge image for edge nodes Xenibase adds.
       XENIBASE_API_DOMAIN: ${XENIBASE_API_DOMAIN:-}
       XENIBASE_EDGE_SECRET: ${XENIBASE_EDGE_SECRET:-}
+      XENIBASE_EDGE_SECRET_ALL_REGIONS: ${XENIBASE_EDGE_SECRET_ALL_REGIONS:-}
       XENIBASE_CLOUD_EDGE_IMAGE: ${XENIBASE_CLOUD_EDGE_IMAGE:-}
       # Optional settings the docs describe; empty means the default.
       # Payments (docs/payments.md).

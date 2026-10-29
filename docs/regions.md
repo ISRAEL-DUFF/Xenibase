@@ -33,7 +33,14 @@ Regions are managed under **Platform → Regions** (or
    [edge poolers](edge-poolers.md)), and set the region's floating IP ID.
    Point the region's hostname at that floating IP. Until a region has
    pooler hosts of its own, the home region's poolers serve its projects
-   (Platform → Regions says "served by the home poolers").
+   (Platform → Regions says "served by the home poolers"). The region's
+   pooler hosts serve a certificate for its hostname, obtained and renewed
+   the same way as the home one (`XENIBASE_POOLER_TLS`: self-signed, or from
+   the ACME CA over HTTP-01, which needs port 80 of the region's hostname to
+   reach xenibase-server's `/.well-known/acme-challenge/`; until it does, a
+   self-signed certificate for the hostname stands in). In `files` mode the one
+   certificate you supply is served everywhere, so it must name every
+   region's hostname (or be a wildcard that covers them).
 5. **Data residency** (optional): tick **Offer data residency**. It needs
    the country and an in-country backup target.
 6. **API domain** (optional, for backend services): set the region's own
@@ -94,9 +101,13 @@ region its own API domain to keep them there:
    platform's ([Enabling backend services](enabling-backend-services.md)).
 2. **The edge.** Run xenibase-edge in the region with
    `XENIBASE_EDGE_DOMAIN=ng.api.example.com` and
-   `XENIBASE_EDGE_REGION=ng-lagos`: it serves the region's projects, and
-   only them. Edge nodes Xenibase adds in the region get the region's
-   domain in their cloud-init.
+   `XENIBASE_EDGE_REGION=ng-lagos`, and as `XENIBASE_EDGE_SECRET` a
+   credential for the region (`xenibase-server -issue-edge-credential
+   edge-lagos-1 -edge-region ng-lagos`, see
+   [Running xenibase-edge](backend-services.md#running-xenibase-edge)): it
+   serves the region's projects, and only them, and the platform-wide edge
+   secret no longer reads them. Edge nodes Xenibase adds in the region get
+   the region's domain and their own credential in their cloud-init.
 3. **Platform → Regions → the region → API domain:** `ng.api.example.com`.
    It must differ from the platform's domain and from every other
    region's.
@@ -106,11 +117,11 @@ branches, auth emails and signed file URLs give the region's projects
 their `https://<ref>.ng.api.example.com` URL. Set it **before** the
 region's first project enables backend services: changing it later
 changes those projects' API URL, and their apps, OAuth redirect URLs and
-saved links need the new one. A project already reachable at
-`<ref>.<platform domain>` keeps working there as long as an edge without
-a region (`XENIBASE_EDGE_REGION` empty) serves the platform domain; an
-edge limited to another region doesn't serve it. A project moved to
-another region takes that region's API URL.
+saved links need the new one. Once the region has its own API domain, the
+platform domain's edges (which use the platform-wide edge secret) stop
+serving its projects, so `<ref>.<platform domain>` no longer reaches them
+(unless `XENIBASE_EDGE_SECRET_ALL_REGIONS=true`, deprecated). A project
+moved to another region takes that region's API URL.
 
 ## Data residency
 

@@ -46,6 +46,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/costs"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/dedicated"
+	"github.com/israel-duff/xenibase/internal/edgecred"
 	"github.com/israel-duff/xenibase/internal/floatip"
 	"github.com/israel-duff/xenibase/internal/freetier"
 	"github.com/israel-duff/xenibase/internal/ha"
@@ -112,6 +113,9 @@ func run() error {
 	healthcheck := flag.String("healthcheck", "", "GET this URL's /healthz and exit 0 if healthy (for container health checks)")
 	rotateKey := flag.Bool("rotate-master-key", false,
 		"re-encrypt every stored secret under XENIBASE_MASTER_KEY (old key in XENIBASE_MASTER_KEY_PREVIOUS), verify, and exit")
+	issueEdge := flag.String("issue-edge-credential", "", "print the credential of the xenibase-edge with this name, bound to -edge-region, and exit")
+	edgeRegion := flag.String("edge-region", "", "the region an edge credential serves (with -issue-edge-credential)")
+	revokeEdge := flag.String("revoke-edge-credential", "", "revoke the credential of the xenibase-edge with this name and exit")
 	flag.Parse()
 
 	v := version.Get()
@@ -160,6 +164,9 @@ func run() error {
 	log.Info("master key loaded", "key_id", keyring.PrimaryID().String(), "previous_keys", len(cfg.PreviousMasterKeys))
 	if *rotateKey {
 		return rotateMasterKey(cfg, keyring, log)
+	}
+	if *issueEdge != "" || *revokeEdge != "" {
+		return edgeCredential(cfg, keyring, log, *issueEdge, *edgeRegion, *revokeEdge)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -409,7 +416,11 @@ func run() error {
 	// xenibase-edge follows.
 	var servicesSvc *services.Service
 	if projects != nil {
-		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret}, log)
+		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret,
+			EdgeSecretAllRegions: cfg.Edge.SecretAllRegions}, log)
+		if cfg.Edge.SecretAllRegions {
+			log.Warn("XENIBASE_EDGE_SECRET_ALL_REGIONS is deprecated: the platform-wide edge secret serves every region; give each regional edge its own credential (xenibase-server -issue-edge-credential)")
+		}
 		if branchSvc != nil {
 			branchSvc.API = servicesSvc // branches get an API of their own (V4.1 §9.5)
 		}
@@ -485,6 +496,9 @@ func run() error {
 			Bootstrap: cloud.Bootstrap{ServerURL: cfg.Cloud.ServerURL, ServerCA: cfg.Cloud.ServerCA, AgentImage: cfg.Cloud.AgentImage,
 				PGImage: cfg.Cloud.PGImage, PrivateCIDR: cfg.Cloud.PrivateCIDR},
 			Edge: edgeBoot, RegionAPIDomain: regionSvc.APIDomain,
+			EdgeCredential: func(ctx context.Context, name, region string) (string, error) {
+				return edgecred.Issue(ctx, pool, keyring, name, region, nil)
+			},
 		}, log)
 		for name, k := range capacitySvc.Kinds() {
 			kinds[name] = k
@@ -536,10 +550,14 @@ func run() error {
 		bg.Add(1)
 		go func() { defer bg.Done(); isoChecks.Run(bgCtx) }()
 		consoleSvc = console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
-		alertSvc = alerts.New(pool, keyring, alerts.Config{
+		alertCfg := alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
 			PoolerSkipped: pm.Skipped,
-		}, log)
+		}
+		if nodeSvc != nil {
+			alertCfg.ClientCertExpiry = nodeSvc.ClientCertExpiry
+		}
+		alertSvc = alerts.New(pool, keyring, alertCfg, log)
 		bg.Add(1)
 		go func() { defer bg.Done(); alertSvc.Run(bgCtx) }()
 		collector := metrics.NewCollector(pool, projects, pm, nodeSvc, cfg.Insight.MetricsInterval, log)
@@ -556,8 +574,9 @@ func run() error {
 	}
 
 	var certs *tlscert.Manager
+	var regionCerts *tlscert.Regions // regions with their own pooler hostname
 	if pm != nil {
-		if certs, err = setupPoolerTLS(cfg, pm, settingsStore, log); err != nil {
+		if certs, regionCerts, err = setupPoolerTLS(cfg, pm, settingsStore, regionSvc, log); err != nil {
 			return err
 		}
 	}
@@ -662,7 +681,7 @@ func run() error {
 		MetricsToken:    cfg.Insight.MetricsToken,
 	})
 	if certs != nil {
-		handler = certs.HTTPChallengeHandler(handler)
+		handler = regionCerts.HTTPChallengeHandler(certs.HTTPChallengeHandler(handler))
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -681,6 +700,8 @@ func run() error {
 		// Only once listening: ACME challenges are answered by this server.
 		bg.Add(1)
 		go func() { defer bg.Done(); certs.Run(bgCtx) }()
+		bg.Add(1)
+		go func() { defer bg.Done(); regionCerts.Run(bgCtx, 30*time.Second) }()
 	}
 
 	errc := make(chan error, 1)
@@ -761,12 +782,13 @@ func sweepAuth(ctx context.Context, svc *auth.Service, log *slog.Logger) {
 	}
 }
 
-// setupPoolerTLS builds the certificate manager for the poolers and makes
-// sure a certificate exists before they need one.
-func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, log *slog.Logger) (*tlscert.Manager, error) {
+// setupPoolerTLS builds the certificate managers for the poolers, the home
+// region's and one per region with its own pooler hostname, and makes sure
+// a certificate exists before they need one.
+func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, rs *regions.Service, log *slog.Logger) (*tlscert.Manager, *tlscert.Regions, error) {
 	mode, err := tlscert.ParseMode(cfg.PoolerTLS.Mode)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tc := tlscert.Config{
 		Mode: mode, Dir: pm.Dir(), FileMode: pm.FileMode(), Reload: pm.Reload,
@@ -779,23 +801,41 @@ func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, l
 	if path := cfg.PoolerTLS.ACMECARoots; path != "" {
 		pemBytes, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: %w", err)
+			return nil, nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: %w", err)
 		}
 		tc.ACMERoots = x509.NewCertPool()
 		if !tc.ACMERoots.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: no certificates in %s", path)
+			return nil, nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: no certificates in %s", path)
 		}
 	}
 	m, err := tlscert.New(tc, st.DBHost())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := m.Bootstrap(); err != nil {
-		return nil, fmt.Errorf("pooler TLS: %w", err)
+		return nil, nil, fmt.Errorf("pooler TLS: %w", err)
 	}
 	st.OnDBHostChange(m.SetHost)
 	log.Info("pooler TLS", "mode", mode, "host", st.DBHost())
-	return m, nil
+	regionCerts := tlscert.NewRegions(tc, pm.RegionDir, func(ctx context.Context) (map[string]string, error) {
+		list, err := rs.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		hosts := map[string]string{}
+		for _, r := range list {
+			if r.ID != rs.Home() && r.PoolerHost != "" {
+				hosts[r.ID] = r.PoolerHost
+			}
+		}
+		return hosts, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := regionCerts.Sync(ctx); err != nil {
+		log.Warn("pooler TLS for regions", "err", err)
+	}
+	return m, regionCerts, nil
 }
 
 func toAPITLS(s tlscert.Status) gen.TlsStatus {
@@ -925,6 +965,7 @@ func setupBackups(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, ke
 	ns, err := nodes.NewService(pool, ca, cfg.Backups.AgentBootstrapToken, log)
 	if err == nil {
 		ns.SetHomeRegion(cfg.Cloud.Region)
+		ns.SetBootstrapNode(cfg.Shared.NodeName)
 	}
 	if err != nil {
 		return nil, nil, err

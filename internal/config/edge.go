@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -13,8 +14,13 @@ type Edge struct {
 	// served at https://<ref>.<Domain>. Empty shows no URL.
 	Domain string
 	// Secret signs xenibase-edge's requests (XENIBASE_EDGE_SECRET or _FILE),
-	// the same value as the edges'. Empty disables the edge feed.
+	// the same value as the edges'. Empty disables the edge feed. It serves
+	// the regions without their own API domain; an edge for another region
+	// needs its own credential (xenibase-server -issue-edge-credential).
 	Secret string
+	// SecretAllRegions lets Secret serve every region, as before edges had
+	// their own credentials (XENIBASE_EDGE_SECRET_ALL_REGIONS; deprecated).
+	SecretAllRegions bool
 }
 
 var domainRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
@@ -40,6 +46,13 @@ func loadEdge(getenv func(string) string, readFile func(string) ([]byte, error),
 		errs = append(errs, errors.New("XENIBASE_EDGE_SECRET must be at least 32 characters"))
 	}
 	e.Secret = secret
+	if v := getenv("XENIBASE_EDGE_SECRET_ALL_REGIONS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("XENIBASE_EDGE_SECRET_ALL_REGIONS: %w", err))
+		}
+		e.SecretAllRegions = b
+	}
 	cfg.Edge = e
 	return errs
 }

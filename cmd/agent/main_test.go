@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/israel-duff/xenibase/internal/backupfmt"
+	"github.com/israel-duff/xenibase/internal/floatip"
 )
 
 func TestDecrypt(t *testing.T) {
@@ -55,5 +58,30 @@ func TestDecrypt(t *testing.T) {
 	}
 	if _, err := os.Stat(out2); !os.IsNotExist(err) {
 		t.Fatal("left a partial output behind")
+	}
+}
+
+// A pooler host assigns the floating IP itself only when told to: by
+// default it holds no Hetzner client, even with a token in its environment.
+func TestFloatingIPAssignedOnlyWhenEnabled(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	o := &opts{hetznerToken: "full-access-token", floatingIP: "42", hetznerAPI: floatip.DefaultHetznerAPI}
+	fip, err := floatingIP(o, "1001", quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fip.(floatip.None); !ok {
+		t.Fatalf("the agent assigns the floating IP by default: %T", fip)
+	}
+	o.assignIP = true
+	if fip, err = floatingIP(o, "1001", quiet); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fip.(*floatip.Hetzner); !ok {
+		t.Fatalf("--assign-floating-ip: %T", fip)
+	}
+	o.hetznerToken = ""
+	if _, err := floatingIP(o, "1001", quiet); err == nil {
+		t.Fatal("--assign-floating-ip without a token")
 	}
 }

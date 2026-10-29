@@ -491,11 +491,11 @@ func (s *Service) runRotate(ctx context.Context, op store.Operation, log *jobs.S
 	if err := json.Unmarshal(op.Params, &params); err != nil {
 		return jobs.Permanent(fmt.Errorf("invalid params: %w", err))
 	}
-	password, err := s.openPassword(p.ID, KindRotate, params.Secrets)
+	password, err := s.openPassword(p.ID, KindRotate, params.Secrets.opSecrets)
 	if err != nil {
 		return jobs.Permanent(err)
 	}
-	if err := s.setVerifier(ctx, p, params.Verifier); err != nil {
+	if err := s.setVerifier(ctx, p, params.Secrets.Verifier); err != nil {
 		return err
 	}
 	if err := log.Info(ctx, "role", "new SCRAM verifier set on %s", p.OwnerRole); err != nil {
@@ -518,10 +518,10 @@ func (s *Service) rollbackRotate(ctx context.Context, op store.Operation, log *j
 		return err
 	}
 	var params rotateParams
-	if err := json.Unmarshal(op.Params, &params); err != nil || params.PreviousVerifier == "" {
+	if err := json.Unmarshal(op.Params, &params); err != nil || params.Secrets.PreviousVerifier == "" {
 		return errors.New("no previous verifier to restore")
 	}
-	if err := s.setVerifier(ctx, p, params.PreviousVerifier); err != nil {
+	if err := s.setVerifier(ctx, p, params.Secrets.PreviousVerifier); err != nil {
 		return err
 	}
 	return s.syncPooler(ctx, log, "rollback", "previous password restored")

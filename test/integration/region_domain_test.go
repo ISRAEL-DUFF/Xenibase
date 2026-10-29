@@ -13,6 +13,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
 	"github.com/israel-duff/xenibase/internal/edge"
+	"github.com/israel-duff/xenibase/internal/edgecred"
 	"github.com/israel-duff/xenibase/internal/regions"
 	"github.com/israel-duff/xenibase/test/testenv"
 )
@@ -164,7 +165,13 @@ func TestRegionAPIDomainAndEarlyAccess(t *testing.T) {
 			pub = k.Value
 		}
 	}
-	lagos := e.StartEdge(func(c *edge.Config) { c.Name, c.Domain, c.Region = "edge-lagos", domain, "ng-early" })
+	// A region with its own domain is served by edges with its own
+	// credential: the platform-wide secret is refused for it.
+	cred, err := edgecred.Issue(ctx, e.DB, e.Keyring, "edge-lagos", "ng-early", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lagos := e.StartEdge(func(c *edge.Config) { c.Name, c.Domain, c.Region, c.Secret = "edge-lagos", domain, "ng-early", cred })
 	if code, _, body := lagos.Do(ref, "GET", "/data/v1/health", nil, "apikey", pub); code != http.StatusOK {
 		t.Fatalf("the Lagos edge at %s.%s: %d %s", ref, domain, code, body)
 	}

@@ -124,6 +124,27 @@ func TestRegisterAndHealth(t *testing.T) {
 	}
 }
 
+// TestClientCertRenewed: a server whose client certificate has run out
+// (it was issued 40 days ago) still reaches its agents, because the
+// handshake gets a fresh one.
+func TestClientCertRenewed(t *testing.T) {
+	e := setup(t, "")
+	e.startAgent(t, e.token, "")
+	if err := nodes.SetClientCertIssuedAt(e.svc, time.Now().Add(-40*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := e.svc.ForNode(context.Background(), e.node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Health(context.Background()); err != nil {
+		t.Fatalf("health with an expired client certificate: %v", err)
+	}
+	if left := time.Until(e.svc.ClientCertExpiry()); left < 29*24*time.Hour {
+		t.Fatalf("client certificate expires in %s", left)
+	}
+}
+
 func TestPinnedFingerprint(t *testing.T) {
 	e := setup(t, "")
 	e.startAgent(t, e.token, "")
@@ -154,6 +175,43 @@ func TestBootstrapToken(t *testing.T) {
 		Server: e.reg.URL, Token: "wrong", Node: "local", AdvertiseHost: "x", AdvertisePort: 1,
 	}); err == nil {
 		t.Fatal("wrong bootstrap token accepted")
+	}
+
+	// Single use: with the node's pin gone (as after RemoveNode, or an
+	// agent that lost its state), it still registers nothing.
+	if _, err := e.db.Exec(context.Background(), `UPDATE nodes SET agent_cert_fp = NULL WHERE id = $1`, e.node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agentsvc.Register(context.Background(), t.TempDir(), agentsvc.RegisterOptions{
+		Server: e.reg.URL, Token: "bootstrap-secret", Node: "local", AdvertiseHost: "x", AdvertisePort: 1,
+	}); err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("bootstrap token used twice: %v", err)
+	}
+}
+
+// The bootstrap token registers only the bundle's local node, and not once
+// that node was removed.
+func TestBootstrapTokenBound(t *testing.T) {
+	e := setup(t, "bootstrap-secret")
+	ctx := context.Background()
+	other, err := store.New(e.db).UpsertNode(ctx, store.UpsertNodeParams{Name: "new-node", PrivateAddr: "10.0.0.9", Role: "dedicated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	register := func(node string) error {
+		_, err := agentsvc.Register(ctx, t.TempDir(), agentsvc.RegisterOptions{
+			Server: e.reg.URL, Token: "bootstrap-secret", Node: node, AdvertiseHost: "x", AdvertisePort: 1,
+		})
+		return err
+	}
+	if err := register(other.Name); err == nil {
+		t.Fatal("the bootstrap token claimed a node other than the local one")
+	}
+	if err := e.svc.RemoveNode(ctx, e.node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := register("local"); err == nil || !strings.Contains(err.Error(), "removed") {
+		t.Fatalf("the bootstrap token brought back a removed node: %v", err)
 	}
 }
 

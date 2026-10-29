@@ -84,8 +84,9 @@ Fixes M27 made on the way, all covered by the tests above:
     or realtime): give the region its own **API domain**
     (`ng.api.<your domain>`), with a wildcard DNS record and certificate
     for it, and run xenibase-edge in Lagos with
-    `XENIBASE_EDGE_DOMAIN=ng.api.<your domain>` and
-    `XENIBASE_EDGE_REGION=ng-lagos` ([Regions](regions.md#a-regions-api-domain)).
+    `XENIBASE_EDGE_DOMAIN=ng.api.<your domain>`,
+    `XENIBASE_EDGE_REGION=ng-lagos`, and an edge credential for `ng-lagos`
+    as its `XENIBASE_EDGE_SECRET` ([Regions](regions.md#a-regions-api-domain)).
     Without it, Lagos projects' API calls go through the home region.
 12. **Early access** for the rehearsals: add your own organisation to the
     region's **Early-access organisations**, so you can create projects
