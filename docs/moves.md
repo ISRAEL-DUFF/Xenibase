@@ -178,6 +178,13 @@ The upgrade is then a move as above. Test the application against the new
 version first, for example on a branch: a new major can change query plans
 and defaults.
 
+There is no downgrade in place. To get back to the old major, **restore to
+a point in time before the upgrade** (Backups → Point-in-time recovery): the
+base backups taken before it are still offered, and the new project starts
+on the major they were taken on, with the data as it was then. Writes made
+since the upgrade are not in it. The old instance itself is kept stopped for
+48 hours, but nothing points the project back at it.
+
 ### Minor upgrades and the maintenance window
 
 Minor releases (18.1 → 18.2) need no data change, only a restart on the

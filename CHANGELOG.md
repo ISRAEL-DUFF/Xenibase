@@ -19,6 +19,12 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A point-in-time recovery to before a major upgrade could not start:**
+  it used the project's new major on data from the old one. The restore now
+  starts on the major of the instance that took the base backup, so an
+  owner whose app breaks on the new major can go back to before the
+  upgrade (writes made since are not in it). See `docs/moves.md` ("Major
+  upgrades").
 - **A project on a retired or preview Postgres major could not be restored
   to a point in time, branched, or have a replica detached:** each made its
   new project as a new project would, which those majors refuse. They now

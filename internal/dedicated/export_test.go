@@ -59,3 +59,6 @@ var (
 
 // Projects is the provision service the dedicated service uses.
 func (s *Service) Projects() *provision.Service { return s.projects }
+
+// BackupInstance exposes the instance a base backup came from.
+var BackupInstance = (*Service).backupInstance
