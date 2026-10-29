@@ -26,9 +26,17 @@ import (
 // backup, and it optionally copies existing backups.
 const KindStorageSwitch = "storage_switch"
 
-// PITRWindow is how long a retired WAL-G archive stays restorable after a
-// switch (the dedicated tier's point-in-time window, spec s4.3).
+// PITRWindow is the dedicated tier's point-in-time window (spec s4.3), the
+// least a retired WAL-G archive stays restorable after a switch.
 const PITRWindow = 7 * 24 * time.Hour
+
+// retiredArchiveKept is how long an archive retired by a switch stays
+// restorable: the project's window, 7 days or the 14 or 30 it pays for
+// (V4.1 s4.2), so recovery to before the switch lasts as long as it would
+// have without one.
+func retiredArchiveKept(inst store.Instance) time.Duration {
+	return max(PITRWindow, time.Duration(inst.PitrDays)*24*time.Hour)
+}
 
 // Storage target management errors.
 var (
@@ -388,7 +396,7 @@ func (s *Service) reconfigureArchive(ctx context.Context, p store.Project, pl Pl
 		}
 		if old != nil {
 			if err := q.ExpireArchiveBaseBackups(ctx, store.ExpireArchiveBaseBackupsParams{
-				ProjectID: &p.ID, WalgPrefix: old, ExpiresAt: time.Now().Add(PITRWindow),
+				ProjectID: &p.ID, WalgPrefix: old, ExpiresAt: time.Now().Add(retiredArchiveKept(inst)),
 			}); err != nil {
 				return err
 			}

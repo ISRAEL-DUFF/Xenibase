@@ -139,6 +139,11 @@ bundle share one version (spec §11.5).
   point-in-time window restarted at the next night's backup. A failed
   listing is now an error, and a listing without the backup just taken
   forgets nothing.
+- **A storage or key switch cut a paid 14- or 30-day recovery window to
+  7.** The archive a switch retires (enabling or rotating a project key is
+  one) expired after 7 days, so a dedicated project paying for 14 or 30
+  could recover only to the switch from day 8. It now stays for the
+  project's window.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

@@ -76,7 +76,8 @@ go there; existing ones stay where they are and stay restorable, or can
 be copied over (verified by checksum, originals deleted only if asked).
 For a dedicated project the switch restarts the instance with WAL-G
 pointed at the new target and takes a base backup at once; the previous
-archive stays restorable for the 7-day recovery window, then goes.
+archive stays restorable for the project's recovery window (7 days, or the
+14 or 30 it pays for), then goes.
 
 **Use a project key** gives a project its own backup key: new backups are
 OpenPGP messages to it, and on the dedicated tier WAL-G uses it too.
