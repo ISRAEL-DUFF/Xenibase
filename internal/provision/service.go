@@ -632,6 +632,13 @@ func (s *Service) EnqueueExclusive(ctx context.Context, projectID uuid.UUID, all
 	return out, err
 }
 
+// WithIdleProject runs f in a transaction that holds the live project's
+// row lock, once its status is one of allowed and no operation is pending
+// on it: for a change made in place that must not interleave with one.
+func (s *Service) WithIdleProject(ctx context.Context, id uuid.UUID, allowed []string, f func(pgx.Tx, store.Project) error) error {
+	return s.withIdleProject(ctx, id, allowed, f)
+}
+
 // withIdleProject locks a live project, checks its status and that no other
 // operation is pending on it, and runs f in the same transaction. One
 // operation per project at a time keeps the flows from interleaving.
