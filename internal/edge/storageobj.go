@@ -379,7 +379,8 @@ func (e *Edge) spendToken(ctx context.Context, p *project, id uuid.UUID, write f
 }
 
 // checkSize checks a size against the bucket's, the plan's (and the
-// route's ceiling) and the quota; size < 0 is not known yet.
+// route's ceiling) and the quota, which large uploads in progress count
+// against with their declared sizes; size < 0 is not known yet.
 func (e *Edge) checkSize(ctx context.Context, c *call, sc *edgeapi.StorageConfig, b *Bucket, size, ceiling int64) error {
 	limit := uploadLimit(sc, b, ceiling)
 	if size > limit {
@@ -390,16 +391,20 @@ func (e *Edge) checkSize(ctx context.Context, c *call, sc *edgeapi.StorageConfig
 		if err != nil {
 			return err
 		}
+		// Large uploads in progress hold what they declared.
 		var used int64
-		if err := pool.QueryRow(ctx, `SELECT coalesce((SELECT bytes FROM xb_storage.usage), 0)`).Scan(&used); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT coalesce((SELECT bytes FROM xb_storage.usage), 0)
+			+ coalesce((SELECT sum(size) FROM xb_storage.uploads WHERE expires_at > now()), 0)::bigint`).Scan(&used); err != nil {
 			return err
 		}
 		if used+size > sc.QuotaBytes {
-			return refuse(http.StatusRequestEntityTooLarge, "quota_exceeded", "the organisation's file storage quota is used up")
+			return errQuota
 		}
 	}
 	return nil
 }
+
+var errQuota = refuse(http.StatusRequestEntityTooLarge, "quota_exceeded", "the organisation's file storage quota is used up")
 
 // uploadLimit is the most a single upload of b may hold.
 func uploadLimit(sc *edgeapi.StorageConfig, b *Bucket, ceiling int64) int64 {

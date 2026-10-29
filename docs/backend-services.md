@@ -761,7 +761,11 @@ quota as an upload would, and answers with presigned URLs for its parts
  "expires_at": "…"}
 ```
 
-`PUT` each part's bytes to its URL; a failed part can be sent again.
+`PUT` each part's bytes to its URL, exactly the part's `size` (the URL is
+signed for that length, and the store refuses any other); a failed part
+can be sent again. An upload in progress holds its declared size against
+the quota until it completes, is aborted or expires, and a project may have
+100 open at once (`429 too_many_uploads`).
 `GET /storage/v1/upload/<id>` lists the parts not yet received (with fresh
 URLs), so an app can resume after a restart. `POST …/complete` checks the
 parts and sizes and writes the file's row as the user who started the

@@ -30,6 +30,11 @@ const (
 	maxParts    = 10000
 )
 
+// maxOpenUploads caps a project's large uploads in progress: each holds a
+// share of the quota (its declared size) until it completes, is aborted or
+// expires.
+var maxOpenUploads = 100
+
 type startInput struct {
 	Size     int64           `json:"size"`
 	MIMEType string          `json:"mime_type"`
@@ -152,11 +157,30 @@ func (e *Edge) startUpload(c *call, req Request, bucket, path string) {
 		return
 	}
 	claims, _ := json.Marshal(s.Claims)
-	if _, err := pool.Exec(ctx, `INSERT INTO xb_storage.uploads (id, bucket, path, version, upload_id, size, part_size, mime_type,
-		upsert, owner, role, claims, user_metadata, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		s.ID, s.Bucket, s.Path, s.Version, s.UploadID, s.Size, s.PartSize, s.MIMEType, s.Upsert, s.Owner, s.Role, string(claims), s.Metadata, s.ExpiresAt); err != nil {
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		// Starts take turns on the usage row, so uploads started together
+		// can't each pass against the same total: each counts the others.
+		var used, open int64
+		if err := tx.QueryRow(ctx, `SELECT bytes FROM xb_storage.usage FOR UPDATE`).Scan(&used); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		var inFlight int64
+		if err := tx.QueryRow(ctx, `SELECT count(*), coalesce(sum(size), 0)::bigint FROM xb_storage.uploads WHERE expires_at > now()`).Scan(&open, &inFlight); err != nil {
+			return err
+		}
+		if open >= int64(maxOpenUploads) {
+			return refuse(http.StatusTooManyRequests, "too_many_uploads", fmt.Sprintf("the project has %d uploads in progress: complete or abort some first", open))
+		}
+		if sc.QuotaBytes > 0 && used+inFlight+s.Size > sc.QuotaBytes {
+			return errQuota
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO xb_storage.uploads (id, bucket, path, version, upload_id, size, part_size, mime_type,
+			upsert, owner, role, claims, user_metadata, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+			s.ID, s.Bucket, s.Path, s.Version, s.UploadID, s.Size, s.PartSize, s.MIMEType, s.Upsert, s.Owner, s.Role, string(claims), s.Metadata, s.ExpiresAt)
+		return err
+	}); err != nil {
 		_ = cl.AbortMultipart(context.WithoutCancel(ctx), objectKey(sc, s.Version), s.UploadID)
-		e.dbError(c, err)
+		e.storageError(c, err)
 		return
 	}
 	parts, err := e.partURLs(ctx, sc, cl, s, nil)
@@ -182,13 +206,14 @@ func (e *Edge) partURLs(ctx context.Context, sc *edgeapi.StorageConfig, cl *stor
 		if done[n] {
 			continue
 		}
-		u, err := cl.PresignPart(ctx, objectKey(sc, s.Version), s.UploadID, n, ttl)
-		if err != nil {
-			return nil, err
-		}
+		// Each URL takes exactly its part: the last one the remainder.
 		size := s.PartSize
 		if n == s.parts() {
 			size = s.Size - int64(n-1)*s.PartSize
+		}
+		u, err := cl.PresignPart(ctx, objectKey(sc, s.Version), s.UploadID, n, size, ttl)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, partURL{Number: n, Size: size, URL: u})
 	}

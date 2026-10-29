@@ -434,7 +434,9 @@ func (s *Service) UploadFile(ctx context.Context, projectID uuid.UUID, bucket, p
 	defer tmp.close()
 	if q := sc.svc.StorageQuotaBytes; q != nil {
 		var used int64
-		if err := sc.conn.QueryRow(ctx, `SELECT coalesce((SELECT bytes FROM xb_storage.usage), 0)`).Scan(&used); err != nil {
+		// Large uploads in progress hold what they declared (as at the edge).
+		if err := sc.conn.QueryRow(ctx, `SELECT coalesce((SELECT bytes FROM xb_storage.usage), 0)
+			+ coalesce((SELECT sum(size) FROM xb_storage.uploads WHERE expires_at > now()), 0)::bigint`).Scan(&used); err != nil {
 			return nil, err
 		}
 		if used+n > *q {

@@ -10,3 +10,11 @@ func (e *Edge) LoadForStorageTest(ps ...edgeapi.Project) {
 	e.ready = true
 	e.mu.Unlock()
 }
+
+// SetMaxOpenUploads changes the cap on a project's open multipart uploads;
+// restore puts it back.
+func SetMaxOpenUploads(n int) (restore func()) {
+	old := maxOpenUploads
+	maxOpenUploads = n
+	return func() { maxOpenUploads = old }
+}

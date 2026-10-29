@@ -345,6 +345,15 @@ bundle share one version (spec §11.5).
   new `xb_storage.upload_tokens`, project schema version 8), the URL
   uploads once (only an upload that commits uses it up, on any edge), and
   it lasts 2 hours at most, as documented.
+- **A large upload's parts were neither bounded nor counted.** A part's
+  presigned URL signed no length, so each took up to the store's part limit
+  (5 GiB) whatever the upload declared, and uploads in progress were not in
+  the quota check: a 50 MB upload could hold about 20 GB for a day, and
+  uploads started together each passed against the same total. Each part's
+  URL now signs its exact length, uploads in progress hold their declared
+  size against the quota (direct and dashboard uploads count them too, and
+  starting one takes its turn on the project's usage row), and a project
+  may have 100 open at once (`429 too_many_uploads`).
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
