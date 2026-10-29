@@ -174,6 +174,8 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 
 		KindApplySettings: {Handler: s.runApplySettings, MaxAttempts: 5},
 		KindDropDBUser:    {Handler: s.runDropDBUser, MaxAttempts: 10},
+		// Backoff doubles from 2 s to 5 min: about 40 minutes of retries.
+		KindDropProjectObjects: {Handler: s.runDropProjectObjects, MaxAttempts: 15},
 	}
 	for k, v := range s.opaqueKinds() {
 		kinds[k] = v

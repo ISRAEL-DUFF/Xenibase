@@ -261,6 +261,10 @@ func run() error {
 		// Postgres minor releases, one instance at a time in the weekly
 		// maintenance window (V3 §2.4).
 		go func() { defer bg.Done(); backups.Dedicated.RunMaintenance(bgCtx, 5*time.Minute) }()
+		// Databases and roles of deleted shared projects that a failed
+		// rollback left behind.
+		bg.Add(1)
+		go func() { defer bg.Done(); projects.RunOrphanSweep(bgCtx, time.Hour) }()
 		// Logins dedicated owners create with role management on (V4.2).
 		bg.Add(1)
 		go func() { defer bg.Done(); backups.Dedicated.RunOwnedRoles(bgCtx, 30*time.Second) }()

@@ -27,6 +27,12 @@ type StepLogger struct {
 	slog    *slog.Logger
 }
 
+// NewStepLogger returns the step logger of op's current attempt as worker,
+// for running a handler outside a Runner (tests, tools).
+func NewStepLogger(db store.DBTX, op store.Operation, worker string, log *slog.Logger) *StepLogger {
+	return &StepLogger{q: store.New(db), id: op.ID, worker: worker, attempt: op.Attempts, slog: log}
+}
+
 // Info appends an info entry.
 func (l *StepLogger) Info(ctx context.Context, step, format string, args ...any) error {
 	return l.write(ctx, LevelInfo, step, fmt.Sprintf(format, args...))
