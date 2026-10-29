@@ -177,6 +177,12 @@ a test that failed before.
   loopback, the poolers' addresses and `XENIBASE_WAKER_ALLOW`. The edge
   wakes a paused project only for a request with one of its live API keys
   (`project_paused` otherwise).
+- **Allowlists cover the poolers only** (low, documented). Instances accept
+  SCRAM logins from `XENIBASE_AGENT_DB_ALLOW`, which defaults to every
+  private range for an agent installed by hand (the bundle and machines
+  Xenibase creates set narrower ones). The agent can't tell which private
+  addresses are the platform's, so it now warns at start when the default
+  is in use, and `docs/network-access.md` says what to set.
 
 ## V3 review of payments and billing (M27)
 

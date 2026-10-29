@@ -224,6 +224,12 @@ func serve(o *opts) error {
 	if err != nil {
 		return err
 	}
+	if o.dbAllow == defaultDBAllow && o.poolerDir == "" {
+		// The agent can't tell which private addresses are the platform's.
+		log.Warn("XENIBASE_AGENT_DB_ALLOW is not set: new instances accept SCRAM logins from every private range, "+
+			"past projects' IP allowlists; set it to the networks of xenibase-server, the poolers and the other nodes "+
+			"(docs/network-access.md)", "db_allow", o.dbAllow)
+	}
 	svc := agentsvc.New(agentsvc.Config{
 		Version: version.Get().Version, NodeID: st.NodeID, PGBinDir: o.pgBin, DiskPath: o.diskPath,
 		Instances: agentsvc.InstanceConfig{Docker: o.dockerHost, Image: o.image, Network: o.network, PublishAddr: o.publish, HBAAllow: cidrs, MoveAllow: moveCIDRs, EtcdImage: o.etcdImage},

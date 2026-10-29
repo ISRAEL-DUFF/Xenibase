@@ -60,6 +60,29 @@ Supabase migration refuses a source on loopback, on the nodes' and instances'
 addresses or on the platform's networks, even one the platform admin
 allow-listed ([outbound traffic](operations.md#outbound-traffic)).
 
+### Behind the poolers
+
+The list is enforced by the poolers only. The project's instance (a shared
+cluster or a dedicated instance) accepts SCRAM logins from the networks its
+node allows, and anything there that has the password is not subject to the
+list: another node, a dedicated project's `postgres_fdw` or `dblink`, a
+compromised machine on the private network. Keep those networks as narrow
+as the platform allows:
+
+- **The install bundle**: the shared cluster's `pg_hba.conf` names the fixed
+  addresses of xenibase-server, the agent and the two poolers, and the
+  agent's instances `XENIBASE_AGENT_DB_ALLOW` (the same four addresses).
+- **Machines Xenibase creates** set `XENIBASE_AGENT_DB_ALLOW` to the cloud
+  private network (`XENIBASE_CLOUD_PRIVATE_CIDR`, default `10.0.0.0/16`).
+- **An agent you install yourself** defaults to every private range
+  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and loopback, and logs a
+  warning at start. Set `XENIBASE_AGENT_DB_ALLOW` to the networks (or
+  addresses) of xenibase-server, the poolers or pooler hosts, and the other
+  nodes. It applies to instances created afterwards: their `pg_hba.conf` is
+  written once, at initdb. Moves have their own rule
+  (`XENIBASE_AGENT_MOVE_ALLOW`, for the moves' temporary logins only), so
+  narrowing this one doesn't stop them; backups run on the node itself.
+
 The poolers see the address a connection comes from. If clients reach them
 through a NAT gateway, list the gateway's public address; from a Kubernetes
 cluster or a serverless platform, list its egress addresses.
