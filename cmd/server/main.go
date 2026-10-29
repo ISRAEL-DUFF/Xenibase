@@ -527,6 +527,7 @@ func run() error {
 		consoleSvc = console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
 		alertSvc = alerts.New(pool, keyring, alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
+			PoolerSkipped: pm.Skipped,
 		}, log)
 		bg.Add(1)
 		go func() { defer bg.Done(); alertSvc.Run(bgCtx) }()

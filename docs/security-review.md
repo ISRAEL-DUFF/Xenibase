@@ -192,6 +192,13 @@ a test that failed before.
   Xenibase creates set narrower ones). The agent can't tell which private
   addresses are the platform's, so it now warns at start when the default
   is in use, and `docs/network-access.md` says what to set.
+- **One bad route stopped pooler changes everywhere** (low). `Render`
+  refused the whole configuration over one invalid row, and `CreateNode`
+  accepted addresses (`pg_shared`) it refuses. Node addresses are now
+  checked with the renderer's pattern when they are recorded, and a pooler
+  sync leaves an invalid route, login or allowlist out (an allowlist with
+  its project's routes, so nothing opens up) and raises
+  `pooler_config_skipped`, instead of failing every region.
 
 ## V3 review of payments and billing (M27)
 

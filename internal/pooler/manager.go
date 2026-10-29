@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,19 @@ type Manager struct {
 	// adminNets may reach the admin consoles (hba.conf); nil means
 	// DefaultAdminNetworks.
 	adminNets []string
+
+	// skipped is what the last Sync left out as invalid.
+	skippedMu sync.Mutex
+	skipped   []string
+}
+
+// Skipped is what the last Sync left out of the pooler configuration as
+// invalid (a route, user or allowlist), with why: those projects or logins
+// can't connect until the row is fixed. The alerts report it.
+func (m *Manager) Skipped() []string {
+	m.skippedMu.Lock()
+	defer m.skippedMu.Unlock()
+	return append([]string(nil), m.skipped...)
 }
 
 // SetAdminNetworks sets the networks the poolers' admin consoles accept
@@ -455,12 +469,24 @@ func (m *Manager) Sync(ctx context.Context) error {
 		})
 	}
 
+	var skipped []string
+	defer func() {
+		sort.Strings(skipped)
+		m.skippedMu.Lock()
+		m.skipped = skipped
+		m.skippedMu.Unlock()
+	}()
 	for region, cfg := range cfgs {
 		dir := m.RegionDir(region)
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("pooler sync: %w", err)
 		}
 		cfg.AdminNetworks = m.adminNets
+		// One bad row must not stop every region's changes: leave it out.
+		for _, err := range cfg.DropInvalid() {
+			m.log.Error("pooler sync: left out of the configuration", "region", region, "err", err)
+			skipped = append(skipped, region+": "+err.Error())
+		}
 		databases, userlist, hba, err := Render(*cfg)
 		if err != nil {
 			return err

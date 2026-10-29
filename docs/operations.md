@@ -306,6 +306,18 @@ token, so the token rules above apply to it; users disconnect an app under
 - Add nodes on the Nodes page; new shared projects go to the least loaded
   shared cluster, dedicated instances to the least loaded dedicated node.
 
+## Pooler configuration
+
+xenibase-server writes the poolers' routes, logins and `hba.conf` from the
+metadata database on every change. An entry PgBouncer can't be given safely
+(a node address with an underscore, a malformed name) is left out rather
+than escaped, with an error in the log and the `pooler_config_skipped`
+alert naming it; everything else is still written. That project (or login)
+can't connect through the poolers until the row is fixed. A project whose
+allowlist couldn't be written loses its routes too, so it is never opened
+to everyone by mistake. Node addresses are checked when a node is added:
+a host name of letters, digits, dots and dashes, or an IP address.
+
 ## Outbound traffic
 
 Webhooks and HTTP jobs are the only way tenants make Xenibase send requests

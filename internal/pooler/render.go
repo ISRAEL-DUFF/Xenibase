@@ -95,6 +95,87 @@ var (
 	hostRe  = regexp.MustCompile(`^[A-Za-z0-9.\-:\[\]]{1,253}$`)
 )
 
+// ValidHost reports whether h may be a backend host in a route: a host
+// name or an IP address (in brackets for IPv6), nothing PgBouncer would
+// read as another setting. Node addresses are checked with it when they
+// are recorded, so a route can't be refused later.
+func ValidHost(h string) bool { return hostRe.MatchString(h) }
+
+// DropInvalid removes what Render would refuse, so one bad row in the
+// metadata DB leaves the rest of the platform's pooler configuration
+// working, and returns why each was dropped. It skips, never escapes: a
+// route with a bad name or host is left out (its project can't connect
+// until it is fixed); a bad user is left out (that login can't log in); a
+// bad allowlist takes its projects' routes out with it, so a project is
+// never opened up by a list that couldn't be written. Later duplicates of
+// a route or user are dropped too.
+func (c *Config) DropInvalid() []error {
+	var errs []error
+	closed := map[string]bool{}
+	var rs []Restriction
+	for _, r := range c.Restrictions {
+		if _, err := renderHBA([]Restriction{r}, DefaultAdminNetworks); err != nil {
+			errs = append(errs, err)
+			for _, d := range r.Databases {
+				closed[d] = true
+			}
+			continue
+		}
+		rs = append(rs, r)
+	}
+	c.Restrictions = rs
+	var routes []Route
+	seen := map[string]bool{}
+	for _, r := range c.Routes {
+		backend := r.BackendDB
+		if backend == "" {
+			backend = r.Database
+		}
+		var err error
+		switch {
+		case !identRe.MatchString(r.Database):
+			err = fmt.Errorf("pooler: invalid database name %q", r.Database)
+		case !identRe.MatchString(backend):
+			err = fmt.Errorf("pooler: invalid backend database %q for %q", backend, r.Database)
+		case !hostRe.MatchString(r.Host) || r.Port < 1 || r.Port > 65535:
+			err = fmt.Errorf("pooler: invalid backend address %q:%d for %q", r.Host, r.Port, r.Database)
+		case closed[r.Database]:
+			err = fmt.Errorf("pooler: route %q left out with its invalid allowlist", r.Database)
+		case seen[r.Database]:
+			err = fmt.Errorf("pooler: duplicate route for %q", r.Database)
+		}
+		for _, h := range r.MoreHosts {
+			if err == nil && !hostRe.MatchString(h) {
+				err = fmt.Errorf("pooler: invalid backend host %q for %q", h, r.Database)
+			}
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		seen[r.Database] = true
+		routes = append(routes, r)
+	}
+	c.Routes = routes
+	var users []User
+	seenUser := map[string]bool{}
+	for _, u := range c.Users {
+		switch {
+		case !identRe.MatchString(u.Name):
+			errs = append(errs, fmt.Errorf("pooler: invalid user name %q", u.Name))
+		case seenUser[u.Name]:
+			errs = append(errs, fmt.Errorf("pooler: duplicate user %q", u.Name))
+		case !strings.HasPrefix(u.Secret, "SCRAM-SHA-256$") || strings.ContainsAny(u.Secret, "\"\n\r "):
+			errs = append(errs, fmt.Errorf("pooler: user %q: secret must be a SCRAM-SHA-256 verifier", u.Name))
+		default:
+			seenUser[u.Name] = true
+			users = append(users, u)
+		}
+	}
+	c.Users = users
+	return errs
+}
+
 // Render returns the contents of databases.ini and userlist.txt. Entries
 // are sorted so unchanged inputs produce byte-identical files. Names and
 // hosts are validated rather than escaped: anything unexpected is a bug

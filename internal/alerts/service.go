@@ -40,7 +40,10 @@ const (
 	// A pooler ignores hba.conf (auth_type is not hba): IP allowlists are
 	// stored but not enforced.
 	KindPoolerAllowlistOff = "pooler_allowlist_off"
-	KindIsolationCheck     = "isolation_check_failed"
+	// The last pooler sync left a row out as invalid (a bad node address,
+	// say): those projects can't connect through the poolers.
+	KindPoolerSkipped  = "pooler_config_skipped"
+	KindIsolationCheck = "isolation_check_failed"
 	// Capacity automation (V3 §5.2): a proposal waits for approval, or a
 	// provisioning failed in the last day.
 	// HA members, etcd members or pooler hosts share a failure domain (V3.1 §2.4).
@@ -72,6 +75,8 @@ type Config struct {
 	// WakerAddr returns the waker's address as the poolers reach it ("" when
 	// there is none); checked for "waker down" with the poolers' grace.
 	WakerAddr func() string
+	// PoolerSkipped returns what the last pooler sync left out as invalid.
+	PoolerSkipped func() []string
 }
 
 // Service evaluates conditions and delivers notifications.
@@ -315,6 +320,7 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 
 	out = append(out, s.poolerConditions(ctx)...)
 	out = append(out, s.wakerConditions(ctx)...)
+	out = append(out, skippedConditions(s.cfg.PoolerSkipped)...)
 	hostConds, err := s.poolerHostConditions(ctx)
 	if err != nil {
 		errs = append(errs, err)
@@ -370,6 +376,23 @@ func (s *Service) poolerConditions(ctx context.Context) []condition {
 		}
 	}
 	return out
+}
+
+// skippedConditions reports rows the last pooler sync left out as invalid:
+// the rest of the configuration was applied, but those routes or logins
+// don't work until the row is fixed.
+func skippedConditions(skipped func() []string) []condition {
+	if skipped == nil {
+		return nil
+	}
+	list := skipped()
+	if len(list) == 0 {
+		return nil
+	}
+	return []condition{{KindPoolerSkipped, SeverityCritical, "pooler", "config", "pooler configuration",
+		fmt.Sprintf("The pooler configuration left out %d invalid entr%s, so those projects or logins can't connect through the poolers: %s. Fix the row (often a node's private address) and the next sync includes it.",
+			len(list), map[bool]string{true: "y", false: "ies"}[len(list) == 1], strings.Join(list, "; ")),
+		map[string]any{"skipped": list}}}
 }
 
 // wakerConditions reports a waker that hasn't accepted connections for the

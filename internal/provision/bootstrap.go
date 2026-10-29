@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/crypto"
+	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/store"
 )
 
@@ -72,6 +73,9 @@ func RegisterSharedCluster(ctx context.Context, db *pgxpool.Pool, keyring *crypt
 		return err
 	}
 
+	if !pooler.ValidHost(c.PoolerHost) {
+		return fmt.Errorf("XENIBASE_SHARED_POOLER_HOST %q: the poolers route to it, so it must be a host name (letters, digits, dots and dashes) or an IP address", c.PoolerHost)
+	}
 	q := store.New(db)
 	node, err := q.UpsertNode(ctx, store.UpsertNodeParams{
 		Name: c.NodeName, PrivateAddr: c.PoolerHost, Role: c.NodeRole,
