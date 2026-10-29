@@ -103,7 +103,7 @@ func (s *Service) runPause(ctx context.Context, op store.Operation, log *jobs.St
 		Title:     fmt.Sprintf("%s is paused", p.Name),
 		Blocks: []mail.Block{
 			mail.P("Hello,"),
-			mail.P(fmt.Sprintf("%s had no client connections for %d days, so we've paused it. Its data is kept safe.", p.Name, days(s.cfg.PauseAfter))),
+			mail.P(fmt.Sprintf("%s had no client connections for %d days, so we've paused it. Its data is kept safe.", mail.Inert(p.Name), days(s.cfg.PauseAfter))),
 			mail.P("It wakes up by itself the next time a client connects. The first connection is refused with a message, and a retry after about 30 seconds works. Or you can resume it now:"),
 			mail.Button("Resume the project", s.projectLink(p)),
 			mail.P(fmt.Sprintf("A Free project that stays paused for %d days is archived. Paid plans are never paused.", days(s.cfg.ArchiveAfter))),
@@ -235,7 +235,7 @@ func (s *Service) runArchive(ctx context.Context, op store.Operation, log *jobs.
 		Title:     fmt.Sprintf("%s is archived", p.Name),
 		Blocks: []mail.Block{
 			mail.P("Hello,"),
-			mail.P(fmt.Sprintf("%s was paused for %d days, so we've archived it. Its data is in a verified backup and its database is removed. Its connection string and credentials are kept.", p.Name, days(s.cfg.ArchiveAfter))),
+			mail.P(fmt.Sprintf("%s was paused for %d days, so we've archived it. Its data is in a verified backup and its database is removed. Its connection string and credentials are kept.", mail.Inert(p.Name), days(s.cfg.ArchiveAfter))),
 			mail.P("The next connection restores it from the archive, which takes minutes rather than seconds. Or you can restore it now:"),
 			mail.Button("Restore the project", s.projectLink(p)),
 			mail.P(fmt.Sprintf("An archived Free project is deleted after %d days. We'll tell you %d and %d days before.", days(s.cfg.DeleteAfter), s.cfg.NoticeDays[0], s.cfg.NoticeDays[len(s.cfg.NoticeDays)-1])),
@@ -298,7 +298,7 @@ func (s *Service) runUnarchive(ctx context.Context, op store.Operation, log *job
 		Title:     fmt.Sprintf("%s is back", p.Name),
 		Blocks: []mail.Block{
 			mail.P("Hello,"),
-			mail.P(fmt.Sprintf("%s is restored from its archive and accepts connections again.", p.Name)),
+			mail.P(fmt.Sprintf("%s is restored from its archive and accepts connections again.", mail.Inert(p.Name))),
 			mail.Button("Open the project", s.projectLink(p)),
 		},
 		SignOff: mail.SignOff,

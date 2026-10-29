@@ -123,8 +123,11 @@ Signup can be open (Admin → Settings → Signup), protected by:
   (default 50); past either, inviting answers `429 rate_limited` with
   `Retry-After`. 0 turns a cap off. Organisation and inviter names in the
   email are never links.
-- What V2 already required: a verified email address, TOTP for every
-  account, and one personal (Free) organisation per user.
+- A verified email address before sign-in. Two-factor sign-in is required
+  only for platform admins and support staff; other accounts may turn it
+  on. Each user has one personal organisation, but nothing yet stops a user
+  creating further organisations, each with the Personal (Free) plan's
+  limits.
 
 ## Pricing
 

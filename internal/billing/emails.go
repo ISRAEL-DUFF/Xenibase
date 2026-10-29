@@ -20,7 +20,7 @@ func (s *Service) billingURL(orgID uuid.UUID) string {
 }
 
 func billingNote(org string) string {
-	return "You're getting this because you're a billing contact for " + org + "."
+	return "You're getting this because you're a billing contact for " + mail.Inert(org) + "."
 }
 
 // notifyContent emails an organisation's billing contacts a message written as
