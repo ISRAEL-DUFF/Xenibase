@@ -318,3 +318,124 @@ func slowAttempt(t *testing.T, gross int64) {
 	}
 	mustCheck(t, w.db)
 }
+
+// failVerify makes the stub's first n verifications fail as an outage.
+func (s *stubWallet) failVerify(n int) {
+	var mu sync.Mutex
+	left := n
+	s.set(func(s *stubWallet) {
+		s.verify = func(ref string) (billing.Transaction, error) {
+			mu.Lock()
+			fail := left > 0
+			if fail {
+				left--
+			}
+			mu.Unlock()
+			if fail {
+				return billing.Transaction{}, fmt.Errorf("%w: verify timed out", billing.ErrUnavailable)
+			}
+			return s.WalletProvider.Verify(context.Background(), ref)
+		}
+	})
+}
+
+func (w *walletWorld) depositBooked(t *testing.T, org uuid.UUID, wid string, want int64) {
+	t.Helper()
+	if got := w.held(t, org, billing.AccWalletBalance); got != want || got != w.fake.WalletBalance(wid) {
+		t.Fatalf("books %d, provider %d, want %d", got, w.fake.WalletBalance(wid), want)
+	}
+	var n int
+	if err := w.db.QueryRow(context.Background(), `SELECT count(*) FROM payments WHERE org_id = $1 AND channel = 'transfer'`, org).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("%d deposits recorded", n)
+	}
+	mustCheck(t, w.db)
+}
+
+// A deposit event whose verification fails is processed again when the
+// provider sends it again, until it posts; then it is a duplicate.
+func TestFailedDepositEventIsProcessedOnRetry(t *testing.T) {
+	w := newWalletWorld(t)
+	ctx := context.Background()
+	org, wid := w.walletOrg(t, "evretry", 0, false)
+	va, err := w.s.EnsureTransferAccount(ctx, org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.stub().failVerify(2)
+	if _, _, _, err := w.fake.Deposit(va.AccountNumber, 10_000_00); err != nil {
+		t.Fatal(err)
+	}
+	if e := w.event(t); !strings.HasPrefix(e, "transfer.received failed") {
+		t.Fatalf("first delivery: %s", e)
+	}
+	w.fake.RedeliverLast()
+	if e := w.event(t); !strings.HasPrefix(e, "transfer.received failed") {
+		t.Fatalf("second delivery: %s", e)
+	}
+	w.fake.RedeliverLast()
+	if e := w.event(t); e != "transfer.received posted" {
+		t.Fatalf("third delivery: %s", e)
+	}
+	w.fake.RedeliverLast()
+	if e := w.event(t); e != "transfer.received duplicate" {
+		t.Fatalf("fourth delivery: %s", e)
+	}
+	w.depositBooked(t, org, wid, 9_860_00)
+}
+
+// A deposit whose webhook was lost, and whose verification fails on the
+// first re-query and the next, is posted by the one after.
+func TestFailedDepositEventIsProcessedOnRequery(t *testing.T) {
+	w := newWalletWorld(t)
+	ctx := context.Background()
+	org, wid := w.walletOrg(t, "evrequery", 0, false)
+	va, err := w.s.EnsureTransferAccount(ctx, org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.stub().failVerify(2)
+	w.fake.DropWebhooks(1)
+	if _, _, _, err := w.fake.Deposit(va.AccountNumber, 10_000_00); err != nil {
+		t.Fatal(err)
+	}
+	from, to := w.clk.Now().Add(-24*time.Hour), w.clk.Now().Add(time.Hour)
+	for i := 0; i < 2; i++ {
+		if n, err := w.s.Requery(ctx, from, to); err == nil || n != 0 {
+			t.Fatalf("re-query %d: posted %d, %v", i+1, n, err)
+		}
+	}
+	if n, err := w.s.Requery(ctx, from, to); err != nil || n != 1 {
+		t.Fatalf("third re-query: posted %d, %v", n, err)
+	}
+	if n, err := w.s.Requery(ctx, from, to); err != nil || n != 0 {
+		t.Fatalf("fourth re-query: posted %d, %v", n, err)
+	}
+	w.depositBooked(t, org, wid, 9_860_00)
+}
+
+// A failed event is processed again by the re-query even when its
+// transaction is outside the window listed (the provider has given up).
+func TestFailedDepositEventIsSwept(t *testing.T) {
+	w := newWalletWorld(t)
+	ctx := context.Background()
+	org, wid := w.walletOrg(t, "evsweep", 0, false)
+	va, err := w.s.EnsureTransferAccount(ctx, org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.stub().failVerify(1)
+	if _, _, _, err := w.fake.Deposit(va.AccountNumber, 10_000_00); err != nil {
+		t.Fatal(err)
+	}
+	if e := w.event(t); !strings.HasPrefix(e, "transfer.received failed") {
+		t.Fatalf("delivery: %s", e)
+	}
+	from, to := w.clk.Now().Add(-48*time.Hour), w.clk.Now().Add(-47*time.Hour)
+	if n, err := w.s.Requery(ctx, from, to); err != nil || n != 1 {
+		t.Fatalf("re-query: posted %d, %v", n, err)
+	}
+	w.depositBooked(t, org, wid, 9_860_00)
+}

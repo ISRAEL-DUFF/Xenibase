@@ -231,7 +231,11 @@ corrected with a credit note, which becomes credit toward the next invoice.
    signature (HMAC-SHA256 over the timestamp and the raw body, within five
    minutes) before parsing anything.
 2. Xenibase stores the event once. A repeated event, or the same deposit
-   delivered twice, is acknowledged and ignored.
+   delivered twice, is acknowledged and ignored, unless processing it
+   failed (the provider couldn't be asked, the database refused): then
+   Xenibase answers `500` so the provider sends it again, and processes it
+   again when it does. Nothing is booked twice: a deposit is recorded once
+   per transaction, with its ledger posting.
 3. Xenibase never trusts the webhook body. It reads the transaction back
    from the wallet and posts only what the provider confirms: the amount
    credited to the wallet, net of the collection fee.
@@ -243,7 +247,10 @@ corrected with a credit note, which becomes credit toward the next invoice.
 
 Missed webhooks are not lost. Every hour Xenibase lists the last two hours
 of transactions at the provider, and every night the previous day, and
-records anything it hasn't seen.
+records anything it hasn't seen. Each hourly run also processes again every
+event of the last 30 days that failed (or whose processing was cut off),
+whether or not the provider still retries it; Admin → Billing → Events
+shows what is still `failed`.
 
 ## Withholding tax
 

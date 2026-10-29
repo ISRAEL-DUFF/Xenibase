@@ -682,6 +682,18 @@ bundle share one version (spec §11.5).
   issues earlier months' unheld drafts too: hold any you mean to issue by
   hand first. The status page's "Last month's invoices are late" now counts
   earlier months as well. See `docs/billing.md`.
+- **A deposit whose processing failed is processed again.** A payment
+  event that failed (the provider's verify call timed out, the database
+  refused) was answered 500 so the provider would retry, but the event was
+  already stored, so the retry was answered as a duplicate; the hourly
+  re-query had one try of its own, then skipped it too. A deposit could
+  stay unbooked, with the books short of the wallet. A stored event that
+  failed, or whose processing was cut off, is now processed again when the
+  provider redelivers it, when a re-query lists it, and by every hourly
+  re-query for 30 days; a deposit is still booked only once. A deposit the
+  provider reports as still pending is retried rather than rejected, and
+  an event that couldn't be stored at all is answered 500 rather than 200.
+  Migration 00091 adds `attempts` and `claimed_at` to `payment_events`.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its

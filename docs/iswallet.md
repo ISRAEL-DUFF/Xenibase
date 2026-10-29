@@ -66,7 +66,10 @@ Webhooks come from a subscription Xenibase makes
 - **Delivery.** Ten attempts over eight to eleven hours, then the event is
   parked. Duplicates are possible and order is not guaranteed, so Xenibase
   dedupes on `data.txn_id` and treats the balance as authoritative. A missed
-  event is recovered by the hourly re-query. The envelope's fields are under
+  event is recovered by the hourly re-query. An event Xenibase failed to
+  process is answered `500` and processed again when it is redelivered (a
+  duplicate is acknowledged only once it was processed), and by the hourly
+  re-query for 30 days. The envelope's fields are under
   `data`.
 - **Deposits are net.** A deposit arrives net of the provider's collection
   fee (1.4%, at most ₦2,000), and `data.amount_credited` is what the wallet
