@@ -463,39 +463,40 @@ type IncidentUpdate struct {
 }
 
 type Instance struct {
-	ID                 uuid.UUID
-	NodeID             uuid.UUID
-	Kind               string
-	PgVersion          int32
-	Port               int32
-	ContainerID        *string
-	CpuLimit           pgtype.Numeric
-	MemLimitMb         *int32
-	VolumeGb           *int32
-	Status             string
-	CreatedAt          time.Time
-	AdminHost          *string
-	AdminPort          *int32
-	Host               *string
-	AdminSecret        []byte
-	Profile            *string
-	WalgPrefix         *string
-	Error              *string
-	DeletedAt          *time.Time
-	OrgID              *uuid.UUID
-	WalgTargetID       *uuid.UUID
-	WalgKeyID          *uuid.UUID
-	PgRelease          *string
-	PgReleaseAvailable *string
-	ReleaseCheckedAt   *time.Time
-	HaEnabled          bool
-	SyncReplication    bool
-	Patroni            bool
-	LeaderMember       *uuid.UUID
-	PatroniSecret      []byte
-	EtcdRegion         *string
-	PitrDays           int32
-	MaxConnections     int32
+	ID                  uuid.UUID
+	NodeID              uuid.UUID
+	Kind                string
+	PgVersion           int32
+	Port                int32
+	ContainerID         *string
+	CpuLimit            pgtype.Numeric
+	MemLimitMb          *int32
+	VolumeGb            *int32
+	Status              string
+	CreatedAt           time.Time
+	AdminHost           *string
+	AdminPort           *int32
+	Host                *string
+	AdminSecret         []byte
+	Profile             *string
+	WalgPrefix          *string
+	Error               *string
+	DeletedAt           *time.Time
+	OrgID               *uuid.UUID
+	WalgTargetID        *uuid.UUID
+	WalgKeyID           *uuid.UUID
+	PgRelease           *string
+	PgReleaseAvailable  *string
+	ReleaseCheckedAt    *time.Time
+	HaEnabled           bool
+	SyncReplication     bool
+	Patroni             bool
+	LeaderMember        *uuid.UUID
+	PatroniSecret       []byte
+	EtcdRegion          *string
+	PitrDays            int32
+	MaxConnections      int32
+	SwitchoverStartedAt *time.Time
 }
 
 type InstanceMember struct {
@@ -986,6 +987,7 @@ type Project struct {
 	IntegratorRoles     []string
 	ManageRoles         bool
 	AllowedCidrs        []string
+	BranchCopyFiles     bool
 }
 
 type ProjectApiKey struct {

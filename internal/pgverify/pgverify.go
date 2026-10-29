@@ -19,15 +19,18 @@ type TableCount struct {
 	Rows  int64
 }
 
-// TableCounts counts the rows of every user table on conn, by name.
-func TableCounts(ctx context.Context, conn *pgx.Conn) ([]TableCount, error) {
+// TableCounts counts the rows of every user table on conn in schemas (nil:
+// every schema), by name. Only those tables are read: a source login may
+// read the schemas it exports and nothing else.
+func TableCounts(ctx context.Context, conn *pgx.Conn, schemas []string) ([]TableCount, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT n.nspname, c.relname FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE c.relkind IN ('r', 'p')
 		  AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+		  AND ($1::text[] IS NULL OR n.nspname = ANY($1))
 		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
-		ORDER BY 1, 2`)
+		ORDER BY 1, 2`, schemas)
 	if err != nil {
 		return nil, err
 	}
@@ -136,11 +139,11 @@ func Compare(ctx context.Context, src, dst *pgx.Conn, schemas []string) (Result,
 	for _, s := range schemas {
 		in[s] = true
 	}
-	sc, err := TableCounts(ctx, src)
+	sc, err := TableCounts(ctx, src, schemas)
 	if err != nil {
 		return r, fmt.Errorf("source: %w", err)
 	}
-	dc, err := TableCounts(ctx, dst)
+	dc, err := TableCounts(ctx, dst, schemas)
 	if err != nil {
 		return r, fmt.Errorf("target: %w", err)
 	}

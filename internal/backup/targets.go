@@ -286,6 +286,8 @@ Restore with standard tools (no Xenibase needed)
      export GNUPGHOME=$(mktemp -d)
      gpg --batch --import this-file.asc
      gpg --batch --decrypt backup.dump.gpg > backup.dump
+   gpg checks the backup's integrity at its end: if it reports an error,
+   backup.dump is incomplete; don't restore it.
 3. Restore into any PostgreSQL 18 database:
      createdb restored
      pg_restore --no-owner --no-acl -d restored backup.dump

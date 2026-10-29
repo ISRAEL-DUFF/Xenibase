@@ -14,6 +14,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/agentca"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/dedicated"
+	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/nodes"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/storage"
@@ -90,7 +91,7 @@ func (e *env) instance(t *testing.T, node store.Node, kind, age string) store.In
 
 // project adds a project on inst; deleted soft-deletes it, as a rolled-back
 // create does.
-func (e *env) project(t *testing.T, inst store.Instance, name string, deleted bool) {
+func (e *env) project(t *testing.T, inst store.Instance, name string, deleted bool) store.Project {
 	t.Helper()
 	ctx := context.Background()
 	var org uuid.UUID
@@ -111,6 +112,7 @@ func (e *env) project(t *testing.T, inst store.Instance, name string, deleted bo
 			t.Fatal(err)
 		}
 	}
+	return p
 }
 
 func TestValidateRefusesAnUnreachableNode(t *testing.T) {
@@ -156,7 +158,7 @@ func TestListOrphanedInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := store.New(e.db).ListOrphanedInstances(context.Background())
+	got, err := store.New(e.db).ListOrphanedInstances(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +168,63 @@ func TestListOrphanedInstances(t *testing.T) {
 	}
 	if len(got) != 3 || !ids[orphan.ID] || !ids[failed.ID] || !ids[stuck.ID] {
 		t.Fatalf("orphans = %d instances, want exactly the unreferenced dedicated one, the rolled-back one, and the stuck shared cluster", len(got))
+	}
+}
+
+// A move, promotion or major upgrade inserts its target when it is queued;
+// the project points at it only from the cutover. The reaper must leave it
+// alone while the operation is queued or running, and take it once the
+// operation has failed (its rollback could not remove it).
+func TestListOrphanedInstancesSkipsAnOperationsTarget(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	n := e.node(t, "node2", "healthy")
+	source := e.instance(t, n, "dedicated", "1 day")
+	e.project(t, source, "moving", false)
+
+	op := func(status string) store.Instance {
+		target := e.instance(t, n, "dedicated", "10 minutes")
+		if _, err := e.db.Exec(ctx, `INSERT INTO operations (kind, status, params) VALUES ('logical_move', $1, jsonb_build_object('target_instance', $2::text, 'source_instance', $3::text))`,
+			status, target.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+		return target
+	}
+	queued, running, failed := op("queued"), op("running"), op("failed")
+	scratch := e.instance(t, n, "dedicated", "10 minutes") // an upgrade preflight still testing the schema
+	oldScratch := e.instance(t, n, "dedicated", "2 hours") // one whose removal failed
+	if _, err := e.db.Exec(ctx, `UPDATE instances SET profile = 'scratch' WHERE id = ANY($1)`, []uuid.UUID{scratch.ID, oldScratch.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.New(e.db).ListOrphanedInstances(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[uuid.UUID]bool{}
+	for _, i := range got {
+		ids[i.ID] = true
+	}
+	if ids[queued.ID] || ids[running.ID] {
+		t.Fatal("the target of a queued or running move is listed as an orphan")
+	}
+	if ids[scratch.ID] {
+		t.Fatal("a preflight's scratch instance is listed while the preflight may still use it")
+	}
+	if !ids[failed.ID] || !ids[oldScratch.ID] || len(got) != 2 {
+		t.Fatalf("orphans = %d instances, want the failed move's target and the hour-old scratch instance", len(got))
+	}
+
+	// The check again for one instance, as the reaper makes it before
+	// destroying: a target taken up since the list was made is not listed.
+	if _, err := e.db.Exec(ctx, `UPDATE operations SET status = 'running' WHERE params->>'target_instance' = $1`, failed.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := store.New(e.db).ListOrphanedInstances(ctx, &failed.ID); err != nil || len(again) != 0 {
+		t.Fatalf("the check again lists a running operation's target (%d rows, err %v)", len(again), err)
+	}
+	if again, err := store.New(e.db).ListOrphanedInstances(ctx, &oldScratch.ID); err != nil || len(again) != 1 {
+		t.Fatalf("the check again for an orphan = %d rows, err %v; want it", len(again), err)
 	}
 }
 
@@ -223,5 +282,22 @@ func TestRollbackSharedClusterKeepsTheRecordWhenTheNodeIsUnreachable(t *testing.
 	if got.DeletedAt != nil || got.Status != "error" || got.Error == nil || *got.Error == "" {
 		t.Fatalf("instance after a failed rollback = status %q, deleted %v, error %v; want it kept as \"error\" with the reason",
 			got.Status, got.DeletedAt != nil, got.Error)
+	}
+}
+
+// A retry must not start a new container under an instance the reaper (or a
+// rollback) already removed: the project would run on a row every
+// deleted_at IS NULL query ignores.
+func TestEnsureRefusesARemovedInstance(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	inst := e.instance(t, e.node(t, "node2", "healthy"), "dedicated", "10 minutes")
+	p := e.project(t, inst, "moved", false)
+	if err := store.New(e.db).MarkInstanceDeleted(ctx, inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	err := e.svc.Ensure(ctx, store.Operation{}, p, nil)
+	if err == nil || !jobs.IsPermanent(err) || !strings.Contains(err.Error(), "was removed") {
+		t.Fatalf("Ensure on a removed instance = %v, want a permanent error", err)
 	}
 }

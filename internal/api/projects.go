@@ -179,7 +179,7 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, _ gen.Projec
 	if i, ok := s.instanceSummaries(r.Context())[p.InstanceID]; ok {
 		gp.Instance = &i
 	}
-	if n, err := store.New(s.db).CountLiveBranches(r.Context(), &p.ID); err == nil && n > 0 {
+	if n, err := store.New(s.db).CountLiveBranches(r.Context(), store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err == nil && n > 0 {
 		bn := int(n)
 		gp.BranchCount = &bn
 	}

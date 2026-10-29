@@ -10,6 +10,7 @@ const kindLabel: Record<string, string> = {
   backup_failed: "Backup failed",
   backup_overdue: "Backup overdue",
   restore_test_failed: "Restore test failed",
+  wal_archive: "WAL archiving",
   node_disk: "Node disk",
   node_unreachable: "Node unreachable",
   project_disk: "Project disk",
@@ -19,11 +20,13 @@ const kindLabel: Record<string, string> = {
   pooler_allowlist_off: "Pooler ignores IP allowlists",
   pooler_config_skipped: "Pooler configuration entry left out",
   waker_down: "Waker down",
+  project_stuck: "Project left frozen by a failed move",
   failure_domain: "Shared failure domain",
   isolation_check_failed: "Isolation check",
   capacity_proposal: "Capacity proposal",
   capacity_failed: "Provisioning failed",
   agent_client_cert: "Agent client certificate",
+  minor_upgrade_failed: "Minor upgrade failed",
 };
 
 function TargetLink({ a }: { a: AlertItem }) {

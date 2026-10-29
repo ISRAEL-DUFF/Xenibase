@@ -60,9 +60,28 @@ const (
 	nodeUnreachableAfter   = 2 * time.Minute
 	projectSizeFreshWithin = 30 * time.Minute
 	clientCertWarnWithin   = 3 * 24 * time.Hour
+	// walArchiveWindow is how far back failed archiving attempts count;
+	// walArchiveStale how long a completed WAL segment may wait (with
+	// archive_timeout at 60 s, a healthy archive waits seconds).
+	walArchiveWindow = 15 * time.Minute
+	walArchiveStale  = 15 * time.Minute
 	// xenibase-server's client certificate for agents is close to expiry:
 	// renewing it keeps failing.
 	KindAgentClientCert = "agent_client_cert"
+	// A Postgres minor upgrade of an instance failed (V3 §2.4): the sweep
+	// leaves the instance on its release until a newer one or Run now.
+	KindMinorUpgradeFailed = "minor_upgrade_failed"
+	// A dedicated project's WAL archiving fails or is behind (spec §6.4's
+	// "WAL archive lag").
+	KindWALArchive = "wal_archive"
+)
+
+// KindProjectStuck: a move, promotion, demotion or major upgrade failed and
+// its rollback still cannot unfreeze the project (its instance does not
+// answer), 10 minutes on.
+const (
+	KindProjectStuck  = "project_stuck"
+	projectStuckAfter = 10 * time.Minute
 )
 
 // Config configures the service.
@@ -246,6 +265,17 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		}
 	}
 
+	minors, err := q.FailedMinorUpgrades(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, m := range minors {
+		what := m.Kind + " instance on " + m.NodeName
+		out = append(out, condition{KindMinorUpgradeFailed, SeverityCritical, "instance", m.InstanceID.String(), what,
+			fmt.Sprintf("Minor upgrade of the %s from %s to %s failed: %s", what, m.FromRelease, m.ToRelease, m.Error),
+			map[string]any{"minor_upgrade_id": m.ID, "to_release": m.ToRelease, "error": m.Error}})
+	}
+
 	overdue, err := q.OverdueBackups(ctx, backupOverdueAfter.Seconds())
 	if err != nil {
 		errs = append(errs, err)
@@ -258,6 +288,21 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		out = append(out, condition{KindBackupOverdue, SeverityWarning, "project", p.ID.String(), p.Name,
 			fmt.Sprintf("No backup of %s in 26 hours (%s)", p.Name, since), map[string]any{"last_backup_at": p.LastBackupAt}})
 	}
+
+	stuck, err := q.ListStuckProjects(ctx, projectStuckAfter.Seconds())
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, p := range stuck {
+		out = append(out, condition{KindProjectStuck, SeverityCritical, "project", p.ID.String(), p.Name,
+			fmt.Sprintf("%s is still %s after its operation failed: the rollback cannot give its logins back until its instance answers", p.Name, p.Status),
+			map[string]any{"status": p.Status}})
+	}
+	archives, err := q.WALArchiveSamples(ctx, time.Now().Add(-walArchiveWindow))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	out = append(out, walArchiveConditions(archives)...)
 
 	unreachable, err := q.UnreachableNodes(ctx, nodeUnreachableAfter.Seconds())
 	if err != nil {
@@ -349,6 +394,32 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// walArchiveConditions reports dedicated projects whose WAL archiving
+// failed within the window (pg_stat_archiver's failed attempts went up) or
+// is behind: a completed segment has waited longer than walArchiveStale.
+// Either way recovery past the gap is impossible, and WAL piles up in
+// pg_wal until the volume fills, while base backups may still succeed.
+func walArchiveConditions(rows []store.WALArchiveSamplesRow) []condition {
+	var out []condition
+	for _, r := range rows {
+		failing := r.FailedFirst >= 0 && r.FailedLast > r.FailedFirst
+		stale := r.PendingAgeS > walArchiveStale.Seconds()
+		if !failing && !stale {
+			continue
+		}
+		detail := map[string]any{"failed_attempts": r.FailedLast - r.FailedFirst, "segments_waiting": r.Pending, "oldest_waiting_s": r.PendingAgeS}
+		var summary string
+		switch {
+		case stale:
+			summary = fmt.Sprintf("WAL archiving of %s is %s behind (%.0f segment(s) waiting)", r.Name, (time.Duration(r.PendingAgeS) * time.Second).Round(time.Minute), r.Pending)
+		default:
+			summary = fmt.Sprintf("WAL archiving of %s is failing (%.0f failed attempt(s) in %s)", r.Name, r.FailedLast-r.FailedFirst, walArchiveWindow)
+		}
+		out = append(out, condition{KindWALArchive, SeverityCritical, "project", r.ID.String(), r.Name, summary, detail})
+	}
+	return out
 }
 
 // poolerConditions reports poolers whose admin console has not answered

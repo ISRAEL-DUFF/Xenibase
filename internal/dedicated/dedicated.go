@@ -152,11 +152,12 @@ func ProfileByName(name string) (provision.Profile, bool) {
 }
 
 // settings is postgresql.conf for a profile (spec §4.2: its own tuning)
-// with maxConnections connections.
-func settings(p provision.Profile, maxConnections int) map[string]string {
+// with maxConnections connections, on a volume of volumeGB.
+func settings(p provision.Profile, maxConnections, volumeGB int) map[string]string {
 	mb := func(n int) string { return strconv.Itoa(n) + "MB" }
 	return map[string]string{
 		"max_connections":            strconv.Itoa(maxConnections),
+		"max_slot_wal_keep_size":     slotWALCap(volumeGB),
 		"shared_buffers":             mb(p.MemoryMB / 4),
 		"effective_cache_size":       mb(p.MemoryMB * 3 / 4),
 		"maintenance_work_mem":       mb(min(max(p.MemoryMB/16, 64), 2048)),
@@ -169,14 +170,34 @@ func settings(p provision.Profile, maxConnections int) map[string]string {
 	}
 }
 
+// slotWALCap is the most WAL a replication slot may hold back on a volume
+// of volumeGB: a quarter of it, at least 1 GB. A slot whose consumer has
+// gone (a move's that its cleanup missed, a standby that never returns)
+// is invalidated at that point instead of filling the disk; a standby
+// further behind than that has to be rebuilt.
+func slotWALCap(volumeGB int) string {
+	return strconv.Itoa(max(volumeGB/4, 1)*1024) + "MB"
+}
+
 // Validate implements provision.InstanceManager.
 func (s *Service) Validate(ctx context.Context, p *provision.CreateParams) (provision.Profile, error) {
-	if p.Profile == "" {
-		p.Profile = DefaultProfile
-	}
-	prof, ok := ProfileByName(p.Profile)
-	if !ok {
-		return prof, fmt.Errorf("%w: unknown profile %q", provision.ErrInvalid, p.Profile)
+	var prof provision.Profile
+	if p.Size != nil {
+		// A size given outright (a resized source's), named as the
+		// instance row will be.
+		if p.Size.CPUs <= 0 || p.Size.MemoryMB <= 0 {
+			return prof, fmt.Errorf("%w: an instance needs CPUs and memory", provision.ErrInvalid)
+		}
+		prof = provision.Profile{Name: profileName(Size{CPUs: p.Size.CPUs, MemoryMB: p.Size.MemoryMB}), CPUs: p.Size.CPUs, MemoryMB: p.Size.MemoryMB}
+		p.Profile = prof.Name
+	} else {
+		if p.Profile == "" {
+			p.Profile = DefaultProfile
+		}
+		var ok bool
+		if prof, ok = ProfileByName(p.Profile); !ok {
+			return prof, fmt.Errorf("%w: unknown profile %q", provision.ErrInvalid, p.Profile)
+		}
 	}
 	if p.VolumeGB == 0 {
 		p.VolumeGB = DefaultVolumeGB
@@ -312,16 +333,24 @@ func (s *Service) walgForBackup(ctx context.Context, b store.Backup, inst store.
 }
 
 // placeArchive records, for an instance that has never run, the target and
-// key its project's backups use now.
+// key its project's backups use now. It goes by the region of the
+// instance's node: a region move's target runs before the cutover moves
+// the project's region, and its archive belongs where it will serve.
 func (s *Service) placeArchive(ctx context.Context, inst store.Instance, p store.Project) (store.Instance, error) {
 	if inst.WalgTargetID != nil || inst.WalgPrefix == nil {
 		return inst, nil
 	}
+	q := store.New(s.db)
+	n, err := q.GetNode(ctx, inst.NodeID)
+	if err != nil {
+		return inst, err
+	}
+	// A data-residency project never leaves its region (checkMoveRegion).
+	p.Region = n.Region
 	targetID, keyID, err := s.secrets.ProjectWALG(ctx, p)
 	if err != nil {
 		return inst, jobs.Permanent(err)
 	}
-	q := store.New(s.db)
 	if err := q.SetInstanceWALG(ctx, store.SetInstanceWALGParams{ID: inst.ID, WalgPrefix: inst.WalgPrefix, WalgTargetID: &targetID, WalgKeyID: keyID}); err != nil {
 		return inst, err
 	}
@@ -358,6 +387,11 @@ func (s *Service) Ensure(ctx context.Context, op store.Operation, p store.Projec
 	inst, err := q.GetInstance(ctx, p.InstanceID)
 	if err != nil {
 		return err
+	}
+	if inst.DeletedAt != nil {
+		// Never a new container under a removed instance's row: every
+		// query that skips deleted instances would lose sight of it.
+		return jobs.Permanent(fmt.Errorf("instance %s was removed", inst.ID))
 	}
 	pitr, err := opPITR(op)
 	if err != nil {
@@ -485,7 +519,7 @@ func (s *Service) instanceSpec(ctx context.Context, inst store.Instance) (agenta
 	prof := profileOf(inst)
 	return agentapi.InstanceSpec{
 		ID: inst.ID.String(), Kind: agentapi.InstanceDedicated, CPUs: prof.CPUs, MemoryMB: prof.MemoryMB,
-		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, int(inst.MaxConnections)), WALG: &w,
+		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, int(inst.MaxConnections), SizeOf(inst).DiskGB), WALG: &w,
 		PGVersion: int(inst.PgVersion),
 	}, nil
 }
@@ -507,7 +541,9 @@ func (s *Service) recordRunning(ctx context.Context, inst store.Instance, agent 
 // Recreate replaces an instance's container with one from the node's
 // current image, on the same volume (spec §11.3: Postgres minor upgrades
 // by restarting from the UI), then updates the pooler route if its
-// address changed.
+// address changed. When the new container fails the agent starts the old
+// one again; its address is then recorded the same way, and the error
+// says if the instance is down.
 func (s *Service) Recreate(ctx context.Context, inst store.Instance) (agentapi.Instance, error) {
 	spec, err := s.instanceSpec(ctx, inst)
 	if err != nil {
@@ -520,6 +556,17 @@ func (s *Service) Recreate(ctx context.Context, inst store.Instance) (agentapi.I
 	}
 	res, err := agent.CreateInstance(ctx, spec)
 	if err != nil {
+		cur, ierr := agent.Instance(context.WithoutCancel(ctx), agentKey(inst))
+		switch {
+		case ierr != nil:
+			return res, fmt.Errorf("%w; the instance's state is unknown: %w", err, ierr)
+		case !cur.Running:
+			return res, fmt.Errorf("%w; the instance is down (container %s)", err, cur.State)
+		}
+		if rerr := s.recordRunning(context.WithoutCancel(ctx), inst, agent, cur); rerr == nil &&
+			(inst.Host == nil || *inst.Host != cur.Host || int(inst.Port) != cur.Port) {
+			_ = s.projects.SyncPooler(context.WithoutCancel(ctx), nil, "pooler", "instance address changed")
+		}
 		return res, err
 	}
 	if err := s.recordRunning(ctx, inst, agent, res); err != nil {
@@ -748,20 +795,41 @@ func (s *Service) BaseBackup(ctx context.Context, p store.Project, opID *uuid.UU
 		return store.Backup{}, err
 	}
 	// Retention happened in WAL-G; forget backups it no longer lists.
-	if list, err := agent.BaseBackups(ctx, agentKey(inst)); err == nil {
-		keep := map[string]bool{}
-		for _, l := range list {
-			keep[l.Name] = true
-		}
-		rows, _ := q.ListBaseBackups(ctx, store.ListBaseBackupsParams{ProjectID: &p.ID, WalgPrefix: inst.WalgPrefix})
-		for _, r := range rows {
-			if !keep[r.ObjectKey] {
-				_ = q.MarkBackupDeleted(ctx, r.ID)
-			}
-		}
+	list, err := agent.BaseBackups(ctx, agentKey(inst))
+	if err != nil {
+		_ = log.Warn(ctx, "backup", "could not list the archive's base backups, so none is forgotten: %v", err)
+	} else if err := s.forgetUnlisted(ctx, p, inst, b.Name, list, log); err != nil {
+		_ = log.Warn(ctx, "backup", "could not forget the base backups WAL-G deleted: %v", err)
 	}
 	return row, log.Info(ctx, "backup", "base backup %s: %s compressed (%s of data) in %s", b.Name,
 		human(b.CompressedSize), human(b.UncompressedSize), (time.Duration(res.DurationMS) * time.Millisecond).Round(time.Millisecond))
+}
+
+// forgetUnlisted marks deleted the project's base backups under the
+// instance's archive that WAL-G's listing no longer has. A listing without
+// taken, the backup just made, is incomplete (an older agent that read a
+// failed listing as empty, or a store that lists late) and forgets nothing.
+func (s *Service) forgetUnlisted(ctx context.Context, p store.Project, inst store.Instance, taken string, list []agentapi.WALGBackup, log *jobs.StepLogger) error {
+	keep := map[string]bool{}
+	for _, l := range list {
+		keep[l.Name] = true
+	}
+	if !keep[taken] {
+		return log.Warn(ctx, "backup", "the archive's listing lacks %s, so no base backup is forgotten", taken)
+	}
+	q := store.New(s.db)
+	rows, err := q.ListBaseBackups(ctx, store.ListBaseBackupsParams{ProjectID: &p.ID, WalgPrefix: inst.WalgPrefix})
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if !keep[r.ObjectKey] {
+			if err := q.MarkBackupDeleted(ctx, r.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func human(n int64) string {
@@ -848,13 +916,15 @@ func (s *Service) removeInstance(ctx context.Context, inst store.Instance) (node
 }
 
 // ReapOrphans removes instances left by a failed create whose rollback could
-// not reach the node: dedicated instances no live project uses, and shared
-// clusters marked "error" (spec §6.1: a failed create leaves nothing
-// behind). An instance whose node is
-// not healthy is left for a later pass. It returns how many were removed.
+// not reach the node: dedicated instances no live project uses and no
+// queued or running operation names as its target, and shared clusters
+// marked "error" (spec §6.1: a failed create leaves nothing behind). An
+// instance whose node is not healthy is left for a later pass. Each one is
+// checked again just before it is destroyed, since the list can be minutes
+// old by then. It returns how many were removed.
 func (s *Service) ReapOrphans(ctx context.Context) (int, error) {
 	q := store.New(s.db)
-	orphans, err := q.ListOrphanedInstances(ctx)
+	orphans, err := q.ListOrphanedInstances(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -866,6 +936,11 @@ func (s *Service) ReapOrphans(ctx context.Context) (int, error) {
 		}
 		if n.Status != "healthy" {
 			continue
+		}
+		if still, err := q.ListOrphanedInstances(ctx, &inst.ID); err != nil {
+			return removed, err
+		} else if len(still) == 0 {
+			continue // taken up since the list was made
 		}
 		node, archived, err := s.removeInstance(ctx, inst)
 		if err != nil {
@@ -881,7 +956,8 @@ func (s *Service) ReapOrphans(ctx context.Context) (int, error) {
 	return removed, nil
 }
 
-// RunReaper calls ReapOrphans every interval until ctx ends.
+// RunReaper calls ReapOrphans and RepairStuckMoves (what failed rollbacks
+// left) every interval until ctx ends.
 func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -893,6 +969,9 @@ func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 		}
 		if _, err := s.ReapOrphans(ctx); err != nil && ctx.Err() == nil {
 			s.log.Warn("orphaned instance cleanup failed", "err", err)
+		}
+		if _, err := s.RepairStuckMoves(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("repairing frozen projects failed", "err", err)
 		}
 	}
 }

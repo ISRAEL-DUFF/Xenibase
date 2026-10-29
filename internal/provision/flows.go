@@ -437,11 +437,32 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 	if err := s.DropAutomation(ctx, p); err != nil {
 		return err
 	}
-	if err := store.New(s.db).SoftDeleteProject(ctx, store.SoftDeleteProjectParams{ID: p.ID, Status: StatusDeleted}); err != nil {
+	var expiring int64
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		if err := q.SoftDeleteProject(ctx, store.SoftDeleteProjectParams{ID: p.ID, Status: StatusDeleted}); err != nil {
+			return err
+		}
+		// Only the final backup outlives the project (V2 §10.10): its
+		// nightly and archive backups expire with it, and the hourly expiry
+		// deletes them.
+		expiring, err = q.ExpireDeletedProjectBackups(ctx, store.ExpireDeletedProjectBackupsParams{ProjectID: p.ID, ExpiresAt: time.Now().Add(DeletedBackupsKept)})
 		return err
+	})
+	if err != nil {
+		return err
+	}
+	if expiring > 0 {
+		if err := log.Info(ctx, "backup", "%d earlier backup(s) expire with the final backup", expiring); err != nil {
+			return err
+		}
 	}
 	return log.Info(ctx, "done", "project %s deleted", p.DbName)
 }
+
+// DeletedBackupsKept is how long a deleted project's backups on platform
+// storage are kept when it has no final backup to expire with (V2 §10.10).
+const DeletedBackupsKept = 30 * 24 * time.Hour
 
 // databaseGone reports whether p's database no longer exists: a dedicated
 // project's instance is deleted, or a shared project's database is not on

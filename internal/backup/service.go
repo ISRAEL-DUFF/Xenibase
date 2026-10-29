@@ -93,13 +93,12 @@ func (c *Config) setDefaults() {
 
 // Service is the backup service.
 type Service struct {
-	db        *pgxpool.Pool
-	keyring   *crypto.Keyring
-	nodes     *nodes.Service
-	projects  *provision.Service
-	cfg       Config
-	log       *slog.Logger
-	ephemeral *Ephemeral
+	db       *pgxpool.Pool
+	keyring  *crypto.Keyring
+	nodes    *nodes.Service
+	projects *provision.Service
+	cfg      Config
+	log      *slog.Logger
 	// Dedicated runs base backups and point-in-time recovery; nil without
 	// the dedicated tier.
 	Dedicated *dedicated.Service
@@ -112,7 +111,7 @@ type Service struct {
 // NewService returns a Service and hooks final backups into deletes.
 func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps *provision.Service, cfg Config, log *slog.Logger) *Service {
 	cfg.setDefaults()
-	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log, ephemeral: NewEphemeral(),
+	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log,
 		CheckSource: outbound.New(db, outbound.Config{Blocked: cfg.SourceBlock, Internal: cfg.SourceInternal}, log).CheckSource}
 	ps.FinalBackup = s.finalBackup
 	return s
@@ -123,7 +122,7 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
 		KindBackup:         {Handler: s.runBackup, MaxAttempts: 3, Timeout: 6 * time.Hour},
 		KindRestore:        {Handler: s.runRestore, OnFail: s.failRestore, MaxAttempts: 2, Timeout: 6 * time.Hour},
-		KindRestoreTest:    {Handler: s.runRestoreTest, MaxAttempts: 1, Timeout: 6 * time.Hour},
+		KindRestoreTest:    {Handler: s.runRestoreTest, OnFail: s.failRestoreTest, MaxAttempts: 1, Timeout: 6 * time.Hour},
 		KindMetadataBackup: {Handler: s.runMetadataBackup, MaxAttempts: 3, Timeout: time.Hour},
 		KindImport:         {Handler: s.runImport, OnFail: s.projects.Rollback, MaxAttempts: 1, Timeout: 12 * time.Hour},
 		KindBaseBackup:     {Handler: s.runBaseBackup, MaxAttempts: 3, Timeout: 12 * time.Hour},
@@ -531,10 +530,27 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 		}
 		last, err := q.LastOperationOfKind(ctx, KindRestoreTest)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && now.Sub(last.CreatedAt) >= 7*24*time.Hour) {
-			if _, err := q.RandomProjectWithBackup(ctx); err == nil {
-				// Alternate between primary and copy targets (V3 §2.5).
-				// The first test (no last operation) reads a copy if any.
-				next := RestoreTestParams{FromCopy: !restoreTestParams(last).FromCopy}
+			// Alternate between a point-in-time recovery and a logical
+			// backup, and the logical turns between primary and copy
+			// targets (V3 §2.5). The first test (no last operation) reads a
+			// copy if any.
+			var prev *RestoreTestParams
+			if err == nil {
+				p := restoreTestParams(last)
+				prev = &p
+			}
+			next := nextRestoreTest(prev)
+			_, logicalErr := q.RandomProjectWithBackup(ctx)
+			pitrErr := pgx.ErrNoRows
+			if s.Dedicated != nil {
+				_, pitrErr = q.RandomProjectWithBaseBackup(ctx)
+			}
+			if next.PITR && pitrErr != nil {
+				next = nextRestoreTest(&next)
+			} else if !next.PITR && logicalErr != nil && pitrErr == nil {
+				next = RestoreTestParams{PITR: true, FromCopy: next.FromCopy}
+			}
+			if logicalErr == nil || pitrErr == nil {
 				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next, Background: true}); err != nil {
 					return err
 				}

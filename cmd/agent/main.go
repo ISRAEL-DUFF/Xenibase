@@ -5,7 +5,7 @@
 //
 //	xenibase-agent register --server https://xenibase.example.com --token <one-time>
 //	xenibase-agent run
-//	xenibase-agent decrypt --key-file xenibase-backup-key.txt < x.dump.enc > x.dump
+//	xenibase-agent decrypt --key-file xenibase-backup-key.txt --in x.dump.enc --out x.dump
 //
 // Environment variables mirror the flags (XENIBASE_AGENT_*).
 package main
@@ -36,9 +36,11 @@ import (
 )
 
 // DefaultPGImage is the instance image this release was built and tested
-// with (deploy/images/postgres).
-// DefaultPGImage is the instance image, {major} replaced by each
-// instance's Postgres major (V3 §2.4).
+// with (deploy/images/postgres), {major} replaced by each instance's
+// Postgres major (V3 §2.4). build.sh builds each major from the minor
+// release the Dockerfile pins, and tags it with the release too
+// (xenibase-postgres:18.6-walg3.0.9), so pointing XENIBASE_AGENT_PG_IMAGE
+// at a release tag holds instances on it.
 const DefaultPGImage = "xenibase-postgres:{major}-walg3.0.9"
 
 func main() {
@@ -380,12 +382,14 @@ func keepalivedConfig(args []string) error {
 
 // decrypt turns a backup object back into a pg_dump archive with the
 // downloaded backup key, without xenibase-server: the disaster-recovery path
-// for metadata self-backups (docs/disaster-recovery.md).
+// for metadata self-backups (docs/disaster-recovery.md). With --out, a
+// wrong key or a damaged object leaves no file; on stdout, what was
+// written before the failure stays, and only the exit status says so.
 func decrypt(args []string) error {
 	fs := flag.NewFlagSet("decrypt", flag.ContinueOnError)
 	keyFile := fs.String("key-file", "", "the backup key file downloaded from Xenibase")
 	in := fs.String("in", "-", "encrypted object (- for stdin)")
-	out := fs.String("out", "-", "pg_dump archive to write (- for stdout)")
+	out := fs.String("out", "-", "pg_dump archive to write, only if it decrypts whole (- for stdout, which keeps a partial archive on failure)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

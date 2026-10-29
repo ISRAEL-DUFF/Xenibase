@@ -11,8 +11,9 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Alert | Severity | Fires when |
   | --- | --- | --- |
   | Backup failed | critical | A project's (or the metadata database's) latest backup failed |
-  | Backup overdue | warning | A project older than 26 h has no successful backup in 26 h |
+  | Backup overdue | warning | A project older than 26 h has no successful backup in 26 h (paused and archived projects, branches without backups and suspended organisations, which the nightly schedule skips, are left out) |
   | Restore test failed | critical | The latest weekly restore test failed |
+  | WAL archiving | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
   | Node disk | warning | A node's data disk is over 85% full |
   | Node unreachable | critical | A node's agent has not answered for 2+ minutes |
   | Project disk | warning | A project is larger than its disk warning (Project Settings → Database) |
@@ -37,10 +38,18 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   add-on).
 - Retention: 7 daily backups and 4 weekly ones, or longer as an add-on
   (extended: 30 daily, 12 weekly; long: 30 daily, 52 weekly); final
-  backups of deleted projects are kept 30 days. See
+  backups of deleted projects are kept 30 days, and a deleted project's
+  earlier backups on platform targets go with its final backup (those in
+  an organisation's own bucket are left alone). See
   [billing add-ons](billing.md#add-ons).
 - Weekly, a random project's latest backup is restored into a scratch
-  database and verified (Settings → Backup checks).
+  database and verified (Settings → Backup checks). Every other week a
+  random dedicated project is instead recovered from its base backup and
+  WAL to the present, into a scratch instance on its node (the smallest
+  size, no project, nothing archived), every table is read, and the
+  instance is removed; the node needs twice the instance's data free.
+  `POST /api/v1/restore-tests?project_id=<id>` runs one now; for a
+  dedicated project it tests the point-in-time recovery.
 - The metadata database backs itself up nightly to `<prefix>/metadata/`.
 - Restores: a project's Backups tab → **Restore**, into a new project or in
   place (in place takes a safety backup first and needs re-authentication).
@@ -58,14 +67,17 @@ use them, the storage doesn't count against its quota, and neither other
 organisations nor you see them (the admin organisation list only counts
 the projects using one). Adding or editing a target writes, reads, lists
 and deletes a test object under its prefix first; credentials are sealed
-with the master key and never shown again.
+with the master key and never shown again. Two targets can't share an
+endpoint, bucket and prefix (give each its own prefix): a copy between
+them would be the original, and deleting the original would delete both.
 
 A project admin picks the target under **Backups → Storage**. New backups
 go there; existing ones stay where they are and stay restorable, or can
 be copied over (verified by checksum, originals deleted only if asked).
 For a dedicated project the switch restarts the instance with WAL-G
 pointed at the new target and takes a base backup at once; the previous
-archive stays restorable for the 7-day recovery window, then goes.
+archive stays restorable for the project's recovery window (7 days, or the
+14 or 30 it pays for), then goes.
 
 **Use a project key** gives a project its own backup key: new backups are
 OpenPGP messages to it, and on the dedicated tier WAL-G uses it too.

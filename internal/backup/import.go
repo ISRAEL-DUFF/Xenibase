@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -33,9 +34,6 @@ var SupabaseManagedSchemas = []string{
 
 // SupabaseRoles are the roles Supabase grants and policies refer to.
 var SupabaseRoles = []string{"anon", "authenticated", "service_role"}
-
-// sourceTTL bounds how long a source connection string stays in memory.
-const sourceTTL = 12 * time.Hour
 
 // Preflight is what an import would copy (spec §6.8 step 2).
 type Preflight struct {
@@ -320,17 +318,32 @@ func (s *Service) Import(ctx context.Context, p ImportParams) (provision.Created
 		AuthShim: pf.Supabase && !slices.Contains(schemas, "auth"),
 		RoleRefs: pf.Supabase || len(pf.RoleReferences) > 0,
 	}
-	s.ephemeral.Put(ref, strings.TrimSpace(p.SourceURL), sourceTTL)
-	created, err := s.projects.Create(ctx, provision.CreateParams{
-		OrgID: p.OrgID, CreatorRole: p.CreatorRole,
-		Name: p.Name, Description: p.Description, CreatedBy: p.CreatedBy, Kind: KindImport,
-		Params: map[string]any{"import": params},
-	})
+	sealed, err := SealOpSecret(s.keyring, importSourcePurpose, ref, []byte(strings.TrimSpace(p.SourceURL)))
 	if err != nil {
-		s.ephemeral.Delete(ref)
 		return provision.Created{}, err
 	}
-	return created, nil
+	return s.projects.Create(ctx, provision.CreateParams{
+		OrgID: p.OrgID, CreatorRole: p.CreatorRole,
+		Name: p.Name, Description: p.Description, CreatedBy: p.CreatedBy, Kind: KindImport,
+		Params: map[string]any{"import": params}, Secrets: map[string]string{"source_url": sealed},
+	})
+}
+
+// importSourcePurpose binds an import's sealed source URL to its use.
+const importSourcePurpose = "import_source"
+
+// importSource opens the source URL an import's operation carries.
+func (s *Service) importSource(op store.Operation, ref uuid.UUID) (string, error) {
+	var p struct {
+		Secrets struct {
+			SourceURL string `json:"source_url"`
+		} `json:"secrets"`
+	}
+	if err := json.Unmarshal(op.Params, &p); err != nil {
+		return "", err
+	}
+	url, err := OpenOpSecret(s.keyring, importSourcePurpose, ref, p.Secrets.SourceURL)
+	return string(url), err
 }
 
 // runImport copies the source into the new project (spec §6.8 steps 3-5).
@@ -342,11 +355,10 @@ func (s *Service) runImport(ctx context.Context, op store.Operation, log *jobs.S
 		return err
 	}
 	params := wrapper.Import
-	sourceURL, ok := s.ephemeral.Get(params.SourceRef)
-	if !ok {
-		return jobs.Permanent(errors.New("the source connection string is no longer in memory (xenibase-server restarted?); start the import again"))
+	sourceURL, err := s.importSource(op, params.SourceRef)
+	if err != nil {
+		return jobs.Permanent(fmt.Errorf("the source connection string: %w; start the import again", err))
 	}
-	defer s.ephemeral.Delete(params.SourceRef)
 	p, err := s.projects.ProjectFor(ctx, op)
 	if err != nil {
 		return err
@@ -573,11 +585,12 @@ func (s *Service) verifyImport(ctx context.Context, sourceURL string, guard pgso
 		schema, _, _ := strings.Cut(table, ".")
 		return slices.Contains(schemas, schema)
 	}
-	srcCounts, err := tableCounts(ctx, src)
+	// Only the chosen schemas: the source login may read nothing else.
+	srcCounts, err := tableCounts(ctx, src, schemas)
 	if err != nil {
 		return jobs.Permanent(fmt.Errorf("count source rows: %w", redactErr(err, srcPG.Password)))
 	}
-	dstCounts, err := tableCounts(ctx, dst)
+	dstCounts, err := tableCounts(ctx, dst, schemas)
 	if err != nil {
 		return fmt.Errorf("count target rows: %w", err)
 	}

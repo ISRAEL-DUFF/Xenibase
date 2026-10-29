@@ -139,11 +139,18 @@ func TestMinorUpgradeInWindow(t *testing.T) {
 	time.Sleep(time.Second)
 	var kinds []string
 	for range 2 {
-		inst, err := e.Dedicated.MaintenanceSweep(ctx, time.Now())
-		if err != nil || inst == nil {
-			t.Fatalf("sweep %d: upgraded %v: %v", len(kinds)+1, inst != nil, err)
+		up, err := e.Dedicated.MaintenanceSweep(ctx, time.Now())
+		if err != nil || up == nil {
+			t.Fatalf("sweep %d: upgraded %v: %v", len(kinds)+1, up != nil, err)
 		}
-		kinds = append(kinds, inst.Kind)
+		// One at a time: nothing more is queued while it runs.
+		if more, err := e.Dedicated.MaintenanceSweep(ctx, time.Now()); err != nil || more != nil {
+			t.Fatalf("a sweep during an upgrade queued %v: %v", more != nil, err)
+		}
+		if op := e.WaitOperation(up.Operation.ID); op.Status != gen.OperationStatusSucceeded {
+			t.Fatalf("%s minor upgrade: %s\n%s", up.Instance.Kind, op.Status, testenv.FormatLog(op))
+		}
+		kinds = append(kinds, up.Instance.Kind)
 		time.Sleep(500 * time.Millisecond)
 	}
 	if inst, err := e.Dedicated.MaintenanceSweep(ctx, time.Now()); err != nil || inst != nil {

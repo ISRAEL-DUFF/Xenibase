@@ -242,6 +242,9 @@ type CreateParams struct {
 	// Publish. Params are merged into that operation's params.
 	Kind   string
 	Params map[string]any
+	// Secrets, already sealed, join the operation's params.secrets beside
+	// the password handoff, and are removed with it when the operation ends.
+	Secrets map[string]string
 	// Tier is TierShared (default) or TierDedicated. A dedicated project
 	// gets its own instance on NodeID (or the least loaded dedicated node)
 	// with Profile's limits and VolumeGB of disk.
@@ -249,6 +252,11 @@ type CreateParams struct {
 	NodeID   *uuid.UUID
 	Profile  string
 	VolumeGB int
+	// Size, for a dedicated project, gives its instance's CPUs and memory
+	// instead of naming a profile: a restore or detached replica takes its
+	// source's, which after a resize may match no profile. It overrides
+	// Profile.
+	Size *Profile
 	// InstanceID, for a dedicated project, is its instance's id (default:
 	// new): a detached read replica's instance keeps its member's id,
 	// which names its container and volume (V4 §7).
@@ -258,9 +266,12 @@ type CreateParams struct {
 	// WAL from a server that allowed more connections).
 	MinMaxConnections int
 	// PgVersion is the Postgres major (0: the default, the newest
-	// supported). Preview allows a major in preview (V4.1 §6.1).
+	// supported). Preview allows a major in preview (V4.1 §6.1); Derived,
+	// for a project made from another's data (a restore, a branch, a
+	// detached replica), allows any installed major.
 	PgVersion int
 	Preview   bool
+	Derived   bool
 	// Region is where the project runs (empty: the home region, or NodeID's
 	// region); DataResidency keeps its data in that region's country, which
 	// the region must offer (V3 §6.3). A branch takes its parent's.
@@ -280,6 +291,9 @@ type BranchSpec struct {
 	SchemaOnly bool
 	// ExpiresAt is when the hourly sweep deletes it; nil keeps it.
 	ExpiresAt *time.Time
+	// CopyFiles: the parent's stored files are copied in, after every reset
+	// too.
+	CopyFiles bool
 }
 
 // Tiers (spec §4).
@@ -398,7 +412,10 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		tier = TierShared
 	}
 	use := ForProject
-	if p.Preview {
+	switch {
+	case p.Derived:
+		use = ForDerived
+	case p.Preview:
 		use = ForPreviewProject
 	}
 	if p.PgVersion, err = s.CheckVersion(ctx, p.PgVersion, use); err != nil {
@@ -454,7 +471,11 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		for k, v := range p.Params {
 			params[k] = v
 		}
-		params["secrets"] = sec
+		secrets := map[string]any{"password": sec.Password}
+		for k, v := range p.Secrets {
+			secrets[k] = v
+		}
+		params["secrets"] = secrets
 
 		var out Created
 		err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
@@ -490,6 +511,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 				if err := q.SetProjectBranch(ctx, store.SetProjectBranchParams{
 					ID: proj.ID, ParentProjectID: &p.Branch.ParentID, BranchSource: &p.Branch.Source,
 					BranchSchemaOnly: &p.Branch.SchemaOnly, ExpiresAt: p.Branch.ExpiresAt, SensitiveData: p.Sensitive,
+					BranchCopyFiles: p.Branch.CopyFiles,
 				}); err != nil {
 					return err
 				}
@@ -570,13 +592,26 @@ func (s *Service) Rotate(ctx context.Context, projectID uuid.UUID, by *uuid.UUID
 // name, as typed by the operator. skipFinalBackup skips the final backup
 // (spec §6.2 step 2: on by default, can be skipped).
 func (s *Service) Delete(ctx context.Context, projectID uuid.UUID, confirmName string, skipFinalBackup bool, by *uuid.UUID) (store.Operation, error) {
+	return s.DeleteChecked(ctx, projectID, by, func(p store.Project) (bool, error) {
+		if confirmName != p.Name {
+			return false, fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
+		}
+		return skipFinalBackup, nil
+	})
+}
+
+// DeleteChecked is Delete with check run on the locked project first: it
+// refuses the delete, or says whether to skip the final backup, from the
+// row as it is now (the branch expiry sweep's list may be stale).
+func (s *Service) DeleteChecked(ctx context.Context, projectID uuid.UUID, by *uuid.UUID, check func(store.Project) (skipFinalBackup bool, err error)) (store.Operation, error) {
 	var out store.Operation
 	err := s.withIdleProject(ctx, projectID, []string{StatusActive, StatusError}, func(tx pgx.Tx, p store.Project) error {
-		if confirmName != p.Name {
-			return fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
+		skipFinalBackup, err := check(p)
+		if err != nil {
+			return err
 		}
 		// A parent goes only once its branches are deleted or detached (V2 §8.4).
-		if n, err := store.New(tx).CountLiveBranches(ctx, &p.ID); err != nil {
+		if n, err := store.New(tx).CountLiveBranches(ctx, store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err != nil {
 			return err
 		} else if n > 0 {
 			return fmt.Errorf("%w: the project has %d branch(es); delete or detach them first", ErrConflict, n)
@@ -675,6 +710,13 @@ func (s *Service) withIdleProject(ctx context.Context, id uuid.UUID, allowed []s
 		if busy {
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
+		// A shared cluster's minor upgrade is no one project's operation,
+		// but restarts every project on it.
+		if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil {
+			return err
+		} else if busy {
+			return fmt.Errorf("%w: a Postgres minor upgrade is restarting the project's instance; try again in a few minutes", ErrConflict)
+		}
 		if err := f(tx, p); errors.Is(err, jobs.ErrProjectBusy) {
 			return fmt.Errorf("%w: %w", ErrConflict, err)
 		} else if err != nil {
@@ -706,6 +748,9 @@ func EnqueueIfIdleTx(ctx context.Context, tx pgx.Tx, ep jobs.EnqueueParams) (boo
 	}
 	// A new statement: it sees what committed while we waited for the lock.
 	if busy, err := q.ProjectHasActiveOperation(ctx, &p.ID); err != nil || busy {
+		return false, err
+	}
+	if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil || busy {
 		return false, err
 	}
 	if _, err := jobs.Enqueue(ctx, tx, ep); err != nil {

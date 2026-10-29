@@ -13,7 +13,7 @@ import (
 )
 
 const archivedProjects = `-- name: ArchivedProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 WHERE p.deleted_at IS NULL AND p.lifecycle = 'archived'
 ORDER BY p.archived_at
 `
@@ -75,6 +75,7 @@ func (q *Queries) ArchivedProjects(ctx context.Context) ([]Project, error) {
 			&i.IntegratorRoles,
 			&i.ManageRoles,
 			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -105,7 +106,7 @@ func (q *Queries) CountSleepingProjects(ctx context.Context) (CountSleepingProje
 }
 
 const freeProjectsIdleSince = `-- name: FreeProjectsIdleSince :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 JOIN organizations o ON o.id = p.org_id
 LEFT JOIN quota_plans qp ON qp.id = o.plan_id
 LEFT JOIN billing_accounts b ON b.org_id = p.org_id
@@ -174,6 +175,7 @@ func (q *Queries) FreeProjectsIdleSince(ctx context.Context, idleBefore *time.Ti
 			&i.IntegratorRoles,
 			&i.ManageRoles,
 			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -186,7 +188,7 @@ func (q *Queries) FreeProjectsIdleSince(ctx context.Context, idleBefore *time.Ti
 }
 
 const freeProjectsPausedSince = `-- name: FreeProjectsPausedSince :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 JOIN organizations o ON o.id = p.org_id
 LEFT JOIN quota_plans qp ON qp.id = o.plan_id
 LEFT JOIN billing_accounts b ON b.org_id = p.org_id
@@ -253,6 +255,7 @@ func (q *Queries) FreeProjectsPausedSince(ctx context.Context, pausedBefore *tim
 			&i.IntegratorRoles,
 			&i.ManageRoles,
 			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -278,7 +281,7 @@ func (q *Queries) MarkPauseWarned(ctx context.Context, id uuid.UUID) (int64, err
 }
 
 const projectByDatabase = `-- name: ProjectByDatabase :one
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs FROM projects WHERE (db_name = $1 OR alias_db_name = $1) AND deleted_at IS NULL
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE (db_name = $1 OR alias_db_name = $1) AND deleted_at IS NULL
 ORDER BY created_at DESC LIMIT 1
 `
 
@@ -333,6 +336,7 @@ func (q *Queries) ProjectByDatabase(ctx context.Context, db string) (Project, er
 		&i.IntegratorRoles,
 		&i.ManageRoles,
 		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
@@ -358,7 +362,7 @@ func (q *Queries) SetArchiveNotice(ctx context.Context, arg SetArchiveNoticePara
 
 const setProjectArchived = `-- name: SetProjectArchived :one
 UPDATE projects SET lifecycle = 'archived', archived_at = now(), archive_backup_id = $1
-WHERE id = $2 AND lifecycle = 'paused' RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs
+WHERE id = $2 AND lifecycle = 'paused' RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files
 `
 
 type SetProjectArchivedParams struct {
@@ -417,6 +421,7 @@ func (q *Queries) SetProjectArchived(ctx context.Context, arg SetProjectArchived
 		&i.IntegratorRoles,
 		&i.ManageRoles,
 		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
@@ -424,7 +429,7 @@ func (q *Queries) SetProjectArchived(ctx context.Context, arg SetProjectArchived
 const setProjectAwake = `-- name: SetProjectAwake :one
 UPDATE projects SET lifecycle = 'active', paused_at = NULL, archived_at = NULL, pause_warned_at = NULL,
   archive_notice_days = NULL, last_active_at = now()
-WHERE id = $1 RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs
+WHERE id = $1 RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files
 `
 
 // tenant: system - a resume or unarchive operation on a project it already loaded.
@@ -478,12 +483,13 @@ func (q *Queries) SetProjectAwake(ctx context.Context, id uuid.UUID) (Project, e
 		&i.IntegratorRoles,
 		&i.ManageRoles,
 		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
 
 const setProjectPaused = `-- name: SetProjectPaused :one
-UPDATE projects SET lifecycle = 'paused', paused_at = now() WHERE id = $1 AND lifecycle = 'active' RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs
+UPDATE projects SET lifecycle = 'paused', paused_at = now() WHERE id = $1 AND lifecycle = 'active' RETURNING id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files
 `
 
 // tenant: system - a pause operation on a project it already loaded.
@@ -537,12 +543,13 @@ func (q *Queries) SetProjectPaused(ctx context.Context, id uuid.UUID) (Project, 
 		&i.IntegratorRoles,
 		&i.ManageRoles,
 		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
 
 const sleepingPaidProjects = `-- name: SleepingPaidProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 JOIN organizations o ON o.id = p.org_id
 LEFT JOIN quota_plans qp ON qp.id = o.plan_id
 JOIN billing_accounts b ON b.org_id = p.org_id
@@ -607,6 +614,7 @@ func (q *Queries) SleepingPaidProjects(ctx context.Context) ([]Project, error) {
 			&i.IntegratorRoles,
 			&i.ManageRoles,
 			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}

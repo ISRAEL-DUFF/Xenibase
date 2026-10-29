@@ -55,6 +55,14 @@ func profileName(sz Size) string {
 	return "custom"
 }
 
+// SizeProfile is inst's CPUs and memory as the explicit size of a new
+// instance (provision.CreateParams.Size): a restore or a detached replica
+// is the size of its source, a profile's or not.
+func SizeProfile(inst store.Instance) *provision.Profile {
+	sz := SizeOf(inst)
+	return &provision.Profile{Name: profileName(sz), CPUs: sz.CPUs, MemoryMB: sz.MemoryMB}
+}
+
 // ResizeParams asks for a new size; zero fields keep the current value.
 type ResizeParams struct {
 	ProjectID uuid.UUID

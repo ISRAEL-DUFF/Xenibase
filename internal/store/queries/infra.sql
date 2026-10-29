@@ -95,15 +95,23 @@ LIMIT 1;
 -- clusters whose failed creation could not be rolled back (status 'error',
 -- see rollbackSharedCluster). Both are what a rollback leaves when it could
 -- not reach the node. The grace period keeps it clear of instances a create
--- or restore is still setting up.
+-- or restore is still setting up. A move, promotion or major upgrade inserts
+-- its target when it is queued, and the project points at it only from the
+-- cutover, so a target named by a queued or running operation is never an
+-- orphan; nor is an upgrade preflight's scratch instance in its first hour
+-- (scratchTrial removes it itself). With id set it checks that one instance
+-- again, just before the reaper destroys it.
 -- name: ListOrphanedInstances :many
 -- tenant: system - platform infrastructure (nodes, instances, placement).
 SELECT i.* FROM instances i
 WHERE i.deleted_at IS NULL
+  AND (sqlc.narg(id)::uuid IS NULL OR i.id = sqlc.narg(id)::uuid)
   AND i.created_at < now() - interval '5 minutes'
   AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.deleted_at IS NULL)
   -- A demoted project's stopped instance, kept as a rollback option.
   AND NOT EXISTS (SELECT 1 FROM retired_databases r WHERE r.instance_id = i.id AND r.dropped_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.status IN ('queued', 'running') AND o.params->>'target_instance' = i.id::text)
+  AND NOT (i.profile IS NOT DISTINCT FROM 'scratch' AND i.created_at > now() - interval '1 hour')
   AND (i.kind = 'dedicated' OR (i.kind = 'shared' AND i.status = 'error'))
 ORDER BY i.created_at;
 

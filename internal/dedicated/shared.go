@@ -38,6 +38,7 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 		KindDeleteReplica:     {Handler: s.runDeleteReplica, MaxAttempts: 3},
 		KindDetachReplica:     {Handler: s.runDetachReplica, OnFail: s.failDetachReplica, MaxAttempts: 2, Timeout: 6 * time.Hour},
 		KindResize:            {Handler: s.runResize, OnFail: s.failResize, MaxAttempts: 2, Timeout: 2 * time.Hour},
+		KindMinorUpgrade:      {Handler: s.runMinorUpgrade, OnFail: s.failMinorUpgrade, MaxAttempts: 1, Timeout: 3 * time.Hour},
 	}
 }
 
@@ -56,10 +57,17 @@ func sharedSettings(memMB int) map[string]string {
 		"autovacuum_max_workers":     "5",
 		"shared_preload_libraries":   "pg_stat_statements",
 		"log_min_duration_statement": "5s",
-		// Logical-replication moves (V3 §2.3).
-		"wal_level": "logical",
+		// Logical-replication moves (V3 §2.3), and a bound on the WAL a
+		// slot may keep: a move's slot left behind would otherwise fill the
+		// node's disk and stop every tenant on the cluster.
+		"wal_level":              "logical",
+		"max_slot_wal_keep_size": sharedSlotWALCap,
 	}
 }
+
+// sharedSlotWALCap is the most WAL a replication slot may hold back on an
+// agent-run shared cluster.
+const sharedSlotWALCap = "10GB"
 
 // sharedSpec is the agent's spec for an agent-run shared cluster.
 func sharedSpec(inst store.Instance, secret provision.AdminSecret) agentapi.InstanceSpec {

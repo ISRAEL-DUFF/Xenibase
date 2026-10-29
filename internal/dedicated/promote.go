@@ -182,6 +182,9 @@ func (s *Service) runPromote(ctx context.Context, op store.Operation, log *jobs.
 	if p.Status != provision.StatusPromoting {
 		return jobs.Permanent(fmt.Errorf("project is %s, not promoting", p.Status))
 	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
+	}
 	inst, err := q.GetInstance(ctx, params.TargetInstance)
 	if err != nil {
 		return jobs.Permanent(err)
@@ -311,6 +314,29 @@ func (s *Service) freeze(ctx context.Context, p store.Project, log *jobs.StepLog
 
 // unfreeze lets p's current copy serve again (rollback).
 func (s *Service) unfreeze(ctx context.Context, p store.Project, log *jobs.StepLogger, msg string) error {
+	if err := s.thaw(ctx, p); err != nil {
+		return err
+	}
+	return log.Warn(ctx, "rollback", "%s", msg)
+}
+
+// thaw undoes freeze on p's current copy: its logins get LOGIN back, and
+// the poolers resume whether or not that worked. A source that can't be
+// reached (often why the move failed) must not keep the route paused too;
+// RepairStuckMoves gives the logins back once it answers.
+func (s *Service) thaw(ctx context.Context, p store.Project) error {
+	var errs []error
+	if err := s.restoreLogins(ctx, p); err != nil {
+		errs = append(errs, fmt.Errorf("restore the logins: %w", err))
+	}
+	if err := s.projects.Pooler().Resume(ctx, store.PoolerNames(p)...); err != nil && !isNotPaused(err) {
+		errs = append(errs, fmt.Errorf("pooler RESUME: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// restoreLogins gives p's owner and member logins LOGIN again.
+func (s *Service) restoreLogins(ctx context.Context, p store.Project) error {
 	admin, err := s.projects.AdminConn(ctx, p.InstanceID, "postgres")
 	if err != nil {
 		return err
@@ -325,10 +351,21 @@ func (s *Service) unfreeze(ctx context.Context, p store.Project, log *jobs.StepL
 			return err
 		}
 	}
-	if err := s.projects.Pooler().Resume(ctx, store.PoolerNames(p)...); err != nil && !isNotPaused(err) {
+	return nil
+}
+
+// thawRetry lets the source serve again at the start of an attempt after
+// the first, before the cutover: the attempt before may have frozen it
+// and failed, crashed or lost its lease before the commit, and this one
+// copies again from the start before freezing on its own.
+func (s *Service) thawRetry(ctx context.Context, op store.Operation, p store.Project, log *jobs.StepLogger) error {
+	if op.Attempts <= 1 {
+		return nil
+	}
+	if err := s.thaw(ctx, p); err != nil {
 		return err
 	}
-	return log.Warn(ctx, "rollback", "%s", msg)
+	return log.Info(ctx, "freeze", "writes open again while this attempt copies (an earlier attempt may have frozen them)")
 }
 
 func isNotPaused(err error) bool { return err != nil && strings.Contains(err.Error(), "is not paused") }
@@ -381,16 +418,19 @@ func (s *Service) failPromote(ctx context.Context, op store.Operation, log *jobs
 		return s.finishPromotion(ctx, op, p, params.SourceInstance, log, time.Time{})
 	}
 	s.moveFailed(ctx, op, p.InstanceID, params.TargetInstance, p.DbName, log)
-	if err := s.unfreeze(ctx, p, log, "shared copy writable again; route resumed"); err != nil {
-		return err
-	}
-	if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
-		return err
+	thawErr := s.unfreeze(ctx, p, log, "shared copy writable again; route resumed")
+	if thawErr == nil {
+		if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
+			return err
+		}
 	}
 	if inst, err := q.GetInstance(ctx, params.TargetInstance); err == nil {
 		if err := s.destroyInstance(ctx, inst, log); err != nil {
 			_ = log.Warn(ctx, "rollback", "could not remove the new instance: %v", err)
 		}
+	}
+	if thawErr != nil {
+		return s.stuck(ctx, p, log, thawErr)
 	}
 	return log.Warn(ctx, "rollback", "promotion rolled back; the project stays on the shared tier with no data lost")
 }

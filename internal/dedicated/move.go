@@ -116,7 +116,7 @@ func (s *Service) Move(ctx context.Context, mp MoveParams) (store.Operation, err
 			if mp.Size != nil {
 				size = *mp.Size
 			}
-			cp := provision.CreateParams{NodeID: &mp.NodeID, Profile: DefaultProfile, VolumeGB: size.DiskGB}
+			cp := provision.CreateParams{NodeID: &mp.NodeID, Size: &provision.Profile{CPUs: size.CPUs, MemoryMB: size.MemoryMB}, VolumeGB: size.DiskGB}
 			if _, err := s.Validate(ctx, &cp); err != nil {
 				return nil, err
 			}
@@ -194,6 +194,9 @@ func (s *Service) runMove(ctx context.Context, op store.Operation, log *jobs.Ste
 	}
 	if p.InstanceID != params.SourceInstance {
 		return jobs.Permanent(errors.New("the project is no longer on the instance being moved from"))
+	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
 	}
 	pt := p
 	pt.InstanceID = params.TargetInstance
@@ -613,11 +616,11 @@ func (s *Service) failMove(ctx context.Context, op store.Operation, log *jobs.St
 		return s.finishMove(ctx, op, p, params.SourceInstance, log, time.Time{})
 	}
 	s.moveFailed(ctx, op, p.InstanceID, params.TargetInstance, p.DbName, log)
-	if err := s.unfreeze(ctx, p, log, "source writable again; route resumed"); err != nil {
-		return err
-	}
-	if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
-		return err
+	thawErr := s.unfreeze(ctx, p, log, "source writable again; route resumed")
+	if thawErr == nil {
+		if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
+			return err
+		}
 	}
 	if params.NewInstance {
 		if inst, err := q.GetInstance(ctx, params.TargetInstance); err == nil {
@@ -627,6 +630,9 @@ func (s *Service) failMove(ctx context.Context, op store.Operation, log *jobs.St
 		}
 	} else if err := s.dropCopy(ctx, params.TargetInstance, p.DbName, p.OwnerRole); err != nil {
 		_ = log.Warn(ctx, "rollback", "could not drop the partial copy: %v", err)
+	}
+	if thawErr != nil {
+		return s.stuck(ctx, p, log, thawErr)
 	}
 	return log.Warn(ctx, "rollback", "move rolled back; the project stays where it was with no data lost")
 }

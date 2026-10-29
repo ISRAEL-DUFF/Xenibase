@@ -12,6 +12,21 @@ import (
 	"github.com/google/uuid"
 )
 
+const failUnfinishedMinorUpgrade = `-- name: FailUnfinishedMinorUpgrade :exec
+UPDATE minor_upgrades SET finished_at = now(), error = $1::text WHERE id = $2 AND finished_at IS NULL
+`
+
+type FailUnfinishedMinorUpgradeParams struct {
+	Error string
+	ID    uuid.UUID
+}
+
+// tenant: system - the maintenance sweep records its own runs.
+func (q *Queries) FailUnfinishedMinorUpgrade(ctx context.Context, arg FailUnfinishedMinorUpgradeParams) error {
+	_, err := q.db.Exec(ctx, failUnfinishedMinorUpgrade, arg.Error, arg.ID)
+	return err
+}
+
 const finishMinorUpgrade = `-- name: FinishMinorUpgrade :exec
 UPDATE minor_upgrades SET finished_at = now(), pause_ms = $1, error = $2 WHERE id = $3
 `
@@ -86,16 +101,43 @@ func (q *Queries) InstanceBusy(ctx context.Context, instanceID uuid.UUID) (bool,
 	return column_1, err
 }
 
+const instanceMinorUpgradeActive = `-- name: InstanceMinorUpgradeActive :one
+SELECT EXISTS (
+  SELECT 1 FROM operations
+  WHERE kind = 'minor_upgrade' AND status IN ('queued', 'running') AND params @> jsonb_build_object('instance_id', $1::uuid)
+)::bool
+`
+
+// InstanceMinorUpgradeActive reports a minor upgrade queued or running on
+// the instance: its projects take no other exclusive operation meanwhile.
+// tenant: system - the maintenance sweep and the exclusive-operation check of a project already resolved.
+func (q *Queries) InstanceMinorUpgradeActive(ctx context.Context, instanceID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, instanceMinorUpgradeActive, instanceID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const instancesBehind = `-- name: InstancesBehind :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections FROM instances
-WHERE deleted_at IS NULL AND status = 'running'
-  AND pg_release IS NOT NULL AND pg_release_available IS NOT NULL AND pg_release <> pg_release_available
-ORDER BY kind = 'shared', created_at
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections, switchover_started_at FROM instances i
+WHERE i.deleted_at IS NULL AND i.status = 'running'
+  AND i.pg_release IS NOT NULL AND i.pg_release_available IS NOT NULL AND i.pg_release <> i.pg_release_available
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT m.error, m.to_release FROM minor_upgrades m
+      WHERE m.instance_id = i.id AND m.finished_at IS NOT NULL
+      ORDER BY m.started_at DESC LIMIT 1
+    ) last
+    WHERE last.error IS NOT NULL AND last.to_release = i.pg_release_available)
+ORDER BY i.kind = 'shared', i.created_at
 `
 
 // InstancesBehind lists running instances whose image has another release;
 // the caller keeps the ones where it is newer. Dedicated instances go
-// first: each restart there pauses one project, not a cluster's worth.
+// first: each restart there pauses one project, not a cluster's worth. An
+// instance whose last upgrade to that release failed is left out, so the
+// sweep moves on to the others; a newer release, or the admin's Run now,
+// tries it again.
 // tenant: system - the maintenance sweep reads every running instance.
 func (q *Queries) InstancesBehind(ctx context.Context) ([]Instance, error) {
 	rows, err := q.db.Query(ctx, instancesBehind)
@@ -140,6 +182,7 @@ func (q *Queries) InstancesBehind(ctx context.Context) ([]Instance, error) {
 			&i.EtcdRegion,
 			&i.PitrDays,
 			&i.MaxConnections,
+			&i.SwitchoverStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -152,7 +195,7 @@ func (q *Queries) InstancesBehind(ctx context.Context) ([]Instance, error) {
 }
 
 const instancesToCheckRelease = `-- name: InstancesToCheckRelease :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections FROM instances
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections, switchover_started_at FROM instances
 WHERE deleted_at IS NULL AND status = 'running'
   AND (release_checked_at IS NULL OR release_checked_at < $1::timestamptz)
 ORDER BY release_checked_at NULLS FIRST, created_at
@@ -202,6 +245,49 @@ func (q *Queries) InstancesToCheckRelease(ctx context.Context, before time.Time)
 			&i.EtcdRegion,
 			&i.PitrDays,
 			&i.MaxConnections,
+			&i.SwitchoverStartedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const interruptedMinorUpgrades = `-- name: InterruptedMinorUpgrades :many
+SELECT m.id, m.instance_id, m.from_release, m.to_release, m.started_at, m.finished_at, m.pause_ms, m.error FROM minor_upgrades m
+WHERE m.finished_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM operations o
+    WHERE o.kind = 'minor_upgrade' AND o.status IN ('queued', 'running') AND o.params->>'run_id' = m.id::text)
+ORDER BY m.started_at
+`
+
+// InterruptedMinorUpgrades lists runs that never finished and that no
+// operation will finish: a server stopped part-way (before minor upgrades
+// were operations), or an operation's OnFail did not get to it.
+// tenant: system - the maintenance sweep records its own runs.
+func (q *Queries) InterruptedMinorUpgrades(ctx context.Context) ([]MinorUpgrade, error) {
+	rows, err := q.db.Query(ctx, interruptedMinorUpgrades)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MinorUpgrade
+	for rows.Next() {
+		var i MinorUpgrade
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstanceID,
+			&i.FromRelease,
+			&i.ToRelease,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.PauseMs,
+			&i.Error,
 		); err != nil {
 			return nil, err
 		}
@@ -265,7 +351,7 @@ func (q *Queries) LatestMinorUpgrades(ctx context.Context, lim int32) ([]LatestM
 }
 
 const maintenanceProjects = `-- name: MaintenanceProjects :many
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs FROM projects WHERE instance_id = $1 AND deleted_at IS NULL ORDER BY created_at
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE instance_id = $1 AND deleted_at IS NULL ORDER BY created_at
 `
 
 // tenant: system - the maintenance sweep pauses every project on the instance.
@@ -325,6 +411,7 @@ func (q *Queries) MaintenanceProjects(ctx context.Context, instanceID uuid.UUID)
 			&i.IntegratorRoles,
 			&i.ManageRoles,
 			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -334,6 +421,18 @@ func (q *Queries) MaintenanceProjects(ctx context.Context, instanceID uuid.UUID)
 		return nil, err
 	}
 	return items, nil
+}
+
+const minorUpgradeActive = `-- name: MinorUpgradeActive :one
+SELECT EXISTS (SELECT 1 FROM operations WHERE kind = 'minor_upgrade' AND status IN ('queued', 'running'))::bool
+`
+
+// tenant: system - the maintenance sweep upgrades one instance at a time.
+func (q *Queries) MinorUpgradeActive(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, minorUpgradeActive)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const setInstanceRelease = `-- name: SetInstanceRelease :exec

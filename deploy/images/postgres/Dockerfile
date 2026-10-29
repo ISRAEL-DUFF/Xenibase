@@ -1,7 +1,14 @@
 # PostgreSQL with WAL-G, the image for dedicated instances (spec §3.2,
 # §6.4) and agent-run shared clusters, one per supported major (V3 §2.4).
-#   docker build -t xenibase-postgres:18-walg3.0.9 deploy/images/postgres
-#   docker build --build-arg PG_MAJOR=17 -t xenibase-postgres:17-walg3.0.9 deploy/images/postgres
+#   deploy/images/postgres/build.sh 18    (and 17)
+# which tags xenibase-postgres:18-walg3.0.9, the tag the agent uses, and
+# xenibase-postgres:18.6-walg3.0.9, so the previous release stays tagged
+# after a rebuild onto a newer one.
+#
+# Each major is built from a pinned minor release (PG17_RELEASE,
+# PG18_RELEASE): the official postgres:18 tag moves with every release, so
+# images built from it on different nodes or days would run different ones.
+# Raise them for a minor upgrade (docs/upgrade.md).
 #
 # WAL-G is built from a pinned commit through the Go module proxy, without
 # cgo: no system packages, and encryption via OpenPGP (pure Go).
@@ -16,6 +23,8 @@
 # WAL-G reaches S3 storage over HTTPS.
 ARG REGISTRY=
 ARG PG_MAJOR=18
+ARG PG17_RELEASE=17.11
+ARG PG18_RELEASE=18.6
 
 FROM ${REGISTRY}golang:1.25-alpine AS walg
 # wal-g v3.0.9
@@ -35,9 +44,14 @@ RUN --mount=type=secret,id=ca_bundle,required=false \
       "patroni[etcd3,psycopg3]==${PATRONI_VERSION}" \
  && /opt/patroni/bin/patroni --version
 
-FROM ${REGISTRY}postgres:${PG_MAJOR}
+# The pinned release of each major; only the one PG_MAJOR names is built.
+FROM ${REGISTRY}postgres:${PG17_RELEASE}-trixie AS pg17
+FROM ${REGISTRY}postgres:${PG18_RELEASE}-trixie AS pg18
+
+FROM pg${PG_MAJOR}
 ARG PG_MAJOR
-RUN apt-get update \
+RUN test "${PG_MAJOR}" = "$(echo "$PG_VERSION" | cut -d. -f1)" \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates "postgresql-${PG_MAJOR}-hypopg" \
  && rm -rf /var/lib/apt/lists/* \
  && test -s /etc/ssl/certs/ca-certificates.crt \

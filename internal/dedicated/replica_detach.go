@@ -96,13 +96,12 @@ func (s *Service) DetachReplica(ctx context.Context, d DetachParams) (provision.
 	}
 	cp := provision.CreateParams{
 		OrgID: src.OrgID, CreatorRole: d.CreatorRole, Name: name, CreatedBy: d.CreatedBy, Kind: KindDetachReplica,
-		Tier: provision.TierDedicated, NodeID: &r.NodeID, PgVersion: int(inst.PgVersion), InstanceID: &r.ID,
+		Tier: provision.TierDedicated, NodeID: &r.NodeID, PgVersion: int(inst.PgVersion), Derived: true, InstanceID: &r.ID,
 		Region: node.Region, DataResidency: src.DataResidency && node.Region == src.Region,
 		Params: map[string]any{"detach": detachParams{SourceProject: src.ID, SourceInstance: inst.ID, Replica: r.ID}},
 	}
-	if inst.Profile != nil {
-		cp.Profile = *inst.Profile
-	}
+	// The source's size, a profile's or a resize's.
+	cp.Size = SizeProfile(inst)
 	cp.MinMaxConnections = int(inst.MaxConnections)
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)

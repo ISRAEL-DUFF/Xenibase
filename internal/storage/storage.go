@@ -63,6 +63,23 @@ func (t Target) Key(rel string) string {
 	return p + strings.TrimPrefix(rel, "/")
 }
 
+// Location identifies where the target's objects are: the endpoint (scheme
+// and host in lower case, without a default port or trailing slash), the
+// bucket and the prefix as Key applies it. Two targets with one location
+// read and write the same objects, whatever their names or credentials.
+func (t Target) Location() string {
+	ep := strings.TrimRight(strings.TrimSpace(t.Endpoint), "/")
+	if u, err := url.Parse(ep); err == nil && u.Host != "" {
+		u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+		if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+			u.Host = u.Hostname()
+		}
+		u.Path = strings.TrimRight(u.Path, "/")
+		ep = u.String()
+	}
+	return ep + " " + strings.TrimSpace(t.Bucket) + "/" + t.Key("")
+}
+
 // Redacted returns the target without credentials, for logs and the API.
 func (t Target) Redacted() Target {
 	t.SecretKey = ""

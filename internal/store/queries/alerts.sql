@@ -77,13 +77,31 @@ FROM operations o
 WHERE o.kind = ANY(@kinds::text[]) AND o.status IN ('succeeded', 'failed')
 ORDER BY o.kind, o.project_id, o.params->>'instance_id', o.created_at DESC;
 
+-- name: FailedMinorUpgrades :many
+-- tenant: system - the platform alert evaluator; alerts are the platform admin's.
+-- Live instances whose latest finished minor upgrade failed.
+SELECT l.id, l.instance_id, l.from_release, l.to_release, COALESCE(l.error, '')::text AS error, l.finished_at, i.kind, n.name AS node_name
+FROM (
+  SELECT DISTINCT ON (m.instance_id) m.* FROM minor_upgrades m
+  WHERE m.finished_at IS NOT NULL
+  ORDER BY m.instance_id, m.started_at DESC
+) l
+JOIN instances i ON i.id = l.instance_id AND i.deleted_at IS NULL
+JOIN nodes n ON n.id = i.node_id
+WHERE l.error IS NOT NULL;
+
 -- name: OverdueBackups :many
 -- tenant: system - the platform alert evaluator; alerts are the platform admin's.
 -- Active projects older than @age whose newest successful backup is older
--- than @age (or missing).
+-- than @age (or missing). Only those the nightly scheduler backs up, as
+-- ProjectsDueForBackup picks them: not paused or archived, not a branch
+-- without backups, not in a suspended or deleting organisation.
 SELECT p.id, p.name, COALESCE((SELECT max(b.finished_at) FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded'), 'epoch')::timestamptz AS last_backup_at
 FROM projects p
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.created_at < now() - make_interval(secs => @age_seconds::float8)
+  AND p.lifecycle = 'active'
+  AND (p.parent_project_id IS NULL OR p.branch_backups)
+  AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = p.org_id AND o.status = 'active')
   AND NOT EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.finished_at > now() - make_interval(secs => @age_seconds::float8));
 
 -- name: UnreachableNodes :many
@@ -93,6 +111,22 @@ WHERE status <> 'removed' AND agent_cert_fp IS NOT NULL
 
 -- name: NodeCapacities :many
 SELECT id, name, capacity FROM nodes WHERE status <> 'removed' AND agent_cert_fp IS NOT NULL;
+
+-- name: WALArchiveSamples :many
+-- tenant: system - the platform alert evaluator; alerts are the platform admin's.
+-- Each active dedicated project's WAL archiver samples since @since (-1:
+-- none): failed attempts at the oldest and newest sample, and the newest
+-- count and age of segments waiting.
+SELECT p.id, p.name,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_failed'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts LIMIT 1), -1)::float8 AS failed_first,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_failed'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS failed_last,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_pending'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS pending,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_pending_age_s'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS pending_age_s
+FROM projects p WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated';
 
 -- name: ProjectSizes :many
 -- tenant: system - the platform alert evaluator; alerts are the platform admin's.

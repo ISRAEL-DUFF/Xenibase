@@ -348,7 +348,9 @@ func (q *Queries) EndExpiredBreakGlass(ctx context.Context) ([]BreakGlassSession
 
 const expireOrgFinalBackups = `-- name: ExpireOrgFinalBackups :exec
 UPDATE backups b SET expires_at = $1
-FROM projects p WHERE p.id = b.project_id AND p.org_id = $2 AND b.kind = 'final' AND b.status = 'succeeded'
+FROM projects p WHERE p.id = b.project_id AND p.org_id = $2 AND b.status IN ('succeeded', 'copied')
+  AND (b.kind = 'final' OR (b.kind IN ('logical', 'archive')
+    AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL))))
 `
 
 type ExpireOrgFinalBackupsParams struct {
@@ -356,7 +358,9 @@ type ExpireOrgFinalBackupsParams struct {
 	OrgID     uuid.UUID
 }
 
-// Final backups of a deleted organisation's projects are kept 30 days (V2 s10.10).
+// Final backups of a deleted organisation's projects are kept 30 days (V2
+// s10.10), and their nightly and archive backups on platform targets go
+// with them; those on the organisation's own targets are left alone.
 func (q *Queries) ExpireOrgFinalBackups(ctx context.Context, arg ExpireOrgFinalBackupsParams) error {
 	_, err := q.db.Exec(ctx, expireOrgFinalBackups, arg.ExpiresAt, arg.OrgID)
 	return err
@@ -1096,7 +1100,7 @@ func (q *Queries) OrgLargestProject(ctx context.Context, orgID uuid.UUID) (float
 }
 
 const orgLiveProjects = `-- name: OrgLiveProjects :many
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs FROM projects WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at
 `
 
 func (q *Queries) OrgLiveProjects(ctx context.Context, orgID uuid.UUID) ([]Project, error) {
@@ -1155,6 +1159,7 @@ func (q *Queries) OrgLiveProjects(ctx context.Context, orgID uuid.UUID) ([]Proje
 			&i.IntegratorRoles,
 			&i.ManageRoles,
 			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}

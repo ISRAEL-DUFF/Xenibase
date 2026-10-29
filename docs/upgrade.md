@@ -70,9 +70,19 @@ state directory keeps its identity, so it needs no new registration.
 
 ## PostgreSQL minor versions
 
-Rebuild the images (`./install.sh` does it; on remote nodes `make
-pg-image`, or pull them). Each instance then shows "18.x available" on its
-node's page, and Xenibase restarts the instances that are behind, one at a
+Each major's image is built from a pinned minor release:
+`PG17_RELEASE` and `PG18_RELEASE` in `deploy/images/postgres/Dockerfile`
+(17.11 and 18.6 in this release; a new Xenibase release raises them, or
+pass `--build-arg PG18_RELEASE=18.7`). Rebuild the images (`./install.sh`
+does it; on remote nodes `make pg-image`, or pull them). Each is tagged
+twice: `xenibase-postgres:18-walg3.0.9`, which instances use, and
+`xenibase-postgres:18.6-walg3.0.9`, which keeps the previous release on
+the node after you rebuild onto a newer one. To go back after a bad minor
+release, point the major tag at it again (`docker tag
+xenibase-postgres:18.6-walg3.0.9 xenibase-postgres:18-walg3.0.9`) on each
+node; instances move back at their next restart. Every node built from the
+same checkout runs the same release. Each instance then shows "18.x
+available" on its node's page, and Xenibase restarts the instances that are behind, one at a
 time, in the weekly maintenance window (Admin → Nodes; default Sunday
 02:00–06:00 UTC). The poolers hold clients for each restart. **Upgrade now**
 on the same panel does one immediately. See [moves and Postgres
@@ -367,6 +377,12 @@ below say what each version changed.
   install with years of operations the sweep prunes 500 every 5 minutes
   until it has caught up; the metadata backup taken before the upgrade
   keeps the full history.
+- **Deleted projects' backups expire** (migration 00075): the nightly and
+  archive backups of projects deleted before the upgrade, on platform
+  targets, get their final backup's expiry, and at least a week from the
+  upgrade; the hourly expiry then deletes them. Restore anything you still
+  want from them into a new project before then. Backups in organisations'
+  own buckets are not touched.
 - **Edge credentials** (migration 00061): the platform-wide
   `XENIBASE_EDGE_SECRET` now serves only the regions without their own API
   domain. **Before upgrading**, give every edge of a region with its own API

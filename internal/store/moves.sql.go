@@ -56,6 +56,89 @@ func (q *Queries) LatestMoves(ctx context.Context, arg LatestMovesParams) ([]Mov
 	return items, nil
 }
 
+const listStuckProjects = `-- name: ListStuckProjects :many
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
+WHERE p.deleted_at IS NULL
+  AND p.status IN ('moving', 'promoting', 'demoting', 'upgrading')
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id AND o.status IN ('queued', 'running'))
+  AND coalesce((SELECT max(o.finished_at) FROM operations o WHERE o.project_id = p.id), p.created_at)
+      < now() - make_interval(secs => $1::float8)
+ORDER BY p.created_at
+`
+
+// ListStuckProjects finds projects a move, promotion, demotion or major
+// upgrade left in its status with no operation to finish it: a rollback
+// that could not reach the source to give its logins back. stuck_seconds
+// is how long since the project's last operation ended.
+// tenant: system - the stuck-move sweep and the alerts repair or report every organisation's projects.
+func (q *Queries) ListStuckProjects(ctx context.Context, stuckSeconds float64) ([]Project, error) {
+	rows, err := q.db.Query(ctx, listStuckProjects, stuckSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Project
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slug,
+			&i.DbName,
+			&i.OwnerRole,
+			&i.ScramVerifier,
+			&i.Tier,
+			&i.InstanceID,
+			&i.Status,
+			&i.Settings,
+			&i.StorageTargetID,
+			&i.Extensions,
+			&i.Description,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.DeletedAt,
+			&i.OrgID,
+			&i.AliasDbName,
+			&i.LegacyOwnerRole,
+			&i.LegacyScramVerifier,
+			&i.LegacyUntil,
+			&i.StorageState,
+			&i.StorageStateAt,
+			&i.BackupKeyID,
+			&i.ParentProjectID,
+			&i.BranchSource,
+			&i.BranchSchemaOnly,
+			&i.ExpiresAt,
+			&i.ExpiryNotifiedAt,
+			&i.BranchBackups,
+			&i.SensitiveData,
+			&i.ProbeVerifier,
+			&i.Lifecycle,
+			&i.LastActiveAt,
+			&i.PauseWarnedAt,
+			&i.PausedAt,
+			&i.ArchivedAt,
+			&i.ArchiveBackupID,
+			&i.ArchiveNoticeDays,
+			&i.Region,
+			&i.DataResidency,
+			&i.ForwardRegion,
+			&i.ForwardUntil,
+			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const moveCutOver = `-- name: MoveCutOver :exec
 UPDATE projects p SET instance_id = $1,
   forward_region = CASE WHEN p.region <> n.region THEN p.region ELSE p.forward_region END,
@@ -76,6 +159,42 @@ type MoveCutOverParams struct {
 func (q *Queries) MoveCutOver(ctx context.Context, arg MoveCutOverParams) error {
 	_, err := q.db.Exec(ctx, moveCutOver, arg.InstanceID, arg.ID)
 	return err
+}
+
+const moveDatabaseBusy = `-- name: MoveDatabaseBusy :one
+SELECT EXISTS (SELECT 1 FROM operations o JOIN projects p ON p.id = o.project_id
+  WHERE o.status IN ('queued', 'running') AND p.db_name = $1::text
+    AND $2::text IN (o.params->>'source_instance', o.params->>'target_instance'))
+`
+
+type MoveDatabaseBusyParams struct {
+	DbName     string
+	InstanceID string
+}
+
+// MoveDatabaseBusy reports whether a queued or running operation is moving
+// a project's database named db_name to or from the instance.
+// tenant: system - the move sweep checks replication objects on every instance against the operations still to finish.
+func (q *Queries) MoveDatabaseBusy(ctx context.Context, arg MoveDatabaseBusyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, moveDatabaseBusy, arg.DbName, arg.InstanceID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const moveNameInUse = `-- name: MoveNameInUse :one
+SELECT EXISTS (SELECT 1 FROM operations
+  WHERE status IN ('queued', 'running') AND starts_with(replace(id::text, '-', ''), $1::text))
+`
+
+// MoveNameInUse reports whether a queued or running operation owns the
+// move objects named after it (logical.Name: its id's first 16 hex digits).
+// tenant: system - the move sweep checks replication objects on every instance against the operations still to finish.
+func (q *Queries) MoveNameInUse(ctx context.Context, idPrefix string) (bool, error) {
+	row := q.db.QueryRow(ctx, moveNameInUse, idPrefix)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const movePhase = `-- name: MovePhase :exec
@@ -106,6 +225,31 @@ func (q *Queries) MovePhase(ctx context.Context, arg MovePhaseParams) error {
 		arg.OperationID,
 	)
 	return err
+}
+
+const projectDatabaseNames = `-- name: ProjectDatabaseNames :many
+SELECT DISTINCT db_name FROM projects WHERE db_name = ANY($1::text[])
+`
+
+// tenant: system - the move sweep looks only at Xenibase's own databases on an instance.
+func (q *Queries) ProjectDatabaseNames(ctx context.Context, names []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, projectDatabaseNames, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var db_name string
+		if err := rows.Scan(&db_name); err != nil {
+			return nil, err
+		}
+		items = append(items, db_name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const startMove = `-- name: StartMove :one

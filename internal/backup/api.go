@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -85,16 +86,21 @@ func (s *Service) PITR(ctx context.Context, p PITRParams) (provision.Created, er
 	if err != nil {
 		return provision.Created{}, err
 	}
+	// The base backup's major, which before a major upgrade is not the
+	// project's now: its data won't start on another.
+	major, err := s.Dedicated.SourceMajor(ctx, plan)
+	if err != nil {
+		return provision.Created{}, err
+	}
 	cp := provision.CreateParams{
 		OrgID: src.OrgID, CreatorRole: p.CreatorRole,
 		Name: strings.TrimSpace(p.Name), CreatedBy: p.CreatedBy, Kind: KindRestore,
-		Tier: provision.TierDedicated, NodeID: &inst.NodeID, PgVersion: int(inst.PgVersion),
+		Tier: provision.TierDedicated, NodeID: &inst.NodeID, PgVersion: major, Derived: true,
 		Region: src.Region, DataResidency: src.DataResidency, // a restore stays in the source's region
 		Params: map[string]any{"mode": ModePITR, "pitr": plan},
 	}
-	if inst.Profile != nil {
-		cp.Profile = *inst.Profile
-	}
+	// The source's size, a profile's or a resize's ("custom").
+	cp.Size = dedicated.SizeProfile(inst)
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)
 	}

@@ -17,8 +17,126 @@ bundle share one version (spec §11.5).
   fewer. A point-in-time restore or a detached replica never gets fewer than
   its source, which Postgres needs to replay the source's WAL. See
   `docs/user-guide.md` ("Connections").
+- **An alert when a dedicated project's WAL archiving fails or falls
+  behind.** Nothing watched archiving: a failing `wal-push` (rotated
+  credentials, a full bucket) let WAL pile up until the volume filled,
+  while base backups still succeeded, and recovery past it was impossible.
+  The metrics collector now samples each dedicated instance's archiver
+  (`wal_archive_*` on `/metrics`), and the critical `wal_archive` alert
+  fires when archiving failed in the last 15 minutes or a finished segment
+  has waited longer; it turns the status page's Backups component to
+  degraded. And every other week the restore test recovers a random
+  dedicated project's base backup and WAL to the present into a scratch
+  instance on its node, reads every table and removes it (no project is
+  created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A branch reset no longer copies a parent the caller has lost.** Reset
+  checked only the branch, so someone removed from the parent could keep
+  refilling a branch with its current data, and a full-data branch of a
+  parent marked sensitive afterwards kept refilling for any developer. A
+  reset now needs `project.branch` on the parent too, and its admin role
+  for a full copy of sensitive data (403 otherwise); a token restricted to
+  the parent still covers its branches. Removing someone from a project
+  also removes them from its live branches and drops their logins there.
+- **A transfer can no longer split a branch from its parent's
+  organisation.** Transferring a branch, or a project with live branches,
+  is refused with a 409; before, the other organisation's admins could
+  reset a moved branch and keep receiving the parent's data. A branch whose
+  parent is in another organisation is no longer filled or reset (detach
+  or delete it), and a parent's branch count only counts its own
+  organisation's branches.
+- **Detaching a branch now gets a new project's checks.** It needed only
+  the developer role on the branch, so create-then-detach went past the
+  projects quota, and a developer could own a project in an organisation
+  whose members may not create them. Detach now needs `org.create_project`
+  and room in the projects quota (409 `quota_exceeded`), and runs under the
+  branch's lock: it is refused (409) while a reset or anything else is in
+  progress, or the branch isn't active.
+- **A branch's file copy no longer succeeds with files left out.** Every
+  copy error (throttling, the network, the operation's deadline) counted
+  as "not found in the parent". Only a file the parent no longer has
+  counts as missing now; other failures fail the attempt once the rest were
+  tried, and the retry copies only what is left.
+- **A branch reset now copies files again and removes the ones it
+  orphaned.** A reset of a branch made with `copy_files` brought the
+  parent's file rows but not their files, and the files already under the
+  branch's prefix (earlier copies, its own uploads) were left unbilled with
+  no row naming them. Branches now remember `copy_files` (**migration
+  00077** adds `projects.branch_copy_files`, filled from the create
+  operation while that is kept); after every reset the background
+  `copy_branch_files` puts the files no refilled row names on the garbage
+  list for the storage sweep, then copies the parent's files again.
+- **The branch expiry sweep no longer deletes a branch saved at the last
+  minute.** It deleted from a list read at the start of the pass, so a
+  branch extended or detached in between was deleted anyway, without the
+  final backup turned on meanwhile. Each delete now checks the locked row
+  is still an expired branch, and takes the final-backup choice from it.
+- **Branch resets count against operations in flight.** They were counted
+  but never checked, so every branch could be reset at once, each a full
+  dump of the parent with a live source. A reset beyond the plan's limit
+  is refused with 409 `quota_exceeded`, as a new branch is.
+- **A branch create that failed after it went live no longer drops it.**
+  Backend services were turned on after the branch was published, so a
+  failure there retried the whole create, dropping the live database under
+  its clients, and a second failure left an active branch whose API keys
+  never worked. They are now turned on before the branch is published, and
+  a retry that finds the branch active only queues its file copy.
+- **A Postgres version notice whose email failed was never resent:** its
+  record was written before the send. It is now kept only when the mail
+  goes, still once across servers, so the next hourly check sends it
+  again; the deprecation notice is retried too, until the first reminder.
+- **The instance image did not pin the Postgres minor release:** it was
+  built from the moving `postgres:<major>` tag, so nodes ran whatever
+  release they last pulled, and a rebuild left the previous release
+  untagged. Each major is now built from a pinned release (17.11 and 18.6,
+  `PG17_RELEASE`/`PG18_RELEASE` in `deploy/images/postgres/Dockerfile`)
+  and tagged with it as well (`xenibase-postgres:18.6-walg3.0.9`); the
+  `{major}` tag the agent uses is unchanged. `make pg-image` and
+  `install.sh` build through `deploy/images/postgres/build.sh`. See
+  `docs/upgrade.md` ("PostgreSQL minor versions").
+- **A point-in-time recovery to before a major upgrade could not start:**
+  it used the project's new major on data from the old one. The restore now
+  starts on the major of the instance that took the base backup, so an
+  owner whose app breaks on the new major can go back to before the
+  upgrade (writes made since are not in it). See `docs/moves.md` ("Major
+  upgrades").
+- **A project on a retired or preview Postgres major could not be restored
+  to a point in time, branched, or have a replica detached:** each made its
+  new project as a new project would, which those majors refuse. They now
+  take any major the server has an image for, so a retired project keeps
+  its safety net.
+- **Minor upgrades took no lock, weren't operations, and weren't
+  crash-safe.** Two servers could restart the same instance twice, an
+  owner could queue `ha_disable` or a resize during an HA upgrade, and a
+  server stopped between pause and resume left PgBouncer paused. Each
+  minor upgrade is now a `minor_upgrade` operation, exclusive with the
+  project's other operations (a shared cluster's keeps its projects'
+  exclusive operations off until it ends); its OnFail resumes the poolers,
+  a crashed attempt is retried once and resumes them first, and the sweep
+  runs on one server at a time under an advisory lock and finishes any run
+  an older server left unfinished. **Upgrade now** queues the same
+  operation and waits for it.
+- **A failed minor upgrade left the instance down and then looked done.**
+  The agent removed the old container before creating the new one, so a
+  release that would not start left nothing running, the sweep retried the
+  same instance every 5 minutes, and the next release check read the
+  missing or crash-looping container as upgraded. The agent now keeps the
+  old container, stopped, until the new one is ready and starts it again
+  otherwise; a release is reported only for a running container. The
+  failure is recorded, a **Minor upgrade failed** alert fires, and the
+  sweep moves on to other instances, trying that one again only for a
+  newer release or **Upgrade now**. See `docs/moves.md` ("Minor upgrades
+  and the maintenance window").
+- **The HA watcher paused healthy projects when xenibase-server lost sight
+  of their primary,** and ran on every server without a lock. It now pauses
+  the poolers only when the members that answer agree there is no running
+  leader, and leaves them alone when none answers. One server at a time
+  watches, under a Postgres advisory lock; a server that loses it resumes
+  the poolers it paused, and the next one resumes any left paused. A
+  switchover marks its instance (**migration 00073**) so the watcher on
+  another server leaves it alone instead of recording a failover. See
+  `docs/ha.md` ("Failover").
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
@@ -106,6 +224,113 @@ bundle share one version (spec §11.5).
   seconds. `docs/migrations.md` sets the expand-then-contract rule.
 - Each call to a node's agent opened a new TLS connection; calls now reuse one
   per node.
+- **The orphan reaper could destroy a move's, promotion's or major
+  upgrade's target mid-copy.** They insert the target when they are queued
+  and the project points at it only at the cutover, so after five minutes
+  the reaper took it for a failed create's leftover. It now skips an
+  instance a queued or running operation names as its target, and an
+  upgrade preflight's scratch instance in its first hour, and checks each
+  instance again just before destroying it. A retry no longer starts a new
+  container under an instance already marked deleted.
+- **A move's rollback that could not reach the source left the project
+  frozen for good.** It returned before resuming the poolers, and the
+  project stayed `moving` (or `promoting`, `demoting`, `upgrading`) with
+  its logins `NOLOGIN` until someone repaired it by hand. The poolers now
+  resume whatever happens, and a sweep every minute gives the logins back
+  and sets such a project active once its instance answers; one still
+  frozen after 10 minutes raises a `project_stuck` alert.
+- **A retry after a move's freeze copied everything again with the source
+  still frozen.** An error, crash or deploy between the freeze and the
+  cutover started the second attempt with the logins `NOLOGIN` and the
+  poolers paused, so a dump-mode move or promotion was down for a second
+  whole copy. A move, promotion, demotion or major upgrade now opens writes
+  again at the start of any attempt after the first that finds the project
+  not yet cut over.
+- **A resized project could not be restored to a point in time or have a
+  read replica detached.** Both copied the source's profile name, `custom`
+  after a resize to a size no profile has, and the create refused it as an
+  unknown profile. They now pass the source's CPUs and memory as the size,
+  as a node move does; a node move's capacity check is now of the real size
+  too.
+- **A dedicated project's major upgrade skipped the capacity check and
+  dropped the PITR add-on.** Its new instance went onto the project's node
+  whether or not there was room for a second one, and with 7 days of
+  point-in-time recovery (and billing) whatever the project paid for. The
+  preflight and the upgrade now refuse a node without room for it, and the
+  new instance keeps the project's window.
+- **A region move left the project's WAL archive in the old region.** The
+  new instance's archive was placed from the project before the cutover,
+  so it went to the old region's storage. It now goes by the region of the
+  new instance's node.
+- **Replication objects a move's cleanup could not remove stayed for
+  ever.** A slot with no consumer kept WAL until the disk filled (on a
+  shared cluster, for every tenant there), and the DDL block kept refusing
+  the tenant's schema changes. An hourly sweep now removes the
+  `xenibase_move_*` subscriptions, publications, inactive slots, logins
+  and DDL blocks in project databases that no queued or running operation
+  owns, and instances cap slot WAL (`max_slot_wal_keep_size`: a quarter of
+  a dedicated volume, 10 GB on an agent-run shared cluster) from their next
+  restart.
+- **A deleted project's nightly backups were kept forever.** Only its final
+  backup was given an expiry, so up to 11 earlier backups (82 with the long
+  add-on) stayed on platform storage, listed and restorable. A delete now
+  dates its nightly and archive backups with the final backup (30 days), as
+  does an organisation's deletion, and the hourly expiry removes them with
+  their cross-region copies; backups in an organisation's own bucket are
+  left alone. **Migration 00075** dates those of projects already deleted,
+  at least a week from the upgrade.
+- **Copying backups between two targets at one place deleted them.** Two
+  storage targets could name the same endpoint, bucket and prefix
+  (`backups` and `backups/` included); a switch between them with "delete
+  the originals" copied each object onto itself and then deleted it, and
+  turning on data residency could delete a backup as its own cross-region
+  copy. Such a target is now refused, and copies, and deletes of an
+  original or a copy, between two existing ones are refused too. If two of
+  your targets already share a place, send new backups to one of them;
+  don't change either's prefix, which leaves the backups on it unreachable.
+- **One failed WAL-G listing forgot every base backup.** The agent read a
+  failed `wal-g backup-list` as an empty archive, and the base backup that
+  followed it marked all of the project's base backups deleted, so its
+  point-in-time window restarted at the next night's backup. A failed
+  listing is now an error, and a listing without the backup just taken
+  forgets nothing.
+- **A storage or key switch cut a paid 14- or 30-day recovery window to
+  7.** The archive a switch retires (enabling or rotating a project key is
+  one) expired after 7 days, so a dedicated project paying for 14 or 30
+  could recover only to the switch from day 8. It now stays for the
+  project's window.
+- "Backup overdue" fired for projects the nightly schedule skips on
+  purpose (paused and archived Free projects, branches without backups,
+  suspended organisations), and kept the public status page's Backups
+  component degraded. It now leaves out what the schedule leaves out.
+- **With more than one server, imports and Supabase migration steps failed
+  at random.** The source's connection string (and S3 key) was kept in the
+  memory of the server that took the request, so a step another server
+  claimed failed with "xenibase-server restarted?" and the import rolled
+  back, as did any retry. They now travel with the operation, encrypted
+  with the master key, and are removed when it ends.
+- Nothing pinned the OpenPGP keys derived from the backup key and project
+  keys, which are never stored: a crypto library update that derived them
+  differently would have left every WAL-G archive and project-key backup
+  unreadable, unnoticed until a restore. A test now fixes them.
+- An import's verification counted the rows of every table in the source,
+  so a source login allowed to read only the imported schemas failed it
+  with "permission denied" and the import rolled back after the copy. It
+  now reads only the chosen schemas.
+- **A Supabase migration's source could be in the platform's private
+  network.** Its address check, unlike an import's, did not refuse the
+  cloud private network or `XENIBASE_OUTBOUND_BLOCK` for a host the
+  platform admin allow-listed for the organisation, so a tenant who
+  controls that host's DNS could point it at platform services. It now
+  uses the import's check.
+- **A backup download that failed part-way looked complete.** Once the
+  first bytes were sent, a decryption error ended the response normally,
+  so the browser or `curl` saved a truncated archive as a finished
+  download. The connection is now cut instead, and the download fails. The
+  disaster-recovery runbook decrypted the metadata backup through standard
+  output and restored the result even after a failure; it now uses
+  `--out`, which leaves no file on failure, and `&&`
+  (`docs/disaster-recovery.md`).
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -116,6 +341,9 @@ bundle share one version (spec §11.5).
   4.2.4").
 - Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
   verifiers from finished password rotations and credential switches.
+- Migration 00075 gives the nightly and archive backups of projects deleted
+  before the upgrade, on platform targets, their final backup's expiry, and
+  at least seven days: they are deleted from a week after the upgrade.
 
 ## v4.2.4
 

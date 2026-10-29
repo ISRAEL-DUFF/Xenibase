@@ -259,7 +259,8 @@ func run() error {
 		}
 		bg.Add(1)
 		go func() { defer bg.Done(); etcdSvc.Run(bgCtx, 30*time.Second) }()
-		// Follow each HA instance's leader (V3 §2.2 "Routing").
+		// Follow each HA instance's leader (V3 §2.2 "Routing"), on one
+		// server at a time (an advisory lock; the others wait for it).
 		bg.Add(1)
 		go func() { defer bg.Done(); backups.Dedicated.RunHAWatcher(bgCtx, time.Second) }()
 		// The standby edge pooler (V3 §2.1): push the configuration to the
@@ -276,6 +277,9 @@ func run() error {
 		// Postgres minor releases, one instance at a time in the weekly
 		// maintenance window (V3 §2.4).
 		go func() { defer bg.Done(); backups.Dedicated.RunMaintenance(bgCtx, 5*time.Minute) }()
+		// Replication objects a move's cleanup could not remove.
+		bg.Add(1)
+		go func() { defer bg.Done(); backups.Dedicated.RunMoveSweep(bgCtx, time.Hour) }()
 		// Databases and roles of deleted shared projects that a failed
 		// rollback left behind.
 		bg.Add(1)
@@ -445,6 +449,9 @@ func run() error {
 		servicesSvc.Phone = platformPhone(cfg, log)
 		if backups != nil {
 			servicesSvc.Files = backups.FilesTarget
+			// A Supabase migration's source passes the import's check,
+			// platform networks included.
+			servicesSvc.CheckSource = backups.CheckSource
 		}
 		if cfg.CDN.On() {
 			servicesSvc.CDN = cdn.Cloudflare{ZoneID: cfg.CDN.CloudflareZoneID, Token: cfg.CDN.CloudflareToken}
@@ -1009,8 +1016,8 @@ func connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		pcfg.ConnConfig.RuntimeParams["application_name"] = "xenibase-server"
 	}
 	// pgx's default (4 on a small box) is too few: the webhook and job
-	// schedulers each keep a connection for their lock, and a burst of
-	// requests and workers then queue behind each other.
+	// schedulers and the HA watcher each keep a connection for their lock,
+	// and a burst of requests and workers then queue behind each other.
 	if !strings.Contains(url, "pool_max_conns") {
 		pcfg.MaxConns = max(pcfg.MaxConns, defaultMaxConns)
 	}
