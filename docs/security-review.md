@@ -2,24 +2,25 @@
 
 Each item of spec §7, how Xenibase enforces it, and what checks it
 automatically. "CI" means `.github/workflows/ci.yml` on every push (and
-weekly); "live" means xenibase-server's own nightly `isolation_check` operation
-on every shared cluster, whose failure raises an alert.
+weekly); "live" means xenibase-server's own `isolation_check` operation, run
+every 24 hours on every shared cluster (`isocheck.Every`), whose failure
+raises an alert.
 
 ## 7.1 Tenant isolation (shared tier)
 
 Every item below is enforced when a project is created and verified by
-`internal/isocheck`, which runs in CI (`test/isolation`) and nightly against
-live clusters (`isolation_check`, Settings → Tenant isolation). A failed
+`internal/isocheck`, which runs in CI (`test/isolation`) and every 24 hours
+against live clusters (`isolation_check`, Settings → Tenant isolation). A failed
 check raises the critical `isolation_check_failed` alert.
 `TestLiveIsolationCheck` breaks each item on purpose and requires the check
 to report it.
 
 | Checklist item | Enforced by | Verified by |
 | --- | --- | --- |
-| `CONNECT` on each database revoked from `PUBLIC` | `ensureDatabase`: `REVOKE ALL … FROM PUBLIC`, `GRANT CONNECT, TEMPORARY` to the owner only; `postgres` and `template1` revoked at cluster registration | `isocheck.Roles` (every project) and `Cluster` (maintenance databases); `TestTenantIsolation` "cannot connect to B's database", "public has no access"; live probe: tenant A connects to B, `postgres`, `template1` |
+| `CONNECT` on each database revoked from `PUBLIC` | `ensureDatabase`: `REVOKE ALL … FROM PUBLIC`, `GRANT CONNECT, TEMPORARY` to the owner only; `postgres` and `template1` revoked at cluster registration | `isocheck.Roles` (every project: every grantee of `CONNECT` or `TEMPORARY` on its database, from `aclexplode(datacl)`, must be one of that project's roles, its owner or a superuser) and `Cluster` (maintenance databases); `TestTenantIsolation` "cannot connect to B's database", "public has no access"; `TestRolesServiceLoginsAndGrants`; live probe: tenant A connects to B, `postgres`, `template1`, and grants itself `CONNECT` on B |
 | `CREATE` on `public` revoked from `PUBLIC` | `hardenDatabase` | `isocheck.Database` on every project database; isolation suite |
-| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console` and `<db>_console_ro`); "role has no dangerous attributes" |
-| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
+| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console`, `<db>_console_ro`, members' logins and the five backend-service logins `<db>_edge`, `_anon`, `_user`, `_service`, `_auth_hook`, of which only `_service` may have `BYPASSRLS`); "role has no dangerous attributes"; `TestRolesServiceLoginsAndGrants` |
+| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner; a backend-service login a member of any role); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
 | Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions; the extension API allows only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
 | etcd (HA, V3 §2.2) | TLS for clients and peers with client certificates required, from a separate etcd CA whose key is sealed with the master key; each HA instance's Patroni has its own client certificate. Patroni's REST API listens on the private network: reads are open, changes (switchover, configuration) need the instance's REST password. The SLA probe login can only connect and run `SELECT 1` (no grants beyond CONNECT). | `TestEtcdCluster` (no client certificate is refused) |
 | `pg_hba.conf` accepts only the pooler and control-plane addresses, `scram-sha-256`, `hostssl` where applicable | Bundle: `deploy/compose/shared-pg-hba.conf` names the fixed addresses of xenibase-server, the agent, and both poolers; agent-run clusters and instances: `xenibase-hba.sh` writes `XENIBASE_AGENT_DB_ALLOW` (default: private ranges) at initdb. V3 moves: the moves' own logins (`xenibase_move_<id>`, random password, dropped after the move) may also connect from `XENIBASE_AGENT_MOVE_ALLOW` (default: private ranges; bundle: its Docker network), added by the agent on every start; the bundle's shared cluster allows them from its Docker network | `isocheck.Cluster`: every network rule must be SCRAM (or `reject`/`cert`), name explicit addresses (no `all`, `samenet`, `0.0.0.0/0`), and use `hostssl` outside private ranges; `TestHBAFinding`; `TestClusterConfiguration` |
@@ -123,6 +124,8 @@ review found and fixed.
 | Outbound requests (V2 §9.1, §10.7) | `internal/outbound`, also for a project's own SMTP server and SMS provider `base_url`: https only (http to allow-listed hosts); every resolved address checked (IPv4-mapped, NAT64 and 6to4 addresses as the IPv4 address they embed); link-local and metadata never, even allow-listed; the request connects to the checked address, without proxies or redirects; per-org rate limits and counters; outbound off per org | `internal/outbound` tests, `TestWebhookDelivery`, `TestScheduledJobs` |
 | Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it | `TestSuspensionAndBreakGlass` |
 | Webhook trigger function (V2 §9.1) | `xenibase.webhook_enqueue()` is `SECURITY DEFINER` with `search_path = pg_catalog, pg_temp`, in a superuser-owned schema with all access revoked from `PUBLIC` (so tenants can't call it or attach it to triggers); a `xenibase` schema anything else owns is dropped first; the worker delivers an outbox row only for one of its own project's webhooks | `TestWebhookDelivery`, `TestWebhooksAcrossCopies` |
+| No `SECURITY DEFINER` function owned by anything but tenant roles (V2 §10.4) | Xenibase's own (the backend services' in `xb_*`, the webhook trigger in `xenibase`) pin `search_path`; nothing else Xenibase installs is `SECURITY DEFINER` | `isocheck.Database`: a `SECURITY DEFINER` function not installed by an extension and owned by a superuser or a role not of that database (neither its owner nor named after it) is a finding, unless it is in an `xb_*` schema or `xenibase` with `search_path` set; `TestSecurityDefiners`, `TestLiveIsolationCheck` |
+| Limits on every login, and logins off while suspended or hard-locked (V2 §10.4, §10.8) | `CONNECTION LIMIT` and `temp_file_limit` on the owner, members' logins and the backend services' five logins; `SetLogins` switches them all off | `isocheck.Roles`, for the backend-service logins too; `TestRolesServiceLoginsAndGrants`, `TestLiveIsolationCheck` (a suspended project's owner or request role switched back on) |
 | Personal roles across tier moves (V2 §3.5) | Member logins and the read-only role recreated with the same verifiers on promotion, demotion, restore and import | `TestMemberLoginsSurviveRestoreAndPromotion`, `TestDemotionLiveWriter` |
 | Running tenant SQL | The console, table editor, schema editor and SQL jobs sign in as the project's console login (`NOINHERIT`, may only `SET ROLE` to the project's roles), never an admin login. Read-only sessions (a `read_only` member, a read-scope token, the table browser's raw filter) sign in as `<db>_console_ro`, which may become only `<db>_ro` | `TestSQLConsole`, `TestJobSQLCannotEscalate`, `TestReadOnlySessionCannotBecomeOwner`, `TestReadOnlyConsoleCannotBecomeOwner` |
 | Copying a tenant's database | A restore runs the dump's functions (CHECK constraints, generated columns). Branches, restores, imports and the restore test restore as the console login with `--role` the owner; promotion and demotion through a short-lived login that inherits the project's roles but is no superuser (extensions created first, Xenibase's webhook schema copied on its own) | `TestCopiesDoNotRunAsSuperuser` |
@@ -379,5 +382,5 @@ vulnerabilities in both; the Go toolchain is 1.25.13.
   the server: it owns the table and could disable the triggers (§7.5).
 
 Sign-off: every §7.1 item is enforced at create and verified automatically
-in CI and weekly on live clusters; §7.2–7.5 items are implemented and
+in CI and every 24 hours on live clusters; §7.2–7.5 items are implemented and
 covered by the tests named above.

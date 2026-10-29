@@ -669,6 +669,21 @@ bundle share one version (spec §11.5).
   cancel, and on a later pass terminates a backend still running a
   statement it cancelled. The project's reaped log shows it as
   `statement_terminated` ("statement ended").
+- **The isolation check now audits the backend services' logins and every
+  database grant.** It looked at the owner, console and members' logins
+  only, so one of the five backend-service logins tenant SQL runs as on
+  the shared tier (`<db>_edge`, `_anon`, `_user`, `_service`,
+  `_auth_hook`) could keep `LOGIN` while its organisation was suspended,
+  lack its connection limit or `temp_file_limit`, gain an attribute or
+  join a predefined role, and the check passed; and it asked only whether
+  `PUBLIC` could connect, so `CONNECT` on one project's database granted
+  to another project's role passed too. The check now covers the five
+  logins (which must hold no role), requires every holder of `CONNECT` or
+  `TEMPORARY` on a project database to be one of that project's roles,
+  and, as V2 §10.4 asks, reports `SECURITY DEFINER` functions owned by
+  roles other than the tenant's, apart from Xenibase's own in the `xb_*`
+  and `xenibase` schemas with a pinned `search_path`. The live probes also
+  try a cross-project grant.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
@@ -723,6 +738,11 @@ bundle share one version (spec §11.5).
   can now return. A statement cancelled before the upgrade has no `pid`
   recorded, so if it caught the cancel it is cancelled once more, then
   ended on the following pass.
+- The isolation check audits more (the backend-service logins, every
+  grantee of `CONNECT` and `TEMPORARY`, `SECURITY DEFINER` functions), so
+  the first check after the upgrade can fail on something earlier checks
+  missed, such as a grant made by hand, and raise `isolation_check_failed`.
+  Its log names each finding.
 
 ## v4.2.4
 
