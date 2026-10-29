@@ -420,6 +420,13 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 		if err := log.Warn(ctx, "backup", "final backup skipped"); err != nil {
 			return err
 		}
+	} else if gone, err := s.databaseGone(ctx, p); err != nil {
+		return err
+	} else if gone {
+		// An earlier attempt took the backup and tore the project down.
+		if err := log.Info(ctx, "backup", "final backup not needed: an earlier attempt already dropped the database"); err != nil {
+			return err
+		}
 	} else if err := s.FinalBackup(ctx, p, log); err != nil {
 		return fmt.Errorf("final backup: %w", err)
 	}
@@ -434,6 +441,27 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 		return err
 	}
 	return log.Info(ctx, "done", "project %s deleted", p.DbName)
+}
+
+// databaseGone reports whether p's database no longer exists: a dedicated
+// project's instance is deleted, or a shared project's database is not on
+// its cluster.
+func (s *Service) databaseGone(ctx context.Context, p store.Project) (bool, error) {
+	if p.Tier == TierDedicated {
+		inst, err := store.New(s.db).GetInstance(ctx, p.InstanceID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return true, nil
+		}
+		return err == nil && inst.Status == "deleted", err
+	}
+	conn, err := s.connectInstance(ctx, p.InstanceID, "postgres")
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(context.Background())
+	var exists bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, p.DbName).Scan(&exists)
+	return !exists, err
 }
 
 // failDelete leaves a project whose delete gave up in "error", unrouted,
