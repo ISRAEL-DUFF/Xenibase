@@ -44,6 +44,11 @@ bundle share one version (spec §11.5).
   (`XENIBASE_EDGE_SECRET_ALL_REGIONS=true` restores the old scope,
   deprecated). See `docs/upgrade.md` before upgrading an install with a
   region API domain.
+- **A region's pooler hostname gets its own certificate.** Pooler hosts of a
+  region with its own hostname were sent the home region's certificate,
+  which doesn't name theirs. xenibase-server now keeps one per region, in the
+  `XENIBASE_POOLER_TLS` mode, in the region's directory. In `files` mode
+  the certificate must name every region's hostname (`docs/regions.md`).
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 

@@ -205,11 +205,17 @@ func (m *Manager) HTTPChallengeHandler(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if certmagic.LooksLikeHTTPChallenge(r) && m.issuer.HandleHTTPChallenge(w, r) {
+		if m.handleChallenge(w, r) {
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handleChallenge answers r if it is one of this Manager's HTTP-01
+// challenges.
+func (m *Manager) handleChallenge(w http.ResponseWriter, r *http.Request) bool {
+	return m.issuer != nil && certmagic.LooksLikeHTTPChallenge(r) && m.issuer.HandleHTTPChallenge(w, r)
 }
 
 // Bootstrap makes sure some certificate is in place, so the poolers can

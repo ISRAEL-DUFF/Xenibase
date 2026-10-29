@@ -33,7 +33,14 @@ Regions are managed under **Platform → Regions** (or
    [edge poolers](edge-poolers.md)), and set the region's floating IP ID.
    Point the region's hostname at that floating IP. Until a region has
    pooler hosts of its own, the home region's poolers serve its projects
-   (Platform → Regions says "served by the home poolers").
+   (Platform → Regions says "served by the home poolers"). The region's
+   pooler hosts serve a certificate for its hostname, obtained and renewed
+   the same way as the home one (`XENIBASE_POOLER_TLS`: self-signed, or from
+   the ACME CA over HTTP-01, which needs port 80 of the region's hostname to
+   reach xenibase-server's `/.well-known/acme-challenge/`; until it does, a
+   self-signed certificate for the hostname stands in). In `files` mode the one
+   certificate you supply is served everywhere, so it must name every
+   region's hostname (or be a wildcard that covers them).
 5. **Data residency** (optional): tick **Offer data residency**. It needs
    the country and an in-country backup target.
 6. **API domain** (optional, for backend services): set the region's own

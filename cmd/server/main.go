@@ -559,8 +559,9 @@ func run() error {
 	}
 
 	var certs *tlscert.Manager
+	var regionCerts *tlscert.Regions // regions with their own pooler hostname
 	if pm != nil {
-		if certs, err = setupPoolerTLS(cfg, pm, settingsStore, log); err != nil {
+		if certs, regionCerts, err = setupPoolerTLS(cfg, pm, settingsStore, regionSvc, log); err != nil {
 			return err
 		}
 	}
@@ -658,7 +659,7 @@ func run() error {
 		MetricsToken:    cfg.Insight.MetricsToken,
 	})
 	if certs != nil {
-		handler = certs.HTTPChallengeHandler(handler)
+		handler = regionCerts.HTTPChallengeHandler(certs.HTTPChallengeHandler(handler))
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -677,6 +678,8 @@ func run() error {
 		// Only once listening: ACME challenges are answered by this server.
 		bg.Add(1)
 		go func() { defer bg.Done(); certs.Run(bgCtx) }()
+		bg.Add(1)
+		go func() { defer bg.Done(); regionCerts.Run(bgCtx, 30*time.Second) }()
 	}
 
 	errc := make(chan error, 1)
@@ -753,12 +756,13 @@ func sweepAuth(ctx context.Context, svc *auth.Service, log *slog.Logger) {
 	}
 }
 
-// setupPoolerTLS builds the certificate manager for the poolers and makes
-// sure a certificate exists before they need one.
-func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, log *slog.Logger) (*tlscert.Manager, error) {
+// setupPoolerTLS builds the certificate managers for the poolers, the home
+// region's and one per region with its own pooler hostname, and makes sure
+// a certificate exists before they need one.
+func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, rs *regions.Service, log *slog.Logger) (*tlscert.Manager, *tlscert.Regions, error) {
 	mode, err := tlscert.ParseMode(cfg.PoolerTLS.Mode)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tc := tlscert.Config{
 		Mode: mode, Dir: pm.Dir(), FileMode: pm.FileMode(), Reload: pm.Reload,
@@ -771,23 +775,41 @@ func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, l
 	if path := cfg.PoolerTLS.ACMECARoots; path != "" {
 		pemBytes, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: %w", err)
+			return nil, nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: %w", err)
 		}
 		tc.ACMERoots = x509.NewCertPool()
 		if !tc.ACMERoots.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: no certificates in %s", path)
+			return nil, nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: no certificates in %s", path)
 		}
 	}
 	m, err := tlscert.New(tc, st.DBHost())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := m.Bootstrap(); err != nil {
-		return nil, fmt.Errorf("pooler TLS: %w", err)
+		return nil, nil, fmt.Errorf("pooler TLS: %w", err)
 	}
 	st.OnDBHostChange(m.SetHost)
 	log.Info("pooler TLS", "mode", mode, "host", st.DBHost())
-	return m, nil
+	regionCerts := tlscert.NewRegions(tc, pm.RegionDir, func(ctx context.Context) (map[string]string, error) {
+		list, err := rs.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		hosts := map[string]string{}
+		for _, r := range list {
+			if r.ID != rs.Home() && r.PoolerHost != "" {
+				hosts[r.ID] = r.PoolerHost
+			}
+		}
+		return hosts, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := regionCerts.Sync(ctx); err != nil {
+		log.Warn("pooler TLS for regions", "err", err)
+	}
+	return m, regionCerts, nil
 }
 
 func toAPITLS(s tlscert.Status) gen.TlsStatus {
