@@ -2,7 +2,7 @@
 
 The engineering guide to this repository: how Xenibase is built, feature by feature and component by component, checked against the code. Open [site/index.html](site/index.html) in a browser. It is one self-contained file.
 
-`dist/artifact.html` is the same atlas without the document wrapper, for publishing to a host that adds its own (such as a claude.ai artifact). Republish it after a rebuild.
+`dist/artifact.html` is the same atlas without the document wrapper, for publishing to a host that adds its own (such as a claude.ai artifact). A copy is published at <https://claude.ai/artifact/Bm1T1LX7tdx5pDorcwqnNY> (private until shared from its Share menu). Republish it after a rebuild.
 
 Each page records the commit it was last checked against. Code excerpts, line links, package summaries and counts are read from the repository every time the atlas is built, so they follow the code. Prose and diagrams need a person. `make atlas-stale` says which pages need one.
 
