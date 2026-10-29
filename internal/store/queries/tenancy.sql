@@ -238,9 +238,13 @@ DELETE FROM org_members WHERE org_id = @org_id;
 UPDATE invitations SET revoked_at = now() WHERE org_id = @org_id AND accepted_at IS NULL AND revoked_at IS NULL;
 
 -- name: ExpireOrgFinalBackups :exec
--- Final backups of a deleted organisation's projects are kept 30 days (V2 s10.10).
+-- Final backups of a deleted organisation's projects are kept 30 days (V2
+-- s10.10), and their nightly and archive backups on platform targets go
+-- with them; those on the organisation's own targets are left alone.
 UPDATE backups b SET expires_at = @expires_at
-FROM projects p WHERE p.id = b.project_id AND p.org_id = @org_id AND b.kind = 'final' AND b.status = 'succeeded';
+FROM projects p WHERE p.id = b.project_id AND p.org_id = @org_id AND b.status IN ('succeeded', 'copied')
+  AND (b.kind = 'final' OR (b.kind IN ('logical', 'archive')
+    AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL))));
 
 -- name: OrgDedicatedUse :one
 -- The org's live dedicated instances and their total size: its dedicated

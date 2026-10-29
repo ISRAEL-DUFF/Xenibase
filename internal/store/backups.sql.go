@@ -406,12 +406,42 @@ func (q *Queries) ExpireBackupAt(ctx context.Context, arg ExpireBackupAtParams) 
 	return err
 }
 
+const expireDeletedProjectBackups = `-- name: ExpireDeletedProjectBackups :execrows
+UPDATE backups b SET expires_at = COALESCE(
+    (SELECT max(f.expires_at) FROM backups f
+     WHERE f.project_id = $1::uuid AND f.kind = 'final' AND f.status IN ('succeeded', 'copied')),
+    $2::timestamptz)
+WHERE b.project_id = $1::uuid AND b.kind IN ('logical', 'archive') AND b.status IN ('succeeded', 'copied')
+  AND b.expires_at IS NULL
+  AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL))
+`
+
+type ExpireDeletedProjectBackupsParams struct {
+	ProjectID uuid.UUID
+	ExpiresAt time.Time
+}
+
+// tenant: system - a project delete, once the project is gone.
+// Only the final backup outlives a deleted project, for 30 days (V2 s10.10):
+// its nightly and archive backups on platform targets expire with it (or
+// at @expires_at without one). Org targets are the organisation's and are
+// left alone.
+func (q *Queries) ExpireDeletedProjectBackups(ctx context.Context, arg ExpireDeletedProjectBackupsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, expireDeletedProjectBackups, arg.ProjectID, arg.ExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const expiredBackups = `-- name: ExpiredBackups :many
 SELECT id, project_id, kind, object_key, size_bytes, checksum, started_at, finished_at, status, expires_at, storage_target_id, operation_id, key_wrapped, error, deleted_at, encryption_key_id, walg_prefix, copy_of, copy_target_id, copy_status, copied_at, copy_error FROM backups
-WHERE status = 'succeeded' AND expires_at IS NOT NULL AND expires_at < now()
+WHERE status IN ('succeeded', 'copied') AND expires_at IS NOT NULL AND expires_at < now()
 `
 
 // tenant: system - backup workers and the scheduler, or a project the request already authorized.
+// A copied original expires like any other backup (its copy carries the
+// same expiry and takes it along when it goes first).
 func (q *Queries) ExpiredBackups(ctx context.Context) ([]Backup, error) {
 	rows, err := q.db.Query(ctx, expiredBackups)
 	if err != nil {

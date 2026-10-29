@@ -37,7 +37,9 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   add-on).
 - Retention: 7 daily backups and 4 weekly ones, or longer as an add-on
   (extended: 30 daily, 12 weekly; long: 30 daily, 52 weekly); final
-  backups of deleted projects are kept 30 days. See
+  backups of deleted projects are kept 30 days, and a deleted project's
+  earlier backups on platform targets go with its final backup (those in
+  an organisation's own bucket are left alone). See
   [billing add-ons](billing.md#add-ons).
 - Weekly, a random project's latest backup is restored into a scratch
   database and verified (Settings → Backup checks).

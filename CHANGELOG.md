@@ -106,6 +106,14 @@ bundle share one version (spec §11.5).
   seconds. `docs/migrations.md` sets the expand-then-contract rule.
 - Each call to a node's agent opened a new TLS connection; calls now reuse one
   per node.
+- **A deleted project's nightly backups were kept forever.** Only its final
+  backup was given an expiry, so up to 11 earlier backups (82 with the long
+  add-on) stayed on platform storage, listed and restorable. A delete now
+  dates its nightly and archive backups with the final backup (30 days), as
+  does an organisation's deletion, and the hourly expiry removes them with
+  their cross-region copies; backups in an organisation's own bucket are
+  left alone. **Migration 00075** dates those of projects already deleted,
+  at least a week from the upgrade.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -116,6 +124,9 @@ bundle share one version (spec §11.5).
   4.2.4").
 - Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
   verifiers from finished password rotations and credential switches.
+- Migration 00075 gives the nightly and archive backups of projects deleted
+  before the upgrade, on platform targets, their final backup's expiry, and
+  at least seven days: they are deleted from a week after the upgrade.
 
 ## v4.2.4
 

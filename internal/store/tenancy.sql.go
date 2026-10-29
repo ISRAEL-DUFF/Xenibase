@@ -348,7 +348,9 @@ func (q *Queries) EndExpiredBreakGlass(ctx context.Context) ([]BreakGlassSession
 
 const expireOrgFinalBackups = `-- name: ExpireOrgFinalBackups :exec
 UPDATE backups b SET expires_at = $1
-FROM projects p WHERE p.id = b.project_id AND p.org_id = $2 AND b.kind = 'final' AND b.status = 'succeeded'
+FROM projects p WHERE p.id = b.project_id AND p.org_id = $2 AND b.status IN ('succeeded', 'copied')
+  AND (b.kind = 'final' OR (b.kind IN ('logical', 'archive')
+    AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL))))
 `
 
 type ExpireOrgFinalBackupsParams struct {
@@ -356,7 +358,9 @@ type ExpireOrgFinalBackupsParams struct {
 	OrgID     uuid.UUID
 }
 
-// Final backups of a deleted organisation's projects are kept 30 days (V2 s10.10).
+// Final backups of a deleted organisation's projects are kept 30 days (V2
+// s10.10), and their nightly and archive backups on platform targets go
+// with them; those on the organisation's own targets are left alone.
 func (q *Queries) ExpireOrgFinalBackups(ctx context.Context, arg ExpireOrgFinalBackupsParams) error {
 	_, err := q.db.Exec(ctx, expireOrgFinalBackups, arg.ExpiresAt, arg.OrgID)
 	return err
