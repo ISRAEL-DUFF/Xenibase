@@ -19,6 +19,15 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **The HA watcher paused healthy projects when xenibase-server lost sight
+  of their primary,** and ran on every server without a lock. It now pauses
+  the poolers only when the members that answer agree there is no running
+  leader, and leaves them alone when none answers. One server at a time
+  watches, under a Postgres advisory lock; a server that loses it resumes
+  the poolers it paused, and the next one resumes any left paused. A
+  switchover marks its instance (**migration 00073**) so the watcher on
+  another server leaves it alone instead of recording a failover. See
+  `docs/ha.md` ("Failover").
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
