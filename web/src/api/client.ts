@@ -754,6 +754,12 @@ export const api = {
     getJSON<ReplicaList>(`/api/v1/projects/${id}/replicas`),
   createReplica: (id: string, b: S["ReplicaCreateRequest"]) =>
     request<Operation>("POST", `/api/v1/projects/${id}/replicas`, b),
+  updateReplica: (id: string, replica: string, b: S["ReplicaSettings"]) =>
+    request<ReadReplica>(
+      "PATCH",
+      `/api/v1/projects/${id}/replicas/${replica}`,
+      b,
+    ),
   deleteReplica: (id: string, replica: string) =>
     request<Operation>("DELETE", `/api/v1/projects/${id}/replicas/${replica}`),
   detachReplica: (id: string, replica: string, name: string) =>

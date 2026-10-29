@@ -11,7 +11,8 @@ as long as the installer names its logins `<database>_app` and
 
 **Update:** the per-project IP allowlist is built too
 ([Network access](../network-access.md)): Taskiem lists its servers'
-addresses and the poolers refuse its logins from anywhere else.
+addresses and the poolers refuse its logins from anywhere else. So are
+the replica's standby settings (hot standby feedback and the standby delay).
 
 ## The short answer
 
@@ -36,7 +37,7 @@ the change works for every dedicated project, not just Taskiem's.
 | WAL archiving, daily base backups, another zone | Mostly | WAL-G archives continuously, with configurable retention and PITR window (V4.1-M3). Copies to another zone need a copy target; with Nigerian residency on, that has to be a second in-country bucket. |
 | Synchronous standby, automatic failover | Yes | HA with synchronous replication (`docs/ha.md`): nothing acknowledged is lost; writes came back in 17 to 20 s in the tests. Clients keep one address (the pooler moves the route). Needs the region's etcd cluster: 3 nodes in 3 failure domains. |
 | Self-service restore to a new server at a chosen time | Yes | Restores go to a new project, in the same region; the original is untouched. |
-| Async read replica with `hot_standby_feedback`, ~30 s standby delay | Partly | Read replicas exist (`docs/read-replicas.md`), but those two settings aren't exposed; Postgres's defaults apply (`hot_standby_feedback` off). |
+| Async read replica with `hot_standby_feedback`, ~30 s standby delay | Yes (built) | Per-replica standby settings (`docs/read-replicas.md`, "Long queries on a replica"): feedback on, 30 s. |
 | A smaller dedicated project for staging | Yes | Another dedicated project in the same organisation, within its allowance. |
 
 ## The one change: role management on dedicated projects
@@ -75,6 +76,5 @@ for an operator who wants to pre-create roles without opening this up.
 ## Smaller gaps worth closing
 
 - ~~**IP allowlist per project** on the poolers~~: built.
-- **Replica settings**: `hot_standby_feedback` and
-  `max_standby_streaming_delay` as read-replica options.
+- ~~**Replica settings**~~: built.
 - **Connection limit** on the plan Taskiem buys: at least 150.

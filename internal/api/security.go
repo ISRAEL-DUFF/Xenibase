@@ -206,6 +206,7 @@ var auditActions = map[string]string{
 	"PUT /api/v1/projects/{id}/residency":                          "project.residency",
 	"PUT /api/v1/projects/{id}/manage-roles":                       "project.manage_roles",
 	"PUT /api/v1/projects/{id}/network":                            "project.network",
+	"PATCH /api/v1/projects/{id}/replicas/{replica_id}":            "project.replica_settings",
 	"POST /api/v1/admin/capacity/evaluate":                         "capacity.evaluate",
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/approve":  "capacity.approve",
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/reject":   "capacity.reject",

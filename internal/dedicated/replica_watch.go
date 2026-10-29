@@ -168,6 +168,7 @@ func (s *Service) checkReplicas(ctx context.Context, inst store.Instance, p stor
 			return err
 		}
 	}
+	s.reconcileReplicaSettings(ctx, inst, reps)
 	if changed {
 		if err := s.projects.SyncPooler(ctx, nil, "pooler", "read replica rotation changed"); err != nil {
 			return fmt.Errorf("read route: %w", err)

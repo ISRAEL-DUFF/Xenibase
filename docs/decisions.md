@@ -909,3 +909,15 @@ The spec's own decisions log is §16.
 | 5 | Smoke test | Provisioning and rotation skip the owner-through-the-pooler check when a list exists. | It connects from xenibase-server's address, which needn't be on the list. |
 | 6 | Upgrades | `hba.conf` is the third pooler file; the agent requires only the first two, so a new agent works with an old server. An old agent refuses an unknown file: pooler hosts are upgraded first, as agents already are. | Matches docs/upgrade.md's agents-first rule. |
 | 7 | Done-when | `TestProjectIPAllowlist`: with only TEST-NET-3 on the list the owner is refused on both pooler ports and the data API still answers; with the test's address on the list it connects; bad entries get 400 and leave the list alone; cleared, anywhere again. | |
+
+## Standby settings per read replica (October 2026)
+
+| # | Topic | Decision | Why |
+| --- | --- | --- | --- |
+| 1 | What | `hot_standby_feedback` and one wait, written to both `max_standby_streaming_delay` and `max_standby_archive_delay`, per replica (`read_replicas`), 0 to 900 s. Defaults are Postgres's (off, 30 s). | Taskiem asked for feedback on and about a 30 s delay on their replica. The archive delay applies when a replica replays from WAL-G after falling behind; a different value there would surprise people. A delay of -1 (wait forever) and anything past 15 minutes are refused: the replica would sit out of rotation for as long as one query runs. |
+| 2 | Where it's applied | In the replica's member spec (Patroni's local `postgresql.parameters`, never the DCS), and live with `ALTER SYSTEM` and `pg_reload_conf()` on that member alone. All three are `sighup` parameters. | Local parameters keep them on the replica and off the primary and HA standbys. The spec covers a recreated container; `ALTER SYSTEM` covers a change without one. |
+| 3 | Drift | The HA watcher confirms them every 5 minutes per streaming replica (retrying a failure every 30 s), in the background so a slow replica never holds up failover detection. `settings_applied_at` and `settings_error` record the outcome. | A replica rebuilt from a base backup gets the primary's `postgresql.auto.conf`, whose values would win over the spec's after a later change. |
+| 4 | Who | Same as adding a replica (`authz.ProjectPromote`), audited as `project.replica_settings` with the values before and after. | Feedback costs the primary; it belongs with whoever may add replicas. |
+| 5 | Detach | `ALTER SYSTEM RESET` of all three after promotion. | They would otherwise pass to the new project's own standbys. |
+| 6 | Done-when | `TestReplicaStandbySettings`: a 901 s delay is refused; a replica created with feedback on and 120 s runs with them (both delays) while the primary keeps feedback off; the primary holds the replica's xmin on its slot; a `PATCH` to off and 5 s applies without the replica restarting and the primary releases the xmin; a partial `PATCH` keeps the other field; an unknown replica gets 404. | |
+

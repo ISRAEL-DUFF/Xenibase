@@ -8292,20 +8292,28 @@ type QuotaItem struct {
 
 // ReadReplica defines model for ReadReplica.
 type ReadReplica struct {
-	CreatedAt time.Time          `json:"created_at"`
-	Error     *string            `json:"error,omitempty"`
-	Id        openapi_types.UUID `json:"id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	Error              *string            `json:"error,omitempty"`
+	HotStandbyFeedback bool               `json:"hot_standby_feedback"`
+	Id                 openapi_types.UUID `json:"id"`
 
 	// InRotation The read-only route sends reads to it.
 	InRotation bool   `json:"in_rotation"`
 	LagBytes   *int64 `json:"lag_bytes,omitempty"`
 
 	// LagMs How long ago the primary wrote what it has not replayed yet.
-	LagMs             *int64             `json:"lag_ms,omitempty"`
-	NodeId            openapi_types.UUID `json:"node_id"`
-	NodeName          string             `json:"node_name"`
-	Region            string             `json:"region"`
-	RotationChangedAt *time.Time         `json:"rotation_changed_at,omitempty"`
+	LagMs                  *int64             `json:"lag_ms,omitempty"`
+	MaxStandbyDelaySeconds int                `json:"max_standby_delay_seconds"`
+	NodeId                 openapi_types.UUID `json:"node_id"`
+	NodeName               string             `json:"node_name"`
+	Region                 string             `json:"region"`
+	RotationChangedAt      *time.Time         `json:"rotation_changed_at,omitempty"`
+
+	// SettingsAppliedAt When the replica last confirmed its settings.
+	SettingsAppliedAt *time.Time `json:"settings_applied_at,omitempty"`
+
+	// SettingsError Why the settings couldn't be applied yet (retried).
+	SettingsError *string `json:"settings_error,omitempty"`
 
 	// Size The instance profile it runs with (the primary's).
 	Size   string            `json:"size"`
@@ -8572,6 +8580,12 @@ type ReplayResult struct {
 
 // ReplicaCreateRequest defines model for ReplicaCreateRequest.
 type ReplicaCreateRequest struct {
+	// HotStandbyFeedback See ReplicaSettings (default false).
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds See ReplicaSettings (default 30).
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
+
 	// NodeId Where the replica goes (default the least loaded eligible node in the region).
 	NodeId *openapi_types.UUID `json:"node_id,omitempty"`
 
@@ -8597,6 +8611,15 @@ type ReplicaList struct {
 	// ReadUrl The read-only route's connection string, without a password.
 	ReadUrl  *string       `json:"read_url,omitempty"`
 	Replicas []ReadReplica `json:"replicas"`
+}
+
+// ReplicaSettings A read replica's standby settings. Omitted fields keep their value.
+type ReplicaSettings struct {
+	// HotStandbyFeedback The replica tells the primary which rows its running queries still read, so the primary's vacuum keeps them and long queries on the replica aren't cancelled for it. The cost is on the primary: dead rows stay longer, so a long query on the replica can bloat tables.
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds How long replay waits for a query that conflicts with it before cancelling the query (max_standby_streaming_delay and max_standby_archive_delay). Longer lets long queries finish but lets the replica fall further behind; one behind by more than the rotation threshold leaves the read route until it catches up.
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
 }
 
 // ResizePlan defines model for ResizePlan.
@@ -11367,6 +11390,9 @@ type ReclaimSpaceJSONRequestBody = ReclaimSpaceRequest
 
 // CreateProjectReplicaJSONRequestBody defines body for CreateProjectReplica for application/json ContentType.
 type CreateProjectReplicaJSONRequestBody = ReplicaCreateRequest
+
+// UpdateProjectReplicaJSONRequestBody defines body for UpdateProjectReplica for application/json ContentType.
+type UpdateProjectReplicaJSONRequestBody = ReplicaSettings
 
 // DetachProjectReplicaJSONRequestBody defines body for DetachProjectReplica for application/json ContentType.
 type DetachProjectReplicaJSONRequestBody = ReplicaDetachRequest
@@ -15058,6 +15084,24 @@ type ClientInterface interface {
 	//
 	// Corresponds with DELETE /api/v1/projects/{id}/replicas/{replica_id} (the `DeleteProjectReplica` operationId).
 	DeleteProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateProjectReplicaWithBody Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplicaWithBody(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateProjectReplica Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DetachProjectReplicaWithBody Promote a read replica into a standalone project
 	//
@@ -24297,6 +24341,44 @@ func (c *Client) CreateProjectReplica(ctx context.Context, id ProjectID, body Cr
 // Corresponds with DELETE /api/v1/projects/{id}/replicas/{replica_id} (the `DeleteProjectReplica` operationId).
 func (c *Client) DeleteProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteProjectReplicaRequest(c.Server, id, replicaId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateProjectReplicaWithBody Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *Client) UpdateProjectReplicaWithBody(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateProjectReplicaRequestWithBody(c.Server, id, replicaId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateProjectReplica Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *Client) UpdateProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateProjectReplicaRequest(c.Server, id, replicaId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -40817,6 +40899,60 @@ func NewDeleteProjectReplicaRequest(server string, id ProjectID, replicaId Repli
 	return req, nil
 }
 
+// NewUpdateProjectReplicaRequest calls the generic UpdateProjectReplica builder with application/json body
+func NewUpdateProjectReplicaRequest(server string, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateProjectReplicaRequestWithBody(server, id, replicaId, "application/json", bodyReader)
+}
+
+// NewUpdateProjectReplicaRequestWithBody constructs an http.Request for the UpdateProjectReplica method, with any body, and a specified content type
+func NewUpdateProjectReplicaRequestWithBody(server string, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "replica_id", replicaId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/replicas/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewDetachProjectReplicaRequest calls the generic DetachProjectReplica builder with application/json body
 func NewDetachProjectReplicaRequest(server string, id ProjectID, replicaId ReplicaID, body DetachProjectReplicaJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -48322,6 +48458,24 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with DELETE /api/v1/projects/{id}/replicas/{replica_id} (the `DeleteProjectReplica` operationId).
 	DeleteProjectReplicaWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, reqEditors ...RequestEditorFn) (*DeleteProjectReplicaResponse, error)
+
+	// UpdateProjectReplicaWithBodyWithResponse Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplicaWithBodyWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error)
+
+	// UpdateProjectReplicaWithResponse Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplicaWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error)
 
 	// DetachProjectReplicaWithBodyWithResponse Promote a read replica into a standalone project
 	//
@@ -65172,6 +65326,54 @@ func (r DeleteProjectReplicaResponse) ContentType() string {
 	return ""
 }
 
+type UpdateProjectReplicaResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ReadReplica
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r UpdateProjectReplicaResponse) GetJSON200() *ReadReplica {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r UpdateProjectReplicaResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r UpdateProjectReplicaResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateProjectReplicaResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateProjectReplicaResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r UpdateProjectReplicaResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type DetachProjectReplicaResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -75667,6 +75869,36 @@ func (c *ClientWithResponses) DeleteProjectReplicaWithResponse(ctx context.Conte
 		return nil, err
 	}
 	return ParseDeleteProjectReplicaResponse(rsp)
+}
+
+// UpdateProjectReplicaWithBodyWithResponse Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *ClientWithResponses) UpdateProjectReplicaWithBodyWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error) {
+	rsp, err := c.UpdateProjectReplicaWithBody(ctx, id, replicaId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateProjectReplicaResponse(rsp)
+}
+
+// UpdateProjectReplicaWithResponse Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *ClientWithResponses) UpdateProjectReplicaWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error) {
+	rsp, err := c.UpdateProjectReplica(ctx, id, replicaId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateProjectReplicaResponse(rsp)
 }
 
 // DetachProjectReplicaWithBodyWithResponse Promote a read replica into a standalone project
@@ -88269,6 +88501,39 @@ func ParseDeleteProjectReplicaResponse(rsp *http.Response) (*DeleteProjectReplic
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateProjectReplicaResponse parses an HTTP response from a UpdateProjectReplicaWithResponse call
+func ParseUpdateProjectReplicaResponse(rsp *http.Response) (*UpdateProjectReplicaResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateProjectReplicaResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ReadReplica
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

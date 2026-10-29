@@ -534,6 +534,7 @@ var specMatrix = map[authz.Action][]string{
 		"POST /api/v1/projects/{id}/ha/etcd-move",
 		// V4 §7 read replicas: create, delete, detach into a project
 		"POST /api/v1/projects/{id}/replicas", "DELETE /api/v1/projects/{id}/replicas/{replica_id}",
+		"PATCH /api/v1/projects/{id}/replicas/{replica_id}",
 		"POST /api/v1/projects/{id}/replicas/{replica_id}/detach",
 	},
 	// "Delete project" (transfer also needs owner of both orgs, checked in the handler)
