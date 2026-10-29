@@ -93,6 +93,9 @@ func (s *Service) copyObject(ctx context.Context, b store.Backup, dst *storage.C
 	if err != nil {
 		return err
 	}
+	if err := sameLocation(src, dst.Target()); err != nil {
+		return fmt.Errorf("the region's copy target is the backup's own: %w", err)
+	}
 	sc, err := storage.New(src)
 	if err != nil {
 		return err
@@ -135,7 +138,8 @@ func atCopy(b store.Backup) (store.Backup, error) {
 	return b, nil
 }
 
-// deleteCopy removes b's cross-region copy, if it has one.
+// deleteCopy removes b's cross-region copy, if it has one. A copy at b's
+// own bucket and prefix is b itself, and stays.
 func (s *Service) deleteCopy(ctx context.Context, b store.Backup) error {
 	c, err := atCopy(b)
 	if err != nil {
@@ -147,6 +151,13 @@ func (s *Service) deleteCopy(ctx context.Context, b store.Backup) error {
 	}
 	if err != nil {
 		return err
+	}
+	primary, err := s.backupTarget(ctx, b)
+	if err != nil && !errors.Is(err, ErrTargetGone) {
+		return err
+	}
+	if err == nil && sameLocation(primary, t) != nil {
+		return nil
 	}
 	cl, err := storage.New(t)
 	if err != nil {

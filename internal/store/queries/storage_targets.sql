@@ -21,6 +21,10 @@ SELECT * FROM storage_targets WHERE org_id IS NULL AND deleted_at IS NULL ORDER 
 -- name: ListOrgStorageTargets :many
 SELECT * FROM storage_targets WHERE org_id = @org_id::uuid AND deleted_at IS NULL ORDER BY name;
 
+-- name: LiveStorageTargetLocations :many
+-- tenant: system - a target being saved is checked against every live target's location, across organisations; only ids, names, owners and locations.
+SELECT id, org_id, name, endpoint, bucket, prefix FROM storage_targets WHERE deleted_at IS NULL;
+
 -- name: InsertStorageTarget :one
 INSERT INTO storage_targets (id, org_id, name, endpoint, bucket, prefix, region, path_style, credentials, is_default, created_by)
 VALUES (@id, sqlc.narg(org_id), @name, @endpoint, @bucket, @prefix, @region, @path_style, @credentials, @is_default, sqlc.narg(created_by))

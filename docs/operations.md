@@ -60,7 +60,9 @@ use them, the storage doesn't count against its quota, and neither other
 organisations nor you see them (the admin organisation list only counts
 the projects using one). Adding or editing a target writes, reads, lists
 and deletes a test object under its prefix first; credentials are sealed
-with the master key and never shown again.
+with the master key and never shown again. Two targets can't share an
+endpoint, bucket and prefix (give each its own prefix): a copy between
+them would be the original, and deleting the original would delete both.
 
 A project admin picks the target under **Backups → Storage**. New backups
 go there; existing ones stay where they are and stay restorable, or can

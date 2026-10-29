@@ -1663,3 +1663,51 @@ func (q *Queries) SweepStaleBackups(ctx context.Context) (int64, error) {
 	}
 	return result.RowsAffected(), nil
 }
+
+const verifiedCopiesOf = `-- name: VerifiedCopiesOf :many
+SELECT id, project_id, kind, object_key, size_bytes, checksum, started_at, finished_at, status, expires_at, storage_target_id, operation_id, key_wrapped, error, deleted_at, encryption_key_id, walg_prefix, copy_of, copy_target_id, copy_status, copied_at, copy_error FROM backups WHERE copy_of = $1 AND status = 'succeeded' AND deleted_at IS NULL
+`
+
+// tenant: system - copy-existing checks an original's copies before deleting it.
+func (q *Queries) VerifiedCopiesOf(ctx context.Context, copyOf *uuid.UUID) ([]Backup, error) {
+	rows, err := q.db.Query(ctx, verifiedCopiesOf, copyOf)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Backup
+	for rows.Next() {
+		var i Backup
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Kind,
+			&i.ObjectKey,
+			&i.SizeBytes,
+			&i.Checksum,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.StorageTargetID,
+			&i.OperationID,
+			&i.KeyWrapped,
+			&i.Error,
+			&i.DeletedAt,
+			&i.EncryptionKeyID,
+			&i.WalgPrefix,
+			&i.CopyOf,
+			&i.CopyTargetID,
+			&i.CopyStatus,
+			&i.CopiedAt,
+			&i.CopyError,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

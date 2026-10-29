@@ -500,6 +500,47 @@ func (q *Queries) ListPlatformStorageTargets(ctx context.Context) ([]StorageTarg
 	return items, nil
 }
 
+const liveStorageTargetLocations = `-- name: LiveStorageTargetLocations :many
+SELECT id, org_id, name, endpoint, bucket, prefix FROM storage_targets WHERE deleted_at IS NULL
+`
+
+type LiveStorageTargetLocationsRow struct {
+	ID       uuid.UUID
+	OrgID    *uuid.UUID
+	Name     string
+	Endpoint string
+	Bucket   string
+	Prefix   string
+}
+
+// tenant: system - a target being saved is checked against every live target's location, across organisations; only ids, names, owners and locations.
+func (q *Queries) LiveStorageTargetLocations(ctx context.Context) ([]LiveStorageTargetLocationsRow, error) {
+	rows, err := q.db.Query(ctx, liveStorageTargetLocations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LiveStorageTargetLocationsRow
+	for rows.Next() {
+		var i LiveStorageTargetLocationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrgID,
+			&i.Name,
+			&i.Endpoint,
+			&i.Bucket,
+			&i.Prefix,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const orgPlatformBackupBytes = `-- name: OrgPlatformBackupBytes :one
 SELECT COALESCE(sum(b.size_bytes), 0)::float8
 FROM backups b JOIN projects p ON p.id = b.project_id JOIN storage_targets t ON t.id = b.storage_target_id

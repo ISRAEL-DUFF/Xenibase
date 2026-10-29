@@ -195,6 +195,10 @@ ORDER BY b.finished_at;
 -- tenant: system - retention removes a copy's original along with it.
 SELECT * FROM backups WHERE id = @id AND status = 'copied' AND deleted_at IS NULL;
 
+-- name: VerifiedCopiesOf :many
+-- tenant: system - copy-existing checks an original's copies before deleting it.
+SELECT * FROM backups WHERE copy_of = @copy_of AND status = 'succeeded' AND deleted_at IS NULL;
+
 -- name: CopiedOriginals :many
 -- tenant: system - copy-existing with delete_originals for a project the request already authorized.
 SELECT * FROM backups WHERE project_id = @project_id AND status = 'copied' AND deleted_at IS NULL;

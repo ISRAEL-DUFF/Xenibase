@@ -114,6 +114,15 @@ bundle share one version (spec §11.5).
   their cross-region copies; backups in an organisation's own bucket are
   left alone. **Migration 00075** dates those of projects already deleted,
   at least a week from the upgrade.
+- **Copying backups between two targets at one place deleted them.** Two
+  storage targets could name the same endpoint, bucket and prefix
+  (`backups` and `backups/` included); a switch between them with "delete
+  the originals" copied each object onto itself and then deleted it, and
+  turning on data residency could delete a backup as its own cross-region
+  copy. Such a target is now refused, and copies, and deletes of an
+  original or a copy, between two existing ones are refused too. If two of
+  your targets already share a place, send new backups to one of them;
+  don't change either's prefix, which leaves the backups on it unreachable.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
