@@ -49,6 +49,20 @@ func TestDecrypt(t *testing.T) {
 		t.Fatal("decrypted bytes differ")
 	}
 
+	// An object cut short fails part-way through, after writing, and with
+	// --out leaves no file (the disaster-recovery runbook relies on it).
+	cut := filepath.Join(dir, "cut.dump.enc")
+	if err := os.WriteFile(cut, enc.Bytes()[:enc.Len()/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outCut := filepath.Join(dir, "cut.dump")
+	if err := run([]string{"decrypt", "--key-file", keyFile, "--in", cut, "--out", outCut}); err == nil {
+		t.Fatal("decrypted a truncated object")
+	}
+	if _, err := os.Stat(outCut); !os.IsNotExist(err) {
+		t.Fatal("left the truncated archive behind")
+	}
+
 	// The wrong key fails and leaves no partial output.
 	_, _ = rand.Read(bk)
 	_ = os.WriteFile(keyFile, []byte(backupfmt.EncodeKey(bk)), 0o600)

@@ -242,6 +242,9 @@ type CreateParams struct {
 	// Publish. Params are merged into that operation's params.
 	Kind   string
 	Params map[string]any
+	// Secrets, already sealed, join the operation's params.secrets beside
+	// the password handoff, and are removed with it when the operation ends.
+	Secrets map[string]string
 	// Tier is TierShared (default) or TierDedicated. A dedicated project
 	// gets its own instance on NodeID (or the least loaded dedicated node)
 	// with Profile's limits and VolumeGB of disk.
@@ -468,7 +471,11 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		for k, v := range p.Params {
 			params[k] = v
 		}
-		params["secrets"] = sec
+		secrets := map[string]any{"password": sec.Password}
+		for k, v := range p.Secrets {
+			secrets[k] = v
+		}
+		params["secrets"] = secrets
 
 		var out Created
 		err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {

@@ -22,9 +22,9 @@ Xenibase.
   connection, then create an access key. Note the endpoint
   (`https://<ref>.supabase.co/storage/v1/s3`) and the region.
 
-Xenibase uses these credentials while a step runs and keeps them only in the
-server's memory. They are never written to the metadata database or the
-operation log.
+Xenibase keeps these credentials with the step's operation, encrypted with
+the master key, until the step ends, and then deletes them. They never
+appear in the operation's log or in the API.
 
 ## 1. Import the database
 

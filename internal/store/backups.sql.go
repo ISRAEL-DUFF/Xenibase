@@ -406,12 +406,42 @@ func (q *Queries) ExpireBackupAt(ctx context.Context, arg ExpireBackupAtParams) 
 	return err
 }
 
+const expireDeletedProjectBackups = `-- name: ExpireDeletedProjectBackups :execrows
+UPDATE backups b SET expires_at = COALESCE(
+    (SELECT max(f.expires_at) FROM backups f
+     WHERE f.project_id = $1::uuid AND f.kind = 'final' AND f.status IN ('succeeded', 'copied')),
+    $2::timestamptz)
+WHERE b.project_id = $1::uuid AND b.kind IN ('logical', 'archive') AND b.status IN ('succeeded', 'copied')
+  AND b.expires_at IS NULL
+  AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL))
+`
+
+type ExpireDeletedProjectBackupsParams struct {
+	ProjectID uuid.UUID
+	ExpiresAt time.Time
+}
+
+// tenant: system - a project delete, once the project is gone.
+// Only the final backup outlives a deleted project, for 30 days (V2 s10.10):
+// its nightly and archive backups on platform targets expire with it (or
+// at @expires_at without one). Org targets are the organisation's and are
+// left alone.
+func (q *Queries) ExpireDeletedProjectBackups(ctx context.Context, arg ExpireDeletedProjectBackupsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, expireDeletedProjectBackups, arg.ProjectID, arg.ExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const expiredBackups = `-- name: ExpiredBackups :many
 SELECT id, project_id, kind, object_key, size_bytes, checksum, started_at, finished_at, status, expires_at, storage_target_id, operation_id, key_wrapped, error, deleted_at, encryption_key_id, walg_prefix, copy_of, copy_target_id, copy_status, copied_at, copy_error FROM backups
-WHERE status = 'succeeded' AND expires_at IS NOT NULL AND expires_at < now()
+WHERE status IN ('succeeded', 'copied') AND expires_at IS NOT NULL AND expires_at < now()
 `
 
 // tenant: system - backup workers and the scheduler, or a project the request already authorized.
+// A copied original expires like any other backup (its copy carries the
+// same expiry and takes it along when it goes first).
 func (q *Queries) ExpiredBackups(ctx context.Context) ([]Backup, error) {
 	rows, err := q.db.Query(ctx, expiredBackups)
 	if err != nil {
@@ -1373,6 +1403,71 @@ func (q *Queries) RandomProjectWithBackup(ctx context.Context) (Project, error) 
 	return i, err
 }
 
+const randomProjectWithBaseBackup = `-- name: RandomProjectWithBaseBackup :one
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p JOIN instances i ON i.id = p.instance_id
+WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated'
+  AND i.status = 'running' AND i.walg_prefix IS NOT NULL
+  AND EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.kind = 'base')
+ORDER BY random()
+LIMIT 1
+`
+
+// tenant: system - the restore test picks a dedicated project to recover, across organisations.
+func (q *Queries) RandomProjectWithBaseBackup(ctx context.Context) (Project, error) {
+	row := q.db.QueryRow(ctx, randomProjectWithBaseBackup)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.DbName,
+		&i.OwnerRole,
+		&i.ScramVerifier,
+		&i.Tier,
+		&i.InstanceID,
+		&i.Status,
+		&i.Settings,
+		&i.StorageTargetID,
+		&i.Extensions,
+		&i.Description,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.OrgID,
+		&i.AliasDbName,
+		&i.LegacyOwnerRole,
+		&i.LegacyScramVerifier,
+		&i.LegacyUntil,
+		&i.StorageState,
+		&i.StorageStateAt,
+		&i.BackupKeyID,
+		&i.ParentProjectID,
+		&i.BranchSource,
+		&i.BranchSchemaOnly,
+		&i.ExpiresAt,
+		&i.ExpiryNotifiedAt,
+		&i.BranchBackups,
+		&i.SensitiveData,
+		&i.ProbeVerifier,
+		&i.Lifecycle,
+		&i.LastActiveAt,
+		&i.PauseWarnedAt,
+		&i.PausedAt,
+		&i.ArchivedAt,
+		&i.ArchiveBackupID,
+		&i.ArchiveNoticeDays,
+		&i.Region,
+		&i.DataResidency,
+		&i.ForwardRegion,
+		&i.ForwardUntil,
+		&i.IntegratorRoles,
+		&i.ManageRoles,
+		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
+	)
+	return i, err
+}
+
 const randomProjectWithCopiedBackup = `-- name: RandomProjectWithCopiedBackup :one
 SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle <> 'archived'
@@ -1635,4 +1730,52 @@ func (q *Queries) SweepStaleBackups(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const verifiedCopiesOf = `-- name: VerifiedCopiesOf :many
+SELECT id, project_id, kind, object_key, size_bytes, checksum, started_at, finished_at, status, expires_at, storage_target_id, operation_id, key_wrapped, error, deleted_at, encryption_key_id, walg_prefix, copy_of, copy_target_id, copy_status, copied_at, copy_error FROM backups WHERE copy_of = $1 AND status = 'succeeded' AND deleted_at IS NULL
+`
+
+// tenant: system - copy-existing checks an original's copies before deleting it.
+func (q *Queries) VerifiedCopiesOf(ctx context.Context, copyOf *uuid.UUID) ([]Backup, error) {
+	rows, err := q.db.Query(ctx, verifiedCopiesOf, copyOf)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Backup
+	for rows.Next() {
+		var i Backup
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Kind,
+			&i.ObjectKey,
+			&i.SizeBytes,
+			&i.Checksum,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.StorageTargetID,
+			&i.OperationID,
+			&i.KeyWrapped,
+			&i.Error,
+			&i.DeletedAt,
+			&i.EncryptionKeyID,
+			&i.WalgPrefix,
+			&i.CopyOf,
+			&i.CopyTargetID,
+			&i.CopyStatus,
+			&i.CopiedAt,
+			&i.CopyError,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

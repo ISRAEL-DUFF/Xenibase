@@ -399,6 +399,9 @@ const overdueBackups = `-- name: OverdueBackups :many
 SELECT p.id, p.name, COALESCE((SELECT max(b.finished_at) FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded'), 'epoch')::timestamptz AS last_backup_at
 FROM projects p
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.created_at < now() - make_interval(secs => $1::float8)
+  AND p.lifecycle = 'active'
+  AND (p.parent_project_id IS NULL OR p.branch_backups)
+  AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = p.org_id AND o.status = 'active')
   AND NOT EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.finished_at > now() - make_interval(secs => $1::float8))
 `
 
@@ -410,7 +413,9 @@ type OverdueBackupsRow struct {
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
 // Active projects older than @age whose newest successful backup is older
-// than @age (or missing).
+// than @age (or missing). Only those the nightly scheduler backs up, as
+// ProjectsDueForBackup picks them: not paused or archived, not a branch
+// without backups, not in a suspended or deleting organisation.
 func (q *Queries) OverdueBackups(ctx context.Context, ageSeconds float64) ([]OverdueBackupsRow, error) {
 	rows, err := q.db.Query(ctx, overdueBackups, ageSeconds)
 	if err != nil {
@@ -527,6 +532,59 @@ func (q *Queries) UnreachableNodes(ctx context.Context, forSeconds float64) ([]U
 			&i.Name,
 			&i.LastReachableAt,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const wALArchiveSamples = `-- name: WALArchiveSamples :many
+SELECT p.id, p.name,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_failed'
+     AND m.resolution = '1m' AND m.ts > $1 ORDER BY m.ts LIMIT 1), -1)::float8 AS failed_first,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_failed'
+     AND m.resolution = '1m' AND m.ts > $1 ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS failed_last,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_pending'
+     AND m.resolution = '1m' AND m.ts > $1 ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS pending,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_pending_age_s'
+     AND m.resolution = '1m' AND m.ts > $1 ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS pending_age_s
+FROM projects p WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated'
+`
+
+type WALArchiveSamplesRow struct {
+	ID          uuid.UUID
+	Name        string
+	FailedFirst float64
+	FailedLast  float64
+	Pending     float64
+	PendingAgeS float64
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// Each active dedicated project's WAL archiver samples since @since (-1:
+// none): failed attempts at the oldest and newest sample, and the newest
+// count and age of segments waiting.
+func (q *Queries) WALArchiveSamples(ctx context.Context, since time.Time) ([]WALArchiveSamplesRow, error) {
+	rows, err := q.db.Query(ctx, wALArchiveSamples, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WALArchiveSamplesRow
+	for rows.Next() {
+		var i WALArchiveSamplesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.FailedFirst,
+			&i.FailedLast,
+			&i.Pending,
+			&i.PendingAgeS,
 		); err != nil {
 			return nil, err
 		}

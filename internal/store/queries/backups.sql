@@ -49,8 +49,10 @@ ORDER BY finished_at DESC;
 
 -- name: ExpiredBackups :many
 -- tenant: system - backup workers and the scheduler, or a project the request already authorized.
+-- A copied original expires like any other backup (its copy carries the
+-- same expiry and takes it along when it goes first).
 SELECT * FROM backups
-WHERE status = 'succeeded' AND expires_at IS NOT NULL AND expires_at < now();
+WHERE status IN ('succeeded', 'copied') AND expires_at IS NOT NULL AND expires_at < now();
 
 -- name: StaleRunningBackups :many
 -- tenant: system - backup workers and the scheduler, or a project the request already authorized.
@@ -93,6 +95,15 @@ SELECT * FROM operations WHERE kind = @kind ORDER BY created_at DESC LIMIT 1;
 SELECT p.* FROM projects p
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle <> 'archived'
   AND EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.kind = 'logical')
+ORDER BY random()
+LIMIT 1;
+
+-- name: RandomProjectWithBaseBackup :one
+-- tenant: system - the restore test picks a dedicated project to recover, across organisations.
+SELECT p.* FROM projects p JOIN instances i ON i.id = p.instance_id
+WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated'
+  AND i.status = 'running' AND i.walg_prefix IS NOT NULL
+  AND EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.kind = 'base')
 ORDER BY random()
 LIMIT 1;
 
@@ -193,6 +204,10 @@ ORDER BY b.finished_at;
 -- tenant: system - retention removes a copy's original along with it.
 SELECT * FROM backups WHERE id = @id AND status = 'copied' AND deleted_at IS NULL;
 
+-- name: VerifiedCopiesOf :many
+-- tenant: system - copy-existing checks an original's copies before deleting it.
+SELECT * FROM backups WHERE copy_of = @copy_of AND status = 'succeeded' AND deleted_at IS NULL;
+
 -- name: CopiedOriginals :many
 -- tenant: system - copy-existing with delete_originals for a project the request already authorized.
 SELECT * FROM backups WHERE project_id = @project_id AND status = 'copied' AND deleted_at IS NULL;
@@ -208,6 +223,20 @@ WHERE project_id = @project_id AND kind = 'base' AND status = 'succeeded' AND wa
 -- tenant: system - deciding whether a retired WAL-G archive can go.
 SELECT count(*)::int FROM backups
 WHERE kind = 'base' AND status = 'succeeded' AND walg_prefix = @walg_prefix AND storage_target_id = @storage_target_id;
+
+-- name: ExpireDeletedProjectBackups :execrows
+-- tenant: system - a project delete, once the project is gone.
+-- Only the final backup outlives a deleted project, for 30 days (V2 s10.10):
+-- its nightly and archive backups on platform targets expire with it (or
+-- at @expires_at without one). Org targets are the organisation's and are
+-- left alone.
+UPDATE backups b SET expires_at = COALESCE(
+    (SELECT max(f.expires_at) FROM backups f
+     WHERE f.project_id = @project_id::uuid AND f.kind = 'final' AND f.status IN ('succeeded', 'copied')),
+    @expires_at::timestamptz)
+WHERE b.project_id = @project_id::uuid AND b.kind IN ('logical', 'archive') AND b.status IN ('succeeded', 'copied')
+  AND b.expires_at IS NULL
+  AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL));
 
 -- name: ExpireBackupAt :exec
 -- tenant: system - an archived project's archive backup expires once the project is deleted (V3 §4.3).

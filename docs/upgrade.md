@@ -377,6 +377,12 @@ below say what each version changed.
   install with years of operations the sweep prunes 500 every 5 minutes
   until it has caught up; the metadata backup taken before the upgrade
   keeps the full history.
+- **Deleted projects' backups expire** (migration 00075): the nightly and
+  archive backups of projects deleted before the upgrade, on platform
+  targets, get their final backup's expiry, and at least a week from the
+  upgrade; the hourly expiry then deletes them. Restore anything you still
+  want from them into a new project before then. Backups in organisations'
+  own buckets are not touched.
 - **Edge credentials** (migration 00061): the platform-wide
   `XENIBASE_EDGE_SECRET` now serves only the regions without their own API
   domain. **Before upgrading**, give every edge of a region with its own API

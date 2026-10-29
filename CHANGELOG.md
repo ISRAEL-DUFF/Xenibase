@@ -17,6 +17,18 @@ bundle share one version (spec §11.5).
   fewer. A point-in-time restore or a detached replica never gets fewer than
   its source, which Postgres needs to replay the source's WAL. See
   `docs/user-guide.md` ("Connections").
+- **An alert when a dedicated project's WAL archiving fails or falls
+  behind.** Nothing watched archiving: a failing `wal-push` (rotated
+  credentials, a full bucket) let WAL pile up until the volume filled,
+  while base backups still succeeded, and recovery past it was impossible.
+  The metrics collector now samples each dedicated instance's archiver
+  (`wal_archive_*` on `/metrics`), and the critical `wal_archive` alert
+  fires when archiving failed in the last 15 minutes or a finished segment
+  has waited longer; it turns the status page's Backups component to
+  degraded. And every other week the restore test recovers a random
+  dedicated project's base backup and WAL to the present into a scratch
+  instance on its node, reads every table and removes it (no project is
+  created); a restore test run for a dedicated project does the same.
 
 ### Fixed
 - **A branch reset no longer copies a parent the caller has lost.** Reset
@@ -259,6 +271,66 @@ bundle share one version (spec §11.5).
   owns, and instances cap slot WAL (`max_slot_wal_keep_size`: a quarter of
   a dedicated volume, 10 GB on an agent-run shared cluster) from their next
   restart.
+- **A deleted project's nightly backups were kept forever.** Only its final
+  backup was given an expiry, so up to 11 earlier backups (82 with the long
+  add-on) stayed on platform storage, listed and restorable. A delete now
+  dates its nightly and archive backups with the final backup (30 days), as
+  does an organisation's deletion, and the hourly expiry removes them with
+  their cross-region copies; backups in an organisation's own bucket are
+  left alone. **Migration 00075** dates those of projects already deleted,
+  at least a week from the upgrade.
+- **Copying backups between two targets at one place deleted them.** Two
+  storage targets could name the same endpoint, bucket and prefix
+  (`backups` and `backups/` included); a switch between them with "delete
+  the originals" copied each object onto itself and then deleted it, and
+  turning on data residency could delete a backup as its own cross-region
+  copy. Such a target is now refused, and copies, and deletes of an
+  original or a copy, between two existing ones are refused too. If two of
+  your targets already share a place, send new backups to one of them;
+  don't change either's prefix, which leaves the backups on it unreachable.
+- **One failed WAL-G listing forgot every base backup.** The agent read a
+  failed `wal-g backup-list` as an empty archive, and the base backup that
+  followed it marked all of the project's base backups deleted, so its
+  point-in-time window restarted at the next night's backup. A failed
+  listing is now an error, and a listing without the backup just taken
+  forgets nothing.
+- **A storage or key switch cut a paid 14- or 30-day recovery window to
+  7.** The archive a switch retires (enabling or rotating a project key is
+  one) expired after 7 days, so a dedicated project paying for 14 or 30
+  could recover only to the switch from day 8. It now stays for the
+  project's window.
+- "Backup overdue" fired for projects the nightly schedule skips on
+  purpose (paused and archived Free projects, branches without backups,
+  suspended organisations), and kept the public status page's Backups
+  component degraded. It now leaves out what the schedule leaves out.
+- **With more than one server, imports and Supabase migration steps failed
+  at random.** The source's connection string (and S3 key) was kept in the
+  memory of the server that took the request, so a step another server
+  claimed failed with "xenibase-server restarted?" and the import rolled
+  back, as did any retry. They now travel with the operation, encrypted
+  with the master key, and are removed when it ends.
+- Nothing pinned the OpenPGP keys derived from the backup key and project
+  keys, which are never stored: a crypto library update that derived them
+  differently would have left every WAL-G archive and project-key backup
+  unreadable, unnoticed until a restore. A test now fixes them.
+- An import's verification counted the rows of every table in the source,
+  so a source login allowed to read only the imported schemas failed it
+  with "permission denied" and the import rolled back after the copy. It
+  now reads only the chosen schemas.
+- **A Supabase migration's source could be in the platform's private
+  network.** Its address check, unlike an import's, did not refuse the
+  cloud private network or `XENIBASE_OUTBOUND_BLOCK` for a host the
+  platform admin allow-listed for the organisation, so a tenant who
+  controls that host's DNS could point it at platform services. It now
+  uses the import's check.
+- **A backup download that failed part-way looked complete.** Once the
+  first bytes were sent, a decryption error ended the response normally,
+  so the browser or `curl` saved a truncated archive as a finished
+  download. The connection is now cut instead, and the download fails. The
+  disaster-recovery runbook decrypted the metadata backup through standard
+  output and restored the result even after a failure; it now uses
+  `--out`, which leaves no file on failure, and `&&`
+  (`docs/disaster-recovery.md`).
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -269,6 +341,9 @@ bundle share one version (spec §11.5).
   4.2.4").
 - Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
   verifiers from finished password rotations and credential switches.
+- Migration 00075 gives the nightly and archive backups of projects deleted
+  before the upgrade, on platform targets, their final backup's expiry, and
+  at least seven days: they are deleted from a week after the upgrade.
 
 ## v4.2.4
 

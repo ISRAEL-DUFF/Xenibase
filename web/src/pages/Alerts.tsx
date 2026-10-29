@@ -10,6 +10,7 @@ const kindLabel: Record<string, string> = {
   backup_failed: "Backup failed",
   backup_overdue: "Backup overdue",
   restore_test_failed: "Restore test failed",
+  wal_archive: "WAL archiving",
   node_disk: "Node disk",
   node_unreachable: "Node unreachable",
   project_disk: "Project disk",

@@ -31,15 +31,18 @@ with any S3 client, decrypt it with the backup key, and restore it:
 
 ```sh
 aws s3 cp s3://<bucket>/<prefix>/metadata/<newest>.dump.enc .   # or rclone, mc, …
-# --user 0: the key file is usually readable by root only.
-docker compose run --rm -T --no-deps --user 0 -v "$PWD:/work:ro" xenibase-agent \
-  decrypt --key-file /work/xenibase-backup-key-<fingerprint>.txt < <newest>.dump.enc > metadata.dump
-docker compose cp metadata.dump metadata-db:/tmp/metadata.dump
+# --user 0: the key file is usually readable by root only (run this as root).
+docker compose run --rm -T --no-deps --user 0 -v "$PWD:/work" xenibase-agent \
+  decrypt --key-file /work/xenibase-backup-key-<fingerprint>.txt \
+  --in /work/<newest>.dump.enc --out /work/metadata.dump &&
+docker compose cp metadata.dump metadata-db:/tmp/metadata.dump &&
 docker compose exec metadata-db pg_restore -U xenibase -d xenibase --clean --if-exists --no-owner /tmp/metadata.dump
 ```
 
-`xenibase-agent decrypt` checks every chunk; a wrong key or a damaged object
-fails without writing a partial file.
+`xenibase-agent decrypt` checks every chunk; with `--out`, a wrong key or a
+damaged object fails without writing a partial file, and `&&` stops there.
+Don't redirect its standard output to a file instead: a failure part-way
+leaves what it wrote, which only the exit status reports.
 
 ## 3. Start everything
 
@@ -86,6 +89,9 @@ are both yours.
    gpg --batch --import xenibase-backup-key-<project id>.asc
    gpg --batch --decrypt backup.dump.gpg > backup.dump
    ```
+
+   gpg checks the message's integrity only at its end: if it reports an
+   error, `backup.dump` is incomplete, so don't restore it.
 
 3. Restore the `pg_dump` custom-format archive into any PostgreSQL 18:
 

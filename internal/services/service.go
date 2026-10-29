@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
@@ -21,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/jwtes"
@@ -88,6 +88,10 @@ type Service struct {
 	Phone PlatformPhone
 	// Outbound makes hook calls (V4 §6.5).
 	Outbound *outbound.Service
+	// CheckSource checks a Supabase migration's source address for an
+	// organisation: the backup service's import check
+	// (backup.Service.CheckSource), with the platform's own networks.
+	CheckSource func(ctx context.Context, org uuid.UUID, host string, port int) (netip.Addr, error)
 	// Files resolves the object store for files of projects in a region
 	// (V4 §5.1); nil turns storage off.
 	Files func(ctx context.Context, region string, residency bool) (storage.Target, error)
@@ -97,13 +101,11 @@ type Service struct {
 	// downloads in flight (a minute by default; tests shorten it).
 	StorageGrace time.Duration
 	emailKick    chan struct{}
-	// secrets holds migrations' source credentials while they run.
-	secrets *backup.Ephemeral
 }
 
 // New returns the service.
 func New(db *pgxpool.Pool, projects *provision.Service, cfg Config, log *slog.Logger) *Service {
-	return &Service{db: db, keyring: projects.Keyring(), projects: projects, cfg: cfg, log: log, emailKick: make(chan struct{}, 1), secrets: backup.NewEphemeral()}
+	return &Service{db: db, keyring: projects.Keyring(), projects: projects, cfg: cfg, log: log, emailKick: make(chan struct{}, 1)}
 }
 
 // Kinds are the operations it runs.
