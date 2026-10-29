@@ -43,7 +43,7 @@ reads the roles the owner administers and syncs the logins that:
   underscore, then lowercase letters, digits and underscores (Taskiem's
   `<database>_app` and `<database>_public` are);
 - aren't one of the project's own names (`_owner`, `_ro`, `_console`,
-  `_restore`, `_sla`, `_edge`, `_anon`, `_user`, `_service`, `_auth_hook`,
+  `_console_ro`, `_restore`, `_sla`, `_edge`, `_anon`, `_user`, `_service`, `_auth_hook`,
   `_u_…`);
 - have a SCRAM-SHA-256 password (the default).
 

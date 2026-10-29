@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,9 @@ type HostView struct {
 	VRRP       string    `json:"vrrp_state"`
 	Generation int64     `json:"generation"`
 	Reason     string    `json:"reason,omitempty"`
+	// AllowlistOff: a PgBouncer on the host ignores hba.conf, so the host
+	// counts as not ready.
+	AllowlistOff bool `json:"allowlist_off,omitempty"`
 }
 
 func (h HostView) healthy() bool { return h.Reachable && h.Ready }
@@ -265,6 +269,15 @@ func (a *Arbiter) tickRegion(ctx context.Context, hs *hostSet, region string, en
 				v.Reason = err.Error()
 			} else {
 				v.Reachable, v.Ready, v.Stale, v.VRRP, v.Generation, v.Reason = true, st.Ready, st.Stale, st.VRRPState, st.Generation, st.Reason
+				// A host that ignores hba.conf would serve every project
+				// past its IP allowlist: it must not hold the address.
+				hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				why := hs.enforcement(hctx, e)
+				cancel()
+				if why != "" {
+					v.Ready, v.AllowlistOff = false, true
+					v.Reason = strings.TrimPrefix(v.Reason+"; "+why, "; ")
+				}
 				if st.ServerID != "" && st.ServerID != v.ServerID {
 					v.ServerID = st.ServerID
 					sid := st.ServerID
@@ -381,6 +394,9 @@ func (a *Arbiter) observe(ctx context.Context, rs *regionState, views []HostView
 			changes = append(changes, change{v, "stale"})
 		case seen && !was && v.healthy():
 			changes = append(changes, change{v, "recovered"})
+		}
+		if v.AllowlistOff && (!seen || was) {
+			a.log.Error("pooler host does not enforce IP allowlists; it counts as not ready", "host", v.Name, "reason", v.Reason)
 		}
 	}
 	a.mu.Unlock()

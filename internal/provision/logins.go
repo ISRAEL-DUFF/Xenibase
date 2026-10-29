@@ -123,7 +123,7 @@ func (s *Service) SetReadOnly(ctx context.Context, p store.Project, on, endIdle 
 	}
 	if on && endIdle {
 		_, err = conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-			WHERE datname = $1 AND state = 'idle' AND usename <> $2 AND pid <> pg_backend_pid()`, p.DbName, ConsoleRole(p.DbName))
+			WHERE datname = $1 AND state = 'idle' AND usename <> ALL($2) AND pid <> pg_backend_pid()`, p.DbName, []string{ConsoleRole(p.DbName), ConsoleReadOnlyRole(p.DbName)})
 	}
 	return err
 }

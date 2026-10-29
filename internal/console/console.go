@@ -5,7 +5,9 @@
 // Sessions log in as the project's console role (provision.ConsoleRole),
 // which is granted the owner role WITH INHERIT FALSE, SET TRUE, and run
 // SET ROLE <owner>. RESET ROLE therefore drops to a role with no privileges
-// instead of a superuser.
+// instead of a superuser. Read-only sessions log in as
+// provision.ConsoleReadOnlyRole instead, which may become only the
+// read-only role, so no statement can switch them to the owner.
 package console
 
 import (
@@ -213,12 +215,20 @@ func repairable(err error) bool {
 	return pe.Code == "28P01" || pe.Code == "42501" || pe.Code == "28000" || pe.Code == "42704"
 }
 
+// sessionLogin is the login a session in mode m connects as. A read-only
+// session gets the login that may become only the read-only role: one
+// that could also become the owner would let the submitted statement
+// switch to it (set_config('role', …)) and read past RLS.
+func sessionLogin(p store.Project, m mode) string {
+	return provision.ConsoleLogin(p.DbName, m == modeReadOnly)
+}
+
 func (s *Service) connect(ctx context.Context, p store.Project, queryID uuid.UUID, timeout time.Duration, m mode) (*session, error) {
 	cfg, err := s.projects.AdminConfig(ctx, p.InstanceID, p.DbName)
 	if err != nil {
 		return nil, err
 	}
-	role := provision.ConsoleRole(p.DbName)
+	role := sessionLogin(p, m)
 	cfg.User, cfg.Password = role, s.projects.ConsolePassword(role)
 	cfg.RuntimeParams["application_name"] = appPrefix + queryID.String()
 	if m == modeJob {
@@ -466,7 +476,8 @@ func (s *Service) Cancel(ctx context.Context, projectID, queryID uuid.UUID) (boo
 	defer conn.Close(context.Background())
 	var n int
 	err = conn.QueryRow(ctx, `SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity
-		WHERE application_name = $1 AND datname = $2 AND usename = $3`,
-		appPrefix+queryID.String(), p.DbName, provision.ConsoleRole(p.DbName)).Scan(&n)
+		WHERE application_name = $1 AND datname = $2 AND usename = ANY($3)`,
+		appPrefix+queryID.String(), p.DbName,
+		[]string{provision.ConsoleRole(p.DbName), provision.ConsoleReadOnlyRole(p.DbName)}).Scan(&n)
 	return n > 0, err
 }

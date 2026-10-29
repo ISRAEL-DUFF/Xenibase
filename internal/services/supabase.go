@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/files"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/outbound"
 	"github.com/israel-duff/xenibase/internal/pgsource"
 	"github.com/israel-duff/xenibase/internal/projauth"
 	"github.com/israel-duff/xenibase/internal/provision"
@@ -103,7 +105,11 @@ func (s *Service) MigrateSupabase(ctx context.Context, projectID uuid.UUID, m Su
 	params := supabaseParams{}
 	var secrets *supabaseSecrets
 	if kind != KindMigrateSupabasePolicies {
-		conn, pg, err := connectSupabase(ctx, m.SourceURL)
+		proj, err := s.projects.Get(ctx, projectID)
+		if err != nil {
+			return store.Operation{}, err
+		}
+		conn, pg, err := connectSupabase(ctx, m.SourceURL, s.sourceGuard(proj.OrgID))
 		if err != nil {
 			return store.Operation{}, err
 		}
@@ -184,13 +190,23 @@ func (c *SupabaseS3) target(bucket string) storage.Target {
 		AccessKey: c.AccessKey, SecretKey: c.SecretKey, PathStyle: true}
 }
 
-// connectSupabase opens a read-only session on the source database.
-func connectSupabase(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGConn, error) {
-	pg, err := agentapi.ParseURL(raw)
-	if err != nil {
-		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, err)
+// sourceGuard checks a migration source's address against org's
+// outbound rules (outbound.CheckSource): Xenibase connects from an address
+// the clusters trust, so the source must not be one of its own.
+func (s *Service) sourceGuard(org uuid.UUID) pgsource.Guard {
+	ob := s.Outbound
+	if ob == nil {
+		ob = outbound.New(s.db, outbound.Config{}, s.log)
 	}
-	cfg, err := pgx.ParseConfig(strings.TrimSpace(raw))
+	return func(ctx context.Context, host string, port int) (netip.Addr, error) {
+		return ob.CheckSource(ctx, org, host, port)
+	}
+}
+
+// connectSupabase opens a read-only session on the source database, at
+// the address guard checked.
+func connectSupabase(ctx context.Context, raw string, guard pgsource.Guard) (*pgx.Conn, agentapi.PGConn, error) {
+	cfg, pg, err := pgsource.Config(ctx, raw, guard)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redact(err, pg.Password))
 	}
@@ -476,7 +492,7 @@ func (s *Service) runMigrateUsers(ctx context.Context, op store.Operation, log *
 		return err
 	}
 	defer done()
-	src, pg, err := connectSupabase(ctx, sec.SourceURL)
+	src, pg, err := connectSupabase(ctx, sec.SourceURL, s.sourceGuard(p.OrgID))
 	if err != nil {
 		return jobs.Permanent(err)
 	}
@@ -709,7 +725,7 @@ func (s *Service) runMigrateStorage(ctx context.Context, op store.Operation, log
 	if sec.S3 == nil {
 		return jobs.Permanent(errors.New("no S3 access for the source"))
 	}
-	src, pg, err := connectSupabase(ctx, sec.SourceURL)
+	src, pg, err := connectSupabase(ctx, sec.SourceURL, s.sourceGuard(p.OrgID))
 	if err != nil {
 		return jobs.Permanent(err)
 	}

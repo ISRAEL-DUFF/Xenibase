@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -369,6 +370,8 @@ func run() error {
 			}
 			pm.SetWaker(host, port)
 			ws := waker.New(freeSvc, log)
+			// It doesn't authenticate: admit only the poolers.
+			ws.Allow = waker.AllowList(func() []netip.Addr { return pm.PoolerAddrs(bgCtx) }, cfg.FreeTier.WakerAllow)
 			bg.Add(1)
 			go func() {
 				defer bg.Done()
@@ -535,6 +538,7 @@ func run() error {
 		consoleSvc = console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
 		alertSvc = alerts.New(pool, keyring, alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
+			PoolerSkipped: pm.Skipped,
 		}, log)
 		bg.Add(1)
 		go func() { defer bg.Done(); alertSvc.Run(bgCtx) }()
@@ -855,6 +859,7 @@ func setupProvisioning(ctx context.Context, cfg config.Config, pool *pgxpool.Poo
 		return nil, nil, err
 	}
 	pm.SetHome(rs.Home())
+	pm.SetAdminNetworks(pc.AdminAllow)
 	// Bring the poolers in line with the metadata DB (e.g. after a restore
 	// or a lost reload). Failure is not fatal: every flow syncs again.
 	syncCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -925,6 +930,15 @@ func setupBackups(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, ke
 		return nil, nil, err
 	}
 	bc := backup.Config{Hour: cfg.Backups.Hour, Jitter: cfg.Backups.Jitter}
+	// Import sources may never be the platform's own networks: the
+	// operator's XENIBASE_OUTBOUND_BLOCK and, with machines Xenibase
+	// creates, their private network.
+	bc.SourceInternal = append(bc.SourceInternal, cfg.Insight.OutboundBlock...)
+	if cfg.Cloud.CanCreate() {
+		if pfx, err := netip.ParsePrefix(cfg.Cloud.PrivateCIDR); err == nil {
+			bc.SourceInternal = append(bc.SourceInternal, pfx)
+		}
+	}
 	if u := cfg.Backups.MetadataURL; u != "" {
 		pg, err := agentapi.ParseURL(u)
 		if err != nil {

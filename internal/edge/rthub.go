@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -341,12 +340,9 @@ func (e *Edge) sessionConn(ctx context.Context, p *project) (*pgx.Conn, error) {
 	if host == "" || port == 0 {
 		return nil, errNoSession
 	}
-	u := url.URL{Scheme: "postgres", User: url.UserPassword(p.cfg.EdgeUser, p.cfg.Password),
-		Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/" + p.cfg.Database,
-		RawQuery: url.Values{"sslmode": {e.cfg.PoolerSSLMode}, "application_name": {"xenibase-edge realtime"}}.Encode()}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return pgx.Connect(cctx, u.String())
+	return pgx.Connect(cctx, e.poolerURL(p.cfg.EdgeUser, p.cfg.Password, host, port, p.cfg.Database, "xenibase-edge realtime"))
 }
 
 // querier is a connection or pool the outbox is read through.

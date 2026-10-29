@@ -28,8 +28,12 @@ is audited (`project.network`, with the list before and after).
   are refused: leave the list empty instead.
 - An empty list accepts connections from anywhere, as before.
 - A change reaches every pooler of the project's region within seconds.
-  Connections already open stay open until they close; new ones follow the
-  new list.
+  Connections already open from an address the new list doesn't admit are
+  dropped when you save it (on both ports and every route of the project;
+  Xenibase's own service logins are left alone), so removing a leaked
+  network takes effect at once. Clients still on the list keep their
+  connections. The audit entry records how many were dropped
+  (`dropped_connections`).
 
 ## What it covers
 
@@ -51,6 +55,34 @@ It doesn't apply to Xenibase itself:
 So an allowlist keeps everyone else off the database, without stopping the
 dashboard or the API.
 
+Xenibase's own addresses can't be borrowed to get round it: an import or a
+Supabase migration refuses a source on loopback, on the nodes' and instances'
+addresses or on the platform's networks, even one the platform admin
+allow-listed ([outbound traffic](operations.md#outbound-traffic)).
+
+### Behind the poolers
+
+The list is enforced by the poolers only. The project's instance (a shared
+cluster or a dedicated instance) accepts SCRAM logins from the networks its
+node allows, and anything there that has the password is not subject to the
+list: another node, a dedicated project's `postgres_fdw` or `dblink`, a
+compromised machine on the private network. Keep those networks as narrow
+as the platform allows:
+
+- **The install bundle**: the shared cluster's `pg_hba.conf` names the fixed
+  addresses of xenibase-server, the agent and the two poolers, and the
+  agent's instances `XENIBASE_AGENT_DB_ALLOW` (the same four addresses).
+- **Machines Xenibase creates** set `XENIBASE_AGENT_DB_ALLOW` to the cloud
+  private network (`XENIBASE_CLOUD_PRIVATE_CIDR`, default `10.0.0.0/16`).
+- **An agent you install yourself** defaults to every private range
+  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and loopback, and logs a
+  warning at start. Set `XENIBASE_AGENT_DB_ALLOW` to the networks (or
+  addresses) of xenibase-server, the poolers or pooler hosts, and the other
+  nodes. It applies to instances created afterwards: their `pg_hba.conf` is
+  written once, at initdb. Moves have their own rule
+  (`XENIBASE_AGENT_MOVE_ALLOW`, for the moves' temporary logins only), so
+  narrowing this one doesn't stop them; backups run on the node itself.
+
 The poolers see the address a connection comes from. If clients reach them
 through a NAT gateway, list the gateway's public address; from a Kubernetes
 cluster or a serverless platform, list its egress addresses.
@@ -71,3 +103,17 @@ PgBouncer. Upgrade the pooler hosts (their agent and PgBouncer configuration)
 **before** xenibase-server: an older agent refuses a bundle with `hba.conf`
 in it, and an older PgBouncer configuration ignores the file, so a list would
 be stored but not enforced. See the changelog's upgrade notes for v4.2.4.
+xenibase-server checks: a pooler host whose PgBouncer reports any
+`auth_type` but `hba` (`SHOW CONFIG`) counts as not ready, so it can't take
+the floating IP, and raises the "pooler host not ready" alert (Admin → Nodes
+gives the reason); a local pooler raises "pooler ignores IP allowlists"
+(`pooler_allowlist_off`).
+
+The same file keeps the poolers' admin console (database `pgbouncer`) off
+the internet: it accepts logins only from loopback and the private ranges
+(10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7), where xenibase-server
+and the pooler hosts' agents reach it, and rejects them from everywhere
+else before the password is checked. If xenibase-server reaches the poolers
+from elsewhere (another private range such as 100.64.0.0/10, or a public
+address), list its networks in `XENIBASE_POOLER_ADMIN_ALLOW`
+(comma-separated CIDRs), which replaces the default.

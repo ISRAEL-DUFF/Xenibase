@@ -16,6 +16,8 @@ const kindLabel: Record<string, string> = {
   pooler_down: "Pooler down",
   pooler_host_not_ready: "Pooler host not ready",
   pooler_split_brain: "Pooler split brain",
+  pooler_allowlist_off: "Pooler ignores IP allowlists",
+  pooler_config_skipped: "Pooler configuration entry left out",
   waker_down: "Waker down",
   failure_domain: "Shared failure domain",
   isolation_check_failed: "Isolation check",

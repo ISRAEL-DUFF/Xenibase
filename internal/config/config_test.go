@@ -133,6 +133,7 @@ func TestProvisioningConfig(t *testing.T) {
 		"XENIBASE_POOLER_POOLED_ADDR":    "10.0.0.2:6543",
 		"XENIBASE_SHARED_ADMIN_URL":      "postgres://xenibase_admin:x@10.0.0.3/postgres",
 		"XENIBASE_SHARED_POOLER_PORT":    "5433",
+		"XENIBASE_POOLER_ADMIN_ALLOW":    "10.0.0.0/16, fd00::/8",
 	}), noFiles)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +142,9 @@ func TestProvisioningConfig(t *testing.T) {
 	if p.FileMode != 0o644 || p.AdminUser != "xenibase" || p.AdminPassword != "pw" ||
 		p.SessionAddr != "db.example.com:6432" || p.PooledAddr != "10.0.0.2:6543" || p.SSLMode != "prefer" {
 		t.Fatalf("pooler: %+v", p)
+	}
+	if len(p.AdminAllow) != 2 || p.AdminAllow[0] != "10.0.0.0/16" || p.AdminAllow[1] != "fd00::/8" {
+		t.Fatalf("admin allow: %v", p.AdminAllow)
 	}
 	if cfg.Shared.NodeName != "local" || cfg.Shared.PoolerPort != 5433 {
 		t.Fatalf("shared: %+v", cfg.Shared)
@@ -152,6 +156,7 @@ func TestProvisioningInvalid(t *testing.T) {
 		{"XENIBASE_POOLER_CONFIG_DIR": "/x"}, // no admin password
 		{"XENIBASE_POOLER_CONFIG_DIR": "/x", "XENIBASE_POOLER_ADMIN_PASSWORD": "p", "XENIBASE_POOLER_FILE_MODE": "9"},
 		{"XENIBASE_POOLER_CONFIG_DIR": "/x", "XENIBASE_POOLER_ADMIN_PASSWORD": "p", "XENIBASE_POOLER_SESSION_ADDR": "nohost"},
+		{"XENIBASE_POOLER_CONFIG_DIR": "/x", "XENIBASE_POOLER_ADMIN_PASSWORD": "p", "XENIBASE_POOLER_ADMIN_ALLOW": "10.0.0.1/16"},
 		{"XENIBASE_DB_SSLMODE": "sometimes"},
 		{"XENIBASE_DB_POOLED_PORT": "99999"},
 	} {

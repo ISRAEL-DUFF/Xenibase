@@ -346,6 +346,18 @@ token, so the token rules above apply to it; users disconnect an app under
 - Add nodes on the Nodes page; new shared projects go to the least loaded
   shared cluster, dedicated instances to the least loaded dedicated node.
 
+## Pooler configuration
+
+xenibase-server writes the poolers' routes, logins and `hba.conf` from the
+metadata database on every change. An entry PgBouncer can't be given safely
+(a node address with an underscore, a malformed name) is left out rather
+than escaped, with an error in the log and the `pooler_config_skipped`
+alert naming it; everything else is still written. That project (or login)
+can't connect through the poolers until the row is fixed. A project whose
+allowlist couldn't be written loses its routes too, so it is never opened
+to everyone by mistake. Node addresses are checked when a node is added:
+a host name of letters, digits, dots and dashes, or an IP address.
+
 ## Outbound traffic
 
 Webhooks and HTTP jobs are the only way tenants make Xenibase send requests
@@ -370,6 +382,18 @@ On an organisation's admin page you can:
 Only one xenibase-server delivers webhooks and runs the scheduler at a time
 (advisory locks), so more servers can be added later without double
 deliveries.
+
+Imports and Supabase migrations connect to a database the tenant names, from
+xenibase-server and an agent, whose addresses every cluster trusts. Their
+source goes through the same rules, and stricter ones: the host must resolve
+to public addresses (or be allow-listed for the organisation, as above), and
+loopback, link-local, the nodes' and instances' own addresses,
+`XENIBASE_OUTBOUND_BLOCK` and, with machines Xenibase creates,
+`XENIBASE_CLOUD_PRIVATE_CIDR` are refused even when allow-listed. The server
+and the agent's copy connect to the address that was checked, so the name
+can't be rebound in between, and a connection string may name only one host
+and port (no `host=` parameter). A preflight passes if any of the caller's
+organisations allows the host.
 
 ## Secrets
 

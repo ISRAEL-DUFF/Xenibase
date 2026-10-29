@@ -105,10 +105,30 @@ func TestProjectIPAllowlist(t *testing.T) {
 		t.Fatalf("the project's allowlist after bad requests: %d %+v", code, p.AllowedCidrs)
 	}
 
+	// Narrowing the list drops connections already open from addresses it
+	// no longer admits, on both poolers; the edge's own stay.
+	var open []*pgx.Conn
+	for _, u := range []string{c.Connection.SessionUrl, c.Connection.PooledUrl} {
+		conn := e.MustConnect(u)
+		defer conn.Close(ctx)
+		if _, err := conn.Exec(ctx, "SELECT 1"); err != nil {
+			t.Fatal(err)
+		}
+		open = append(open, conn)
+	}
+
 	// Cleared: anywhere again.
 	set("203.0.113.0/24")
 	if connects("restricted again") {
 		t.Fatal("restricted again: the owner connected")
+	}
+	for i, conn := range open {
+		if _, err := conn.Exec(ctx, "SELECT 1"); err == nil {
+			t.Errorf("connection %d from a removed address still works after the list narrowed", i)
+		}
+	}
+	if code, _, body := ed.Do(*en.Services.Ref, "GET", "/data/v1/notes", nil, "apikey", sec); code != http.StatusOK {
+		t.Fatalf("the data API after narrowing: %d %s", code, body)
 	}
 	set()
 	if !connects("cleared") {

@@ -137,6 +137,13 @@ func (e *Edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.fail(http.StatusForbidden, "project_suspended", "this project's organisation is suspended")
 		return
 	case edgeapi.StatePaused:
+		// Only a request with one of the project's live keys wakes it: a
+		// project's hostname is public, and resuming costs compute.
+		if !liveKey(c) {
+			c.w.Header().Set("Retry-After", "10")
+			c.fail(http.StatusServiceUnavailable, "project_paused", "the project is paused for inactivity; a request with its API key, or a connection to its database, resumes it")
+			return
+		}
 		e.wake(p.cfg.Ref)
 		c.w.Header().Set("Retry-After", "10")
 		c.fail(http.StatusServiceUnavailable, "project_resuming", "the project is paused and is resuming; retry shortly")
@@ -157,6 +164,20 @@ func (e *Edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	c.billed = true
 	e.route(c, req)
+}
+
+// liveKey reports whether c carries one of its project's live API keys,
+// in the apikey header or query parameter. It answers nothing.
+func liveKey(c *call) bool {
+	key := c.r.Header.Get("apikey")
+	if key == "" {
+		key = c.r.URL.Query().Get("apikey")
+	}
+	if key == "" {
+		return false
+	}
+	_, ok := c.p.keys[edgeapi.HashKey(key)]
+	return ok
 }
 
 // refFromHost is the project reference in host (<ref>.<domain>).

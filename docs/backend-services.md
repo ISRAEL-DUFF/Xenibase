@@ -974,7 +974,10 @@ connection time (`realtime_connection_minutes`) are metered.
   by up to 10 seconds; see docs/read-replicas.md.
 
 A paused Free project answers `503 project_resuming` with `Retry-After` and
-is woken, as a database connection would wake it. A suspended
+is woken, as a database connection would wake it, when the request carries
+one of its live API keys. Without one (a public file, an OAuth callback, or
+anyone who only knows the hostname) it answers `503 project_paused` and
+stays asleep. A suspended
 organisation's projects answer `403 project_suspended`.
 
 ## Usage and logs
@@ -1053,6 +1056,8 @@ Run one xenibase-edge per region, on the region's nodes. It keeps no state.
 | `XENIBASE_EDGE_LISTEN` | Default `:8443`. |
 | `XENIBASE_EDGE_POOLER_ADDR` | Optional: the transaction pooler as the edge reaches it. |
 | `XENIBASE_EDGE_SESSION_ADDR` | Optional: the session-mode pooler as the edge reaches it (realtime's `LISTEN` connections). |
+| `XENIBASE_EDGE_POOLER_SSLMODE` | TLS to the poolers: `require` (default: encrypted, certificate not checked), `verify-ca` or `verify-full` (checked; use it when the edge crosses a network you don't control, such as a regional edge reaching the home region's poolers). `prefer` and below are refused: the service logins' sessions would fall back to plain text. |
+| `XENIBASE_EDGE_POOLER_ROOT_CERT` | Optional: a PEM file of the CA that signed the poolers' certificate, for `verify-ca`/`verify-full` with a self-signed or private certificate. A certificate from a public CA (`XENIBASE_POOLER_TLS=acme`) verifies against the system's roots without it. |
 | `XENIBASE_EDGE_TRUSTED_PROXIES` | Optional: CIDRs allowed to set `X-Forwarded-For`. |
 | `XENIBASE_EDGE_CACHE_MB` | Optional: the anonymous-read cache's size per edge process (default 64). |
 | `XENIBASE_EDGE_RENDER_MEMORY_MB` | Optional: each image render worker's memory limit (default 512, at least 64). |

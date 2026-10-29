@@ -15,6 +15,8 @@
 #   XENIBASE_EDGE_PRIORITY (100)
 #   XENIBASE_AGENT_SERVER_ID, XENIBASE_AGENT_HETZNER_TOKEN,
 #   XENIBASE_AGENT_FLOATING_IP_ID, XENIBASE_AGENT_HETZNER_API   the floating IP
+#   XENIBASE_POOLER_SERVER_TLS_SSLMODE (prefer), XENIBASE_POOLER_SERVER_TLS_CA_FILE
+#                                               TLS to the backends (verify-full needs the CA)
 # Without XENIBASE_EDGE_SELF_IP no keepalived configuration is written.
 set -eu
 
@@ -30,9 +32,13 @@ if [ -n "${XENIBASE_EDGE_SELF_IP:-}" ]; then
   mv "$edge/keepalived.conf.tmp" "$edge/keepalived.conf"
 fi
 
-pgbouncer /etc/pgbouncer/session.ini &
+# The PgBouncers run on copies with this host's backend TLS settings.
+xenibase-agent pooler-ini --in /etc/pgbouncer/session.ini --out "$run/session.ini"
+xenibase-agent pooler-ini --in /etc/pgbouncer/transaction.ini --out "$run/transaction.ini"
+
+pgbouncer "$run/session.ini" &
 echo $! > "$run/session.pid"
-pgbouncer /etc/pgbouncer/transaction.ini &
+pgbouncer "$run/transaction.ini" &
 echo $! > "$run/transaction.pid"
 xenibase-agent run &
 agent=$!

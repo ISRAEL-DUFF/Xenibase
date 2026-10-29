@@ -41,7 +41,7 @@ const scramPrefix = "SCRAM-SHA-256$"
 // platformRoles are the project's own roles: never the owner's to manage,
 // never synced from the instance.
 func platformRoles(p store.Project) []string {
-	out := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName),
+	out := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName), provision.ConsoleReadOnlyRole(p.DbName),
 		provision.RestoreLogin(p.DbName), store.ProbeRole(p.DbName)}
 	out = append(out, store.ServiceRoles(p.DbName)...)
 	if p.LegacyOwnerRole != nil {
