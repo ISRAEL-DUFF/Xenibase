@@ -94,6 +94,22 @@ WHERE status <> 'removed' AND agent_cert_fp IS NOT NULL
 -- name: NodeCapacities :many
 SELECT id, name, capacity FROM nodes WHERE status <> 'removed' AND agent_cert_fp IS NOT NULL;
 
+-- name: WALArchiveSamples :many
+-- tenant: system - the platform alert evaluator; alerts are the platform admin's.
+-- Each active dedicated project's WAL archiver samples since @since (-1:
+-- none): failed attempts at the oldest and newest sample, and the newest
+-- count and age of segments waiting.
+SELECT p.id, p.name,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_failed'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts LIMIT 1), -1)::float8 AS failed_first,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_failed'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS failed_last,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_pending'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS pending,
+  COALESCE((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'wal_archive_pending_age_s'
+     AND m.resolution = '1m' AND m.ts > @since ORDER BY m.ts DESC LIMIT 1), -1)::float8 AS pending_age_s
+FROM projects p WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated';
+
 -- name: ProjectSizes :many
 -- tenant: system - the platform alert evaluator; alerts are the platform admin's.
 -- Each active project's latest size sample (within @since) and settings.

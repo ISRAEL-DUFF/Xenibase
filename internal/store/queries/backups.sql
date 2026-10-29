@@ -98,6 +98,15 @@ WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle <> 'archived'
 ORDER BY random()
 LIMIT 1;
 
+-- name: RandomProjectWithBaseBackup :one
+-- tenant: system - the restore test picks a dedicated project to recover, across organisations.
+SELECT p.* FROM projects p JOIN instances i ON i.id = p.instance_id
+WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated'
+  AND i.status = 'running' AND i.walg_prefix IS NOT NULL
+  AND EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.kind = 'base')
+ORDER BY random()
+LIMIT 1;
+
 -- name: BackupForOperation :one
 -- tenant: system - backup workers and the scheduler, or a project the request already authorized.
 SELECT * FROM backups

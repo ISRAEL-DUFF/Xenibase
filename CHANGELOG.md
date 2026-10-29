@@ -17,8 +17,18 @@ bundle share one version (spec §11.5).
   fewer. A point-in-time restore or a detached replica never gets fewer than
   its source, which Postgres needs to replay the source's WAL. See
   `docs/user-guide.md` ("Connections").
-
-### Fixed
+- **An alert when a dedicated project's WAL archiving fails or falls
+  behind.** Nothing watched archiving: a failing `wal-push` (rotated
+  credentials, a full bucket) let WAL pile up until the volume filled,
+  while base backups still succeeded, and recovery past it was impossible.
+  The metrics collector now samples each dedicated instance's archiver
+  (`wal_archive_*` on `/metrics`), and the critical `wal_archive` alert
+  fires when archiving failed in the last 15 minutes or a finished segment
+  has waited longer; it turns the status page's Backups component to
+  degraded. And every other week the restore test recovers a random
+  dedicated project's base backup and WAL to the present into a scratch
+  instance on its node, reads every table and removes it (no project is
+  created); a restore test run for a dedicated project does the same.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

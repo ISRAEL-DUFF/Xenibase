@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/nodes"
@@ -35,6 +36,13 @@ const (
 	PoolerWaiting     = "pooler_waiting"
 	TPS               = "tps"
 	CacheHitRatio     = "cache_hit_ratio"
+	// A dedicated instance's WAL archiving: failed attempts (a counter),
+	// seconds since the last segment was archived, segments waiting, and
+	// seconds the oldest has waited.
+	WALArchiveFailed     = "wal_archive_failed"
+	WALArchiveAge        = "wal_archive_age_s"
+	WALArchivePending    = "wal_archive_pending"
+	WALArchivePendingAge = "wal_archive_pending_age_s"
 )
 
 // Node metrics.
@@ -291,6 +299,12 @@ func (c *Collector) collectInstance(ctx context.Context, now time.Time, instID u
 		names[i] = p.DbName
 		byName[p.DbName] = p
 	}
+	var archErr error
+	if len(group) == 1 && group[0].Tier == provision.TierDedicated {
+		if archErr = collectArchiver(ctx, conn, group[0].ID, b); archErr != nil {
+			archErr = fmt.Errorf("wal archiver: %w", archErr)
+		}
+	}
 	rows, err := conn.Query(ctx, `
 		SELECT d.datname, s.xact_commit + s.xact_rollback, s.blks_hit, s.blks_read,
 		       (SELECT count(*) FROM pg_stat_activity a WHERE a.datid = d.oid AND a.backend_type = 'client backend' AND a.state = 'active'),
@@ -331,7 +345,42 @@ func (c *Collector) collectInstance(ctx context.Context, now time.Time, instID u
 		}
 		c.prevDB[p.ID] = cur
 	}
-	return rows.Err()
+	return errors.Join(rows.Err(), archErr)
+}
+
+// collectArchiver samples a dedicated instance's WAL archiving (its
+// leader's, for HA: the instance's address follows it), for the alert on
+// archiving that fails or falls behind: pg_stat_archiver's failed attempts
+// and age of the last archived segment, and the segments waiting
+// (.ready in archive_status) with how long the oldest has waited. Nothing
+// waiting means nothing to archive, however old the last archived one.
+func collectArchiver(ctx context.Context, conn *pgx.Conn, project uuid.UUID, b *batch) error {
+	var on bool
+	var failed, pending int64
+	var lastAge, pendingAge *float64
+	err := conn.QueryRow(ctx, `
+		SELECT current_setting('archive_mode') <> 'off', a.failed_count,
+		       EXTRACT(epoch FROM now() - a.last_archived_time)::float8,
+		       (SELECT count(*) FROM pg_ls_archive_statusdir() s WHERE s.name LIKE '%.ready'),
+		       (SELECT EXTRACT(epoch FROM now() - min(s.modification))::float8 FROM pg_ls_archive_statusdir() s WHERE s.name LIKE '%.ready')
+		FROM pg_stat_archiver a`).Scan(&on, &failed, &lastAge, &pending, &pendingAge)
+	if err != nil || !on {
+		return err
+	}
+	b.add(project, WALArchiveFailed, float64(failed))
+	b.add(project, WALArchivePending, float64(pending))
+	b.add(project, WALArchivePendingAge, max(ptrOr(pendingAge), 0))
+	if lastAge != nil {
+		b.add(project, WALArchiveAge, *lastAge)
+	}
+	return nil
+}
+
+func ptrOr(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 func (c *Collector) collectNodes(ctx context.Context, now time.Time, b *batch) error {

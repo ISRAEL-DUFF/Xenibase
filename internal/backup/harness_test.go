@@ -112,6 +112,10 @@ func (h *harness) project(t *testing.T, name string) store.Project {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+	p.Status = provision.StatusActive
 	return p
 }
 

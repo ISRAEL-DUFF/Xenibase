@@ -13,6 +13,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Backup failed | critical | A project's (or the metadata database's) latest backup failed |
   | Backup overdue | warning | A project older than 26 h has no successful backup in 26 h |
   | Restore test failed | critical | The latest weekly restore test failed |
+  | WAL archiving | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
   | Node disk | warning | A node's data disk is over 85% full |
   | Node unreachable | critical | A node's agent has not answered for 2+ minutes |
   | Project disk | warning | A project is larger than its disk warning (Project Settings → Database) |
@@ -42,7 +43,13 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   an organisation's own bucket are left alone). See
   [billing add-ons](billing.md#add-ons).
 - Weekly, a random project's latest backup is restored into a scratch
-  database and verified (Settings → Backup checks).
+  database and verified (Settings → Backup checks). Every other week a
+  random dedicated project is instead recovered from its base backup and
+  WAL to the present, into a scratch instance on its node (the smallest
+  size, no project, nothing archived), every table is read, and the
+  instance is removed; the node needs twice the instance's data free.
+  `POST /api/v1/restore-tests?project_id=<id>` runs one now; for a
+  dedicated project it tests the point-in-time recovery.
 - The metadata database backs itself up nightly to `<prefix>/metadata/`.
 - Restores: a project's Backups tab → **Restore**, into a new project or in
   place (in place takes a safety backup first and needs re-authentication).

@@ -152,14 +152,19 @@ var promHelp = map[string]string{
 	PoolerWaiting:     "Clients waiting for a server connection in the poolers.",
 	TPS:               "Transactions (commits and rollbacks) per second.",
 	CacheHitRatio:     "Share of block reads served from shared buffers.",
-	CPUPercent:        "CPU busy percentage.",
-	Load1:             "1-minute load average.",
-	MemUsedBytes:      "Memory in use (total less available).",
-	MemTotalBytes:     "Total memory.",
-	DiskUsedBytes:     "Used bytes on the data disk.",
-	DiskTotalBytes:    "Size of the data disk.",
-	DiskReadBPS:       "Disk read bytes per second.",
-	DiskWriteBPS:      "Disk written bytes per second.",
+	// Dedicated projects only.
+	WALArchiveFailed:     "Failed WAL archiving attempts since the statistics were reset.",
+	WALArchiveAge:        "Seconds since a WAL segment was last archived.",
+	WALArchivePending:    "Completed WAL segments waiting to be archived.",
+	WALArchivePendingAge: "Seconds the oldest WAL segment waiting to be archived has waited (0 when none waits).",
+	CPUPercent:           "CPU busy percentage.",
+	Load1:                "1-minute load average.",
+	MemUsedBytes:         "Memory in use (total less available).",
+	MemTotalBytes:        "Total memory.",
+	DiskUsedBytes:        "Used bytes on the data disk.",
+	DiskTotalBytes:       "Size of the data disk.",
+	DiskReadBPS:          "Disk read bytes per second.",
+	DiskWriteBPS:         "Disk written bytes per second.",
 }
 
 // WritePrometheus writes the latest point of every metric in the text

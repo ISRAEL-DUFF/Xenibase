@@ -1401,6 +1401,70 @@ func (q *Queries) RandomProjectWithBackup(ctx context.Context) (Project, error) 
 	return i, err
 }
 
+const randomProjectWithBaseBackup = `-- name: RandomProjectWithBaseBackup :one
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p JOIN instances i ON i.id = p.instance_id
+WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated'
+  AND i.status = 'running' AND i.walg_prefix IS NOT NULL
+  AND EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.kind = 'base')
+ORDER BY random()
+LIMIT 1
+`
+
+// tenant: system - the restore test picks a dedicated project to recover, across organisations.
+func (q *Queries) RandomProjectWithBaseBackup(ctx context.Context) (Project, error) {
+	row := q.db.QueryRow(ctx, randomProjectWithBaseBackup)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.DbName,
+		&i.OwnerRole,
+		&i.ScramVerifier,
+		&i.Tier,
+		&i.InstanceID,
+		&i.Status,
+		&i.Settings,
+		&i.StorageTargetID,
+		&i.Extensions,
+		&i.Description,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.DeletedAt,
+		&i.OrgID,
+		&i.AliasDbName,
+		&i.LegacyOwnerRole,
+		&i.LegacyScramVerifier,
+		&i.LegacyUntil,
+		&i.StorageState,
+		&i.StorageStateAt,
+		&i.BackupKeyID,
+		&i.ParentProjectID,
+		&i.BranchSource,
+		&i.BranchSchemaOnly,
+		&i.ExpiresAt,
+		&i.ExpiryNotifiedAt,
+		&i.BranchBackups,
+		&i.SensitiveData,
+		&i.ProbeVerifier,
+		&i.Lifecycle,
+		&i.LastActiveAt,
+		&i.PauseWarnedAt,
+		&i.PausedAt,
+		&i.ArchivedAt,
+		&i.ArchiveBackupID,
+		&i.ArchiveNoticeDays,
+		&i.Region,
+		&i.DataResidency,
+		&i.ForwardRegion,
+		&i.ForwardUntil,
+		&i.IntegratorRoles,
+		&i.ManageRoles,
+		&i.AllowedCidrs,
+	)
+	return i, err
+}
+
 const randomProjectWithCopiedBackup = `-- name: RandomProjectWithCopiedBackup :one
 SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs FROM projects p
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle <> 'archived'
