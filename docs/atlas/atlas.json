@@ -20,7 +20,13 @@
     "decisions": { "kind": "matches", "file": "docs/decisions.md", "pattern": "^\\| \\d+ \\|" },
     "go-version": { "kind": "capture", "file": "go.mod", "pattern": "^go (\\S+)" },
     "web-pages": { "kind": "files", "dir": "web/src/pages", "match": "^[A-Z]\\w*\\.tsx$" },
-    "integration-tests": { "kind": "files", "dir": "test/integration", "match": "_test\\.go$" }
+    "integration-tests": { "kind": "files", "dir": "test/integration", "match": "_test\\.go$" },
+    "workflows": { "kind": "files", "dir": ".github/workflows", "match": "\\.ya?ml$" },
+    "e2e-tests": { "kind": "matches", "file": "test/e2e/journey.spec.ts", "pattern": "^\\s*test\\(\"" },
+    "isolation-tests": { "kind": "matches", "file": "test/isolation/isolation_test.go", "pattern": "^func Test" },
+    "load-test-files": { "kind": "files", "dir": "test/load", "match": "_test\\.go$" },
+    "cli-commands": { "kind": "matches", "file": "internal/cli/cli.go", "pattern": "run: \\(\\*App\\)\\." },
+    "js-sdk-unit-tests": { "kind": "matches", "file": "sdk/js/test/unit.test.ts", "pattern": "^\\s*it\\(" }
   },
   "parts": [
     { "id": "A", "title": "Orientation" },
