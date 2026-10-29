@@ -184,6 +184,18 @@ UPDATE scheduled_jobs SET consecutive_failures = @consecutive_failures WHERE id 
 -- Serialises the overlap check and the run insert of one job across servers.
 SELECT id FROM scheduled_jobs WHERE id = @id FOR UPDATE;
 
+-- name: LockOrgHTTPJobRuns :exec
+-- tenant: system - the scheduler, for an org whose job it dispatches.
+-- Serialises the HTTP-runs-per-hour check of one organisation across servers.
+SELECT pg_advisory_xact_lock(hashtext('xenibase_http_job_runs:' || @org_key::text));
+
+-- name: CountOrgHTTPJobRuns :one
+-- HTTP job runs (not skipped) the organisation had since a time: its runs
+-- in the last hour, against the plan's per-hour limit.
+SELECT count(*)::bigint FROM job_runs r JOIN scheduled_jobs j ON j.id = r.job_id JOIN projects p ON p.id = j.project_id
+WHERE p.org_id = @org_id AND j.kind = 'http' AND r.status <> 'skipped'
+  AND coalesce(r.started_at, r.scheduled_for) > @since::timestamptz;
+
 -- name: InsertJobRun :one
 -- tenant: system - the scheduler.
 INSERT INTO job_runs (job_id, scheduled_for, started_at, finished_at, status, error, trigger)

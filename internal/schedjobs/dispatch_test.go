@@ -2,8 +2,12 @@ package schedjobs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/crypto"
+	"github.com/israel-duff/xenibase/internal/outbound"
 	"github.com/israel-duff/xenibase/internal/store"
 	"github.com/israel-duff/xenibase/internal/store/storetest"
 )
@@ -182,6 +187,55 @@ func TestDispatchConcurrentQueue(t *testing.T) {
 	for _, j := range jobs {
 		if got := statuses(t, pool, j); got[RunSucceeded] != 2 || got[RunSkipped] != 1 || len(got) != 2 {
 			t.Errorf("job %s: runs %v after the runs ended, want two succeeded and one skipped", j.Name, got)
+		}
+	}
+}
+
+type fixedLimits store.Limits
+
+func (l fixedLimits) Limits(context.Context, uuid.UUID) (store.Limits, store.OrgWithPlanRow, error) {
+	return store.Limits(l), store.OrgWithPlanRow{}, nil
+}
+
+// TestHTTPJobRateAcrossServers: the HTTP-runs-per-hour limit is counted
+// from the runs, so a second server (a new scheduler leader, or the one
+// serving "Run now") does not start with a full allowance.
+func TestHTTPJobRateAcrossServers(t *testing.T) {
+	h, pool, p, _ := dispatchHarness(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	refuse := outbound.Config{Resolve: func(context.Context, string) ([]netip.Addr, error) { return nil, errors.New("no such host") }}
+	limits := fixedLimits{store.LimitHTTPJobRunsPerHour: 3}
+	a := New(pool, h.keyring, nil, nil, outbound.New(pool, refuse, log), limits, nil, Config{}, log)
+	b := New(pool, h.keyring, nil, nil, outbound.New(pool, refuse, log), limits, nil, Config{}, log)
+	dispatch := func(s *Service) store.JobRun {
+		t.Helper()
+		id := uuid.New()
+		enc, err := s.seal(id, spec{HTTP: &HTTPSpec{Method: http.MethodPost, URL: "https://hook.example.com/x"}, Secret: "jobsec_x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, err := store.New(pool).InsertJob(context.Background(), store.InsertJobParams{
+			ID: id, ProjectID: p.ID, Name: "http " + id.String()[:8], Cron: "0 3 * * *", Timezone: "UTC", Kind: KindHTTP, SpecEnc: enc,
+			TimeoutS: 5, Overlap: OverlapSkip, Enabled: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.dispatch(context.Background(), j, time.Now(), "manual")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Wait()
+		return r
+	}
+	for i := range 3 {
+		if r := dispatch(a); r.Status != RunRunning {
+			t.Fatalf("run %d on the first server: %s %s", i, r.Status, deref(r.Error))
+		}
+	}
+	for name, s := range map[string]*Service{"second": b, "first": a} {
+		if r := dispatch(s); r.Status != RunSkipped || !strings.Contains(deref(r.Error), "3 HTTP job runs per hour") {
+			t.Errorf("a fourth run in the hour on the %s server: %s %q, want skipped over the limit", name, r.Status, deref(r.Error))
 		}
 	}
 }

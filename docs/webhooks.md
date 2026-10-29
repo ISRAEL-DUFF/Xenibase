@@ -237,7 +237,8 @@ A job runs SQL, or calls a URL, on a schedule: Database → Scheduled jobs,
 
 - Your plan limits the number of jobs (Personal 20, Team 50), how often
   one may run (every 5 minutes on Personal, every minute on Team), and HTTP
-  job runs per hour (120, 600; runs beyond it are skipped).
+  job runs per hour (120, 600, counted over the last 60 minutes across the
+  organisation's projects; runs beyond it are skipped).
 - **Missed runs are not caught up**: after Xenibase was down, the next
   scheduled time runs and the history shows the gap.
 - **Daylight saving**: a schedule follows the wall clock of its time

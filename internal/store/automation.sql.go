@@ -66,6 +66,26 @@ func (q *Queries) AddOutboundAllow(ctx context.Context, arg AddOutboundAllowPara
 	return err
 }
 
+const countOrgHTTPJobRuns = `-- name: CountOrgHTTPJobRuns :one
+SELECT count(*)::bigint FROM job_runs r JOIN scheduled_jobs j ON j.id = r.job_id JOIN projects p ON p.id = j.project_id
+WHERE p.org_id = $1 AND j.kind = 'http' AND r.status <> 'skipped'
+  AND coalesce(r.started_at, r.scheduled_for) > $2::timestamptz
+`
+
+type CountOrgHTTPJobRunsParams struct {
+	OrgID uuid.UUID
+	Since time.Time
+}
+
+// HTTP job runs (not skipped) the organisation had since a time: its runs
+// in the last hour, against the plan's per-hour limit.
+func (q *Queries) CountOrgHTTPJobRuns(ctx context.Context, arg CountOrgHTTPJobRunsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOrgHTTPJobRuns, arg.OrgID, arg.Since)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countOrgJobs = `-- name: CountOrgJobs :one
 SELECT count(*)::int FROM scheduled_jobs j JOIN projects p ON p.id = j.project_id
 WHERE p.org_id = $1 AND p.deleted_at IS NULL
@@ -1020,6 +1040,17 @@ func (q *Queries) LockJob(ctx context.Context, id uuid.UUID) (uuid.UUID, error) 
 	row := q.db.QueryRow(ctx, lockJob, id)
 	err := row.Scan(&id)
 	return id, err
+}
+
+const lockOrgHTTPJobRuns = `-- name: LockOrgHTTPJobRuns :exec
+SELECT pg_advisory_xact_lock(hashtext('xenibase_http_job_runs:' || $1::text))
+`
+
+// tenant: system - the scheduler, for an org whose job it dispatches.
+// Serialises the HTTP-runs-per-hour check of one organisation across servers.
+func (q *Queries) LockOrgHTTPJobRuns(ctx context.Context, orgKey string) error {
+	_, err := q.db.Exec(ctx, lockOrgHTTPJobRuns, orgKey)
+	return err
 }
 
 const markReplayed = `-- name: MarkReplayed :exec

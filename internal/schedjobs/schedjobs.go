@@ -499,12 +499,10 @@ func (s *Service) dispatch(ctx context.Context, j store.ScheduledJob, scheduledF
 	} else if capped {
 		return skip("the organisation has reached its spend cap")
 	}
+	var perHour int64
 	if j.Kind == KindHTTP && s.limits != nil {
 		if l, _, err := s.limits.Limits(ctx, p.OrgID); err == nil {
-			limit, _ := l.Get(store.LimitHTTPJobRunsPerHour)
-			if !s.out.Take(p.OrgID, "http_job", limit, time.Hour) {
-				return skip(fmt.Sprintf("over the organisation's %d HTTP job runs per hour", limit))
-			}
+			perHour, _ = l.Get(store.LimitHTTPJobRunsPerHour)
 		}
 	}
 	// The overlap check and the insert run under the job's row lock: the
@@ -516,6 +514,22 @@ func (s *Service) dispatch(ctx context.Context, j store.ScheduledJob, scheduledF
 		q := q.WithTx(tx)
 		if _, err := q.LockJob(ctx, j.ID); err != nil {
 			return err
+		}
+		if perHour > 0 {
+			// Counted from the runs themselves, under the organisation's
+			// lock, so the rate holds across servers and a new scheduler
+			// leader (an in-memory bucket started full on each).
+			if err := q.LockOrgHTTPJobRuns(ctx, p.OrgID.String()); err != nil {
+				return err
+			}
+			n, err := q.CountOrgHTTPJobRuns(ctx, store.CountOrgHTTPJobRunsParams{OrgID: p.OrgID, Since: s.cfg.Now().Add(-time.Hour)})
+			if err != nil {
+				return err
+			}
+			if n >= perHour {
+				r, err = skipped(q, fmt.Sprintf("over the organisation's %d HTTP job runs per hour", perHour))
+				return err
+			}
 		}
 		active, err := q.ActiveJobRuns(ctx, j.ID)
 		if err != nil {

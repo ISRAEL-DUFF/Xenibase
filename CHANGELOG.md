@@ -57,6 +57,12 @@ bundle share one version (spec §11.5).
   it), and the database allows one running and one queued run per job;
   migration 00086 fails any duplicates the race left before adding that
   rule.
+- **The HTTP job runs per hour limit holds across servers.** It was a
+  token bucket in the memory of the server that dispatched the run, so a
+  new scheduler leader after a failover started with a full hour's
+  allowance, and so did every API server serving "Run now". The limit is
+  now counted from the organisation's HTTP job runs in the last hour, under
+  a per-organisation lock, when each run is dispatched.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
