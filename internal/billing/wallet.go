@@ -324,8 +324,9 @@ func (s *Service) PayInvoiceFromWallet(ctx context.Context, orgID, invoiceID uui
 // it or nothing (a wallet that can't cover it is a decline, which starts
 // dunning). Every attempt has its own idempotency key, recorded before the
 // call; one that gets no answer stays pending and is resolved by looking the
-// key up at the provider before another is made, so an invoice is never
-// debited twice.
+// key up at the provider before another is made, and the amount is read
+// again under the invoice's lock as the attempt is recorded, so an invoice
+// is never debited twice.
 func (s *Service) chargeInvoiceFromWallet(ctx context.Context, inv store.Invoice, explicit bool) (WalletCharge, error) {
 	q := store.New(s.db)
 	a, err := q.GetBillingAccount(ctx, inv.OrgID)
@@ -357,27 +358,58 @@ func (s *Service) chargeInvoiceFromWallet(ctx context.Context, inv store.Invoice
 		s.deferWalletCharge(ctx, inv, owed, !explicit, err)
 		return WalletCharge{Unavailable: true, Message: err.Error()}, nil
 	}
-	if bal.Available < owed {
-		msg := fmt.Sprintf("the wallet holds %s and %s is owed", Naira(bal.Available), Naira(owed))
-		s.declineWalletCharge(ctx, inv, owed, !explicit, msg)
-		return WalletCharge{Message: msg}, nil
-	}
 	op, err := s.wallets.OperatingWallet(ctx)
 	if err != nil {
 		s.deferWalletCharge(ctx, inv, owed, !explicit, err)
 		return WalletCharge{Unavailable: true, Message: err.Error()}, nil
 	}
+	// What is owed is read again, under the invoice's lock, in the
+	// transaction that records the attempt: another attempt may have debited
+	// and settled since the read above, and its settlement takes the same
+	// lock. Once this commits, the pending intent keeps every other attempt
+	// out (one pending wallet debit per invoice) until this one is resolved.
 	ref := newReference("xbw")
-	intent, err := q.InsertPaymentIntent(ctx, store.InsertPaymentIntentParams{
-		OrgID: inv.OrgID, Reference: ref, Provider: ProviderISwallet, Channel: ChannelWallet, Purpose: PurposeInvoice,
-		InvoiceID: &inv.ID, AmountMinor: owed, Automatic: !explicit,
+	var intent store.PaymentIntent
+	var short bool
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		tq := store.New(tx)
+		if _, err := tq.LockBillingAccount(ctx, inv.OrgID); err != nil {
+			return err
+		}
+		cur, err := tq.LockInvoice(ctx, inv.ID)
+		if err != nil {
+			return err
+		}
+		inv = cur
+		if owed, err = outstanding(ctx, tq, cur); err != nil {
+			return err
+		}
+		if owed <= 0 || (cur.Status != StatusIssued && cur.Status != StatusPartiallyPaid) {
+			owed = 0
+			return nil
+		}
+		if bal.Available < owed {
+			short = true
+			return nil
+		}
+		intent, err = tq.InsertPaymentIntent(ctx, store.InsertPaymentIntentParams{
+			OrgID: inv.OrgID, Reference: ref, Provider: ProviderISwallet, Channel: ChannelWallet, Purpose: PurposeInvoice,
+			InvoiceID: &inv.ID, AmountMinor: owed, Automatic: !explicit,
+		})
+		return err
 	})
 	var pg *pgconn.PgError
-	if errors.As(err, &pg) && pg.Code == "23505" {
+	switch {
+	case errors.As(err, &pg) && pg.Code == "23505":
 		return WalletCharge{Unavailable: true, Message: "another debit for this invoice is in progress"}, nil
-	}
-	if err != nil {
+	case err != nil:
 		return WalletCharge{}, err
+	case owed <= 0:
+		return WalletCharge{Succeeded: true}, nil // paid meanwhile, by another attempt or otherwise
+	case short:
+		msg := fmt.Sprintf("the wallet holds %s and %s is owed", Naira(bal.Available), Naira(owed))
+		s.declineWalletCharge(ctx, inv, owed, !explicit, msg)
+		return WalletCharge{Message: msg}, nil
 	}
 	tr, err := s.wallets.Transfer(ctx, TransferRequest{
 		From: wid, To: op, AmountMinor: owed, IdempotencyKey: ref, Narration: "Xenibase " + deref(inv.Number),

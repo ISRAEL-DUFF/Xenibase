@@ -660,6 +660,16 @@ bundle share one version (spec §11.5).
   a status nobody has written down is neither booked nor retried: it stays
   pending, with an error in the log, for a person to look at. See
   `docs/iswallet.md`.
+- **A wallet is no longer debited twice for one invoice.** A debit attempt
+  read what the invoice owed before recording itself, and the one pending
+  debit allowed per invoice only kept out an attempt that overlapped while
+  the other was still pending. An attempt that was slow (reading the
+  wallet's balance, say) while another debited and settled the invoice
+  then recorded its own and debited again, and the second amount became
+  credit that could not be refunded to the wallet. The triggers can meet: a
+  deposit, **Pay from wallet** and the daily dunning on every server. The
+  amount is now read again under the invoice's lock in the transaction
+  that records the attempt, and only what is still owed is debited.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its

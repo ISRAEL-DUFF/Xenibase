@@ -246,3 +246,75 @@ func TestRequestStateOutcome(t *testing.T) {
 		}
 	}
 }
+
+// Two attempts on one invoice that are never both pending: the first reads
+// what is owed and is slow to read the balance, and meanwhile the second
+// debits and settles the invoice. The first must not debit again, nor,
+// when what is left can't cover the invoice, call it a decline.
+func TestWalletDebitNotRepeatedBySlowAttempt(t *testing.T) {
+	for name, gross := range map[string]int64{"plenty": 100_000_00, "one invoice's worth": 50_000_00} {
+		t.Run(name, func(t *testing.T) { slowAttempt(t, gross) })
+	}
+}
+
+func slowAttempt(t *testing.T, gross int64) {
+	w := newWalletWorld(t)
+	ctx := context.Background()
+	org, wid := w.walletOrg(t, "slow", gross, false)
+	draft := w.proDraft(t, org)
+	issued, err := w.s.Issue(ctx, draft.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := w.stub()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	st.set(func(s *stubWallet) {
+		s.balance = func(walletID string) (billing.WalletBalance, error) {
+			slow := false
+			once.Do(func() { slow = true })
+			if slow {
+				close(entered)
+				<-release
+			}
+			return w.p.Balance(context.Background(), walletID)
+		}
+	})
+	type result struct {
+		out billing.WalletCharge
+		err error
+	}
+	first := make(chan result, 1)
+	go func() {
+		out, err := w.s.PayInvoiceFromWallet(ctx, org, issued.ID)
+		first <- result{out, err}
+	}()
+	<-entered
+	second, err := w.s.PayInvoiceFromWallet(ctx, org, issued.ID)
+	if err != nil || !second.Succeeded || second.Paid != issued.TotalMinor {
+		t.Fatalf("second attempt: %+v %v", second, err)
+	}
+	close(release)
+	r := <-first
+	if r.err != nil || !r.out.Succeeded || r.out.Paid != 0 {
+		t.Fatalf("first attempt: %+v %v", r.out, r.err)
+	}
+
+	paid := w.waitPaid(t, issued.ID)
+	if got := w.fake.OperatingBalance(); got != paid.TotalMinor {
+		t.Fatalf("Xenibase's wallet got %d for one invoice of %d", got, paid.TotalMinor)
+	}
+	if n := w.walletDebits(t, org); n != 1 {
+		t.Fatalf("%d wallet debits", n)
+	}
+	if got := w.held(t, org, billing.AccCreditBalance); got != 0 {
+		t.Fatalf("credit %d left from a second debit", got)
+	}
+	if got := w.held(t, org, billing.AccWalletBalance); got != w.fake.WalletBalance(wid) {
+		t.Fatalf("books %d, provider %d", got, w.fake.WalletBalance(wid))
+	}
+	if in := w.intents(t, issued.ID); len(in) != 1 || in[0].Status != "succeeded" {
+		t.Fatalf("intents %+v", in)
+	}
+	mustCheck(t, w.db)
+}
