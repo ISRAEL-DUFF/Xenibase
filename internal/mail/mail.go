@@ -53,6 +53,10 @@ type Config struct {
 	Password string
 	From     string
 	TLS      string
+	// DialAddr, when set, is the address (ip:port) to connect to instead
+	// of looking Host up: one already checked (a project's own server goes
+	// through the outbound rules). Host still names the server for TLS.
+	DialAddr string
 }
 
 // Message is one email. Body is plain text. Unless Plain is set, it is sent
@@ -101,13 +105,17 @@ func Send(ctx context.Context, cfg Config, m Message) error {
 		return errors.New("mail: no recipients")
 	}
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	dial := addr
+	if cfg.DialAddr != "" {
+		dial = cfg.DialAddr
+	}
 	d := net.Dialer{Timeout: 10 * time.Second}
 	var conn net.Conn
 	var err error
 	if cfg.TLS == TLSImplicit {
-		conn, err = (&tls.Dialer{NetDialer: &d, Config: &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}}).DialContext(ctx, "tcp", addr)
+		conn, err = (&tls.Dialer{NetDialer: &d, Config: &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}}).DialContext(ctx, "tcp", dial)
 	} else {
-		conn, err = d.DialContext(ctx, "tcp", addr)
+		conn, err = d.DialContext(ctx, "tcp", dial)
 	}
 	if err != nil {
 		return err

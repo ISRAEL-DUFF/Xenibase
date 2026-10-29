@@ -4489,9 +4489,12 @@ type AuthConfig struct {
 	// HookRole The role Postgres hooks run as; grant it what they read.
 	HookRole *string `json:"hook_role,omitempty"`
 
-	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
-	HookSecret         *string `json:"hook_secret,omitempty"`
-	MonthlyActiveUsers int64   `json:"monthly_active_users"`
+	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+	HookSecret *string `json:"hook_secret,omitempty"`
+
+	// HookSecretSet Whether the project has a hook secret (for those who aren't shown it).
+	HookSecretSet      *bool `json:"hook_secret_set,omitempty"`
+	MonthlyActiveUsers int64 `json:"monthly_active_users"`
 
 	// OauthCallbackUrl The redirect URI to register with OAuth providers.
 	OauthCallbackUrl *string          `json:"oauth_callback_url,omitempty"`
@@ -12267,6 +12270,9 @@ type ServerInterface interface {
 	// RotateSigningKey Sign with a new key; the old one verifies until its tokens expire
 	// (POST /api/v1/projects/{id}/auth/signing-keys/rotate)
 	RotateSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+	// (POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke)
+	RevokeSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID, keyId openapi_types.UUID)
 	// TestAuthSMTP Send a test email through the project's SMTP server (or the settings given)
 	// (POST /api/v1/projects/{id}/auth/smtp/test)
 	TestAuthSMTP(w http.ResponseWriter, r *http.Request, id ProjectID)
@@ -14280,6 +14286,12 @@ func (_ Unimplemented) ListSigningKeys(w http.ResponseWriter, r *http.Request, i
 // RotateSigningKey Sign with a new key; the old one verifies until its tokens expire
 // (POST /api/v1/projects/{id}/auth/signing-keys/rotate)
 func (_ Unimplemented) RotateSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+// (POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke)
+func (_ Unimplemented) RevokeSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID, keyId openapi_types.UUID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -21777,6 +21789,41 @@ func (siw *ServerInterfaceWrapper) RotateSigningKey(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// RevokeSigningKey operation middleware
+func (siw *ServerInterfaceWrapper) RevokeSigningKey(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "keyId" -------------
+	var keyId openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "keyId", chi.URLParam(r, "keyId"), &keyId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "keyId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeSigningKey(w, r, id, keyId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // TestAuthSMTP operation middleware
 func (siw *ServerInterfaceWrapper) TestAuthSMTP(w http.ResponseWriter, r *http.Request) {
 
@@ -27477,6 +27524,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/projects/{id}/auth/signing-keys/rotate", wrapper.RotateSigningKey)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke", wrapper.RevokeSigningKey)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/projects/{id}/auth/users", wrapper.ListAuthUsers)

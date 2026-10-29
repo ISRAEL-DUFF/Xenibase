@@ -6,6 +6,14 @@ bundle share one version (spec §11.5).
 ## Unreleased
 
 ### Added
+- **A leaked project signing key can be revoked at once.** Rotation was the
+  only control, and it keeps the old key verifying for a day, so tokens
+  forged with a leaked key (after an edge compromise, say) stayed valid
+  that long. `POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke`
+  (project admins), or **Revoke** under Authentication → Signing keys,
+  retires the key now: it leaves the JWKS and the edges with their next
+  feed read, and every token it signed is refused. Revoking the active key
+  makes a new one, which signs every user out.
 - **Connections grow with a dedicated instance's memory.** `max_connections`
   was 100 for every size; it is now 50 per GB, from 100 (2 GB or less) to 500
   (10 GB or more): 200 on a 4 GB instance, 400 on 8 GB. A dedicated project's
@@ -197,6 +205,83 @@ bundle share one version (spec §11.5).
   refused every insert with `403 permission_denied`. Minimal inserts,
   updates and deletes now leave `RETURNING` out and count from the command
   tag. (An upsert still needs `SELECT`, which Postgres requires.)
+- **Only project admins see the auth hook signing secret.** The auth
+  settings (`GET …/auth/config`) are readable by developers and `read`
+  tokens, and they carried the `whsec_` secret in full, so anyone with
+  them could forge hook events the project's servers trust. The secret is
+  now included only for callers who may change the settings
+  (`project.services`); everyone else gets the new `hook_secret_set`, and
+  Authentication → Hooks shows "Set".
+- **Email codes are capped per address.** Beyond one a minute an address
+  could be sent codes without limit, so with the project's own SMTP a
+  chosen user's sign-in code could take 7,200 guesses a day. An address
+  now gets at most five codes an hour and twenty a day, every kind
+  together (`429 over_email_send_rate_limit` with `Retry-After`), counted
+  on requests whether or not it has a user, as phone numbers have five an
+  hour.
+- **The one-code-a-minute limit no longer tells which addresses have
+  users.** It counted codes sent, and only a real user is sent one, so two
+  `POST /recover` calls in a minute answered 200 then 429 for an address
+  with an account and 200 twice for one without; `signin/otp` without user
+  creation did the same for addresses and phone numbers. Requests for
+  codes are now recorded (as hashes of the address or number, kept a day,
+  in `xb_auth.code_requests`, project schema version 10) before the user
+  is looked up, and the limit counts requests, so every address gets 200
+  then 429.
+- **A project's own SMTP server and SMS provider go through the outbound
+  rules.** Webhooks could reach only public addresses, but a project
+  admin could point the project's SMTP host at a private address (say
+  `10.0.0.5:5432`) and read the dial error from **Send test** to map the
+  control plane's network, or set a provider `base_url` that made the
+  worker POST to an internal service. Both are now checked like webhooks
+  (public addresses only unless the platform admin allows the host, never
+  link-local or metadata) and connected to at the address checked, with no
+  redirects followed. The SMTP test answers 400 for a refused address and
+  otherwise a generic 502, with the reason in the server's log.
+- **TOTP codes can no longer be guessed at the request rate.** Five wrong
+  codes used up a challenge, but a new one could be had at once, and the
+  `/factors`, `/mfa/*`, `/user` and sign-out routes had no auth rate
+  limit, so only the gateway's per-key limit bounded guesses (one in
+  under an hour). Those routes now have per-IP groups (`mfa` 30 a minute,
+  `user` 60), and five wrong codes in a row on a factor, across
+  challenges, lock it for a minute, doubling with each further one up to
+  a day: its challenges and codes answer `429 mfa_factor_locked` with
+  `Retry-After`, and a right code clears the count (project schema
+  version 10 adds `failed_attempts` and `locked_until` to
+  `xb_auth.mfa_factors`).
+- **A password alone no longer reaches `aal2`.** A session at `aal1`
+  could enrol a TOTP factor of its own and verify it, which raised the
+  session to `aal2`, past `mfa_required` and policies on `xb_auth.aal()`;
+  it could also change the password or email. Once a user has a verified
+  factor, an `aal1` session is now refused enrolment (`403
+  insufficient_aal`), password and email changes (`401
+  insufficient_aal`), and verifying a factor enrolled before the user's
+  first was verified, as GoTrue does. The check reads the session's level
+  from the database, not the token; a user's first factor still raises the
+  session that verifies it.
+- **Wildcard redirect URLs no longer allow other hosts.** A pattern was
+  matched against the whole URL as text, so `*` also matched `?` and `#`:
+  with `https://*.example.com/**`, `https://evil.test?.example.com/` was
+  allowed, and a magic link or reset requested with it sent the session to
+  `evil.test`. Redirects are now parsed and matched part by part: the
+  scheme exactly, the host label by label (`*` stands for one label or
+  part of one), the port exactly or `:*`, and the path with `*` and `**`.
+  A query or fragment needs a pattern whose path ends in `**`. URLs with a
+  user part are still refused, and a page under the site URL must be the
+  site's path or below it (`/app` no longer allows `/application`).
+- **A squatter's password no longer survives the owner's sign-up.**
+  Someone who signed up first with another person's address kept their
+  password: when the owner signed up too, the unconfirmed row was only
+  sent a new code, the owner's password was dropped, and confirming kept
+  the squatter's, who could then sign in. The same held for an admin-API
+  invitation of a squatted address and for phone sign-up. Signing up again
+  before confirming (by email or phone, or a sign-up link from the admin
+  API) now replaces the password and ends the row's sessions, and each
+  code records the password its request set (project schema version 10
+  adds `xb_auth.one_time_codes.password_sha`). A `signup`, `invite` or
+  `phone_signup` code that first proves the address or number clears any
+  other password and ends the sessions; `/resend` keeps the password of
+  the sign-up it repeats.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a

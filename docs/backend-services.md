@@ -451,7 +451,7 @@ curl -X POST .../auth/v1/signin/password -H "apikey: xb_pub_…" -d '{"email":"a
 
 | Endpoint | |
 | --- | --- |
-| `POST signup` | Email and password (argon2id). With **Confirm email addresses** on (the default) the user gets a link and a 6-digit code and can't sign in with the password until they use one; the answer is the same whether or not the address was new. |
+| `POST signup` | Email and password (argon2id). With **Confirm email addresses** on (the default) the user gets a link and a 6-digit code and can't sign in with the password until they use one; the answer is the same whether or not the address was new. Signing up again before confirming replaces the password; confirming keeps only the password of the sign-up whose code was used, so someone who signed up with the address first can't keep theirs. |
 | `POST signin/password` (or `POST token?grant_type=password`) | A session. Five wrong passwords in a row lock the user for a minute, doubling with each further failure (`429 user_locked`). |
 | `POST signin/otp` | A magic link and a code by email (`create_user: false` to only sign in existing users). Proving an unconfirmed address this way (or by a reset) clears any password set on it before, so nobody can claim an address ahead of its owner. |
 | `POST verify` | `{"type":"signup"\|"magiclink"\|"email"\|"recovery"\|"invite"\|"email_change","email":"…","token":"123456"}`, or `{"type":…,"token_hash":"…"}` with the link's token: a session. A code works once, for 10 minutes (invitations a day), and 5 wrong tries use it up. |
@@ -460,13 +460,18 @@ curl -X POST .../auth/v1/signin/password -H "apikey: xb_pub_…" -d '{"email":"a
 | `POST recover` | A password-reset link and code; verifying it signs the user in to set a new password. |
 | `POST token?grant_type=refresh_token` | `{"refresh_token":"…"}`: new tokens; the refresh token is single use. |
 | `POST signout?scope=local\|others\|global` | With the access token: this session, the others, or every session. |
-| `GET user`, `PATCH user` | The signed-in user with their `identities` and `factors`; change the password, `data` (merged into the user's metadata), the email (confirmed by a link sent to the new address) or the `phone` (confirmed by a code to the new number). |
+| `GET user`, `PATCH user` | The signed-in user with their `identities` and `factors`; change the password, `data` (merged into the user's metadata), the email (confirmed by a link sent to the new address) or the `phone` (confirmed by a code to the new number). A user with a verified factor changes the password or email only at `aal2` (`401 insufficient_aal`). |
 | `GET settings` | Which methods are on and the password rules, for your sign-in form. |
 | `GET .well-known/jwks.json` | The public keys (no key needed). |
 
 Links go only to the **site URL** (and pages under it) or the exact
-**redirect URLs** you list (`*` and `**` wildcards when allowed);
-anything else is `400 redirect_not_allowed`.
+**redirect URLs** you list; anything else is `400 redirect_not_allowed`.
+With wildcards allowed, a redirect URL may be a pattern, matched part by
+part: `*` in the host stands for one label or part of one
+(`https://*.example.com` allows `https://a.example.com` but not
+`https://a.b.example.com`), `:*` for any port, and in the path `*` is
+anything but `/` and `**` anything. A query or fragment is allowed only
+when the pattern's path ends in `**` or the pattern has one.
 
 ### Phone: SMS and WhatsApp codes
 
@@ -552,9 +557,9 @@ Users enrol an authenticator app (TOTP) or, when allowed, a phone:
 
 | Endpoint (with the user's token) | |
 | --- | --- |
-| `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. |
+| `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. A user who already has a verified factor enrols another only at `aal2` (`403 insufficient_aal`). |
 | `POST factors/{id}/challenge` | A challenge (a phone factor gets a code). |
-| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. |
+| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. A new factor is verified only when it is the user's first or the session is at `aal2`. Five wrong codes in a row, across challenges, lock the factor for a minute, doubling with each further one up to a day (`429 mfa_factor_locked`). |
 | `DELETE factors/{id}` | Removes a factor (a verified one needs `aal2`). |
 
 `/mfa/enroll`, `/mfa/challenge` and `/mfa/verify` (with `factor_id` in the
@@ -592,7 +597,8 @@ A failing custom-claims hook fails the sign-in (`500`), so test it before
 turning it on. Webhooks are signed with the project's **hook secret**
 (`Xenibase-Signature`, the same scheme as database webhooks), go through the
 organisation's outbound rules, and are listed with their results under
-Authentication → Hooks.
+Authentication → Hooks. Only project admins see the secret (developers see
+that it is set); an admin can rotate it there.
 
 ### Captcha
 
@@ -614,7 +620,10 @@ send) or `"captcha_token"` (`400 captcha_failed` otherwise).
 - **Your servers verify tokens with the JWKS endpoint**; there is no shared
   secret. Rotating the key (Authentication → Signing keys, or
   `xenibase auth rotate-key`) signs new tokens with a new key and keeps the
-  old one in the JWKS for a day, so nobody is signed out.
+  old one in the JWKS for a day, so nobody is signed out. If a key leaked,
+  **Revoke** it there (`POST …/auth/signing-keys/{keyId}/revoke`): it leaves
+  the JWKS and the edges at once, so tokens it signed stop working within
+  seconds; revoking the active key makes a new one and signs everyone out.
 - Refresh tokens rotate on every use. **Presenting a refresh token that was
   already used ends its whole session** (`400 refresh_token_reused`): a
   stolen token is good for one refresh at most, and only until the
@@ -635,9 +644,16 @@ templates (Authentication → Emails: plain text with `{{.Code}}`,
   hour per project (`429 over_email_send_rate_limit` past that).
 - **Your own SMTP server** (Authentication → Emails) sends from your
   domain without that limit. Its password is encrypted; **Send test**
-  checks it before saving.
-- One address gets at most one code a minute; sends are counted in the
-  usage (`message_sends`) and shown with failures.
+  checks it before saving. Like webhooks, the server must have a public
+  address unless the platform admin allows its host for the organisation
+  (its outbound allow-list); a failed test says only that it
+  failed, with the reason in the server's log. A provider's `base_url`
+  follows the same rule.
+- One address gets at most one code a minute, five an hour and twenty a
+  day (`429 over_email_send_rate_limit`), counted on requests whether or
+  not the address has a user (so the limit doesn't tell who has an
+  account); sends are counted in the usage (`message_sends`) and shown
+  with failures.
 
 A Flutter sample that signs in with a WhatsApp code and Google and reads
 org-scoped rows is in [examples/flutter-auth](examples/flutter-auth/).

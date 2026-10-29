@@ -214,8 +214,9 @@ type AuthConfig struct {
 	// SiteURL is where links go when a request names no redirect.
 	SiteURL string `json:"site_url"`
 	// RedirectURLs are the allowed redirect_to values: exact, or with
-	// "*" (any characters but "/") and "**" (anything) when
-	// AllowWildcardRedirects is on.
+	// AllowWildcardRedirects on, patterns matched part by part: "*" in the
+	// host within one label, in the path any characters but "/", and "**"
+	// in the path anything.
 	RedirectURLs           []string `json:"redirect_urls"`
 	AllowWildcardRedirects bool     `json:"allow_wildcard_redirects"`
 	SignupEnabled          bool     `json:"signup_enabled"`

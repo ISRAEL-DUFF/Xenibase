@@ -87,6 +87,45 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// TestCheckAddr: a host and port (a project's own SMTP server) passes the
+// same rules as a URL's host, and the address returned is the one checked.
+func TestCheckAddr(t *testing.T) {
+	s := testService(map[string][]string{
+		"smtp.example.com": {"93.184.216.34"},
+		"internal.example": {"10.0.0.5"},
+		"rebind.example":   {"169.254.169.254"},
+		"relay.local":      {"192.168.1.20"},
+	}, "relay.local", "169.254.169.254")
+	org := uuid.New()
+	for _, c := range []struct {
+		host string
+		port int
+		ok   bool
+	}{
+		{"smtp.example.com", 587, true},
+		{"internal.example", 587, false},
+		{"10.0.0.5", 5432, false},
+		{"127.0.0.1", 25, false},
+		{"[::1]", 25, false},
+		{"rebind.example", 25, false},
+		{"169.254.169.254", 80, false}, // metadata, even allow-listed
+		{"relay.local", 25, true},      // allow-listed
+		{"smtp.example.com", 0, false},
+		{"smtp.example.com/x", 25, false},
+	} {
+		_, err := s.CheckAddr(context.Background(), org, c.host, c.port)
+		if (err == nil) != c.ok {
+			t.Errorf("%s:%d: err %v, want ok=%v", c.host, c.port, err, c.ok)
+		}
+		if err != nil && !errors.Is(err, ErrRefused) {
+			t.Errorf("%s:%d: %v is not ErrRefused", c.host, c.port, err)
+		}
+	}
+	if a, err := s.CheckAddr(context.Background(), org, "SMTP.example.com.", 465); err != nil || a.String() != "93.184.216.34:465" {
+		t.Fatalf("pinned address: %v %v", a, err)
+	}
+}
+
 func TestValidAllowHost(t *testing.T) {
 	for h, ok := range map[string]bool{
 		"hooks.internal": true, "10.0.0.5": true, "::1": true, "169.254.169.254": false,

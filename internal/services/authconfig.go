@@ -707,9 +707,26 @@ func (s *Service) TestSMTP(ctx context.Context, projectID uuid.UUID, m *SMTPSett
 	if err := c.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
-	return mail.Send(ctx, c, mail.Message{To: []string{to}, Subject: "Xenibase test email", Plain: true,
-		Body: "This is a test email from your project's SMTP settings in Xenibase. They work.\n"})
+	// The server is dialled only at an address the outbound rules allow,
+	// and what went wrong past that stays in the log: the answer must not
+	// map the networks Xenibase reaches.
+	if err := s.pinSMTP(ctx, projectID, &c); err != nil {
+		if errors.Is(err, ErrDestination) {
+			return fmt.Errorf("%w: the SMTP server's address isn't allowed: it must be public, unless the platform admin allows the host for the organisation", ErrInvalid)
+		}
+		return err
+	}
+	if err := mail.Send(ctx, c, mail.Message{To: []string{to}, Subject: "Xenibase test email", Plain: true,
+		Body: "This is a test email from your project's SMTP settings in Xenibase. They work.\n"}); err != nil {
+		s.log.Info("project SMTP test failed", "project_id", projectID, "err", err)
+		return ErrSMTPTest
+	}
+	return nil
 }
+
+// ErrSMTPTest is a test email that couldn't be sent (the reason is
+// logged, not returned).
+var ErrSMTPTest = errors.New("the test email couldn't be sent: check the host, port, TLS mode, user name, password and sender")
 
 // ---- Signing key rotation (V4 §4.4) ------------------------------------------
 
@@ -729,20 +746,7 @@ func (s *Service) RotateSigningKey(ctx context.Context, projectID uuid.UUID) (st
 	if err != nil {
 		return store.ProjectJwtKey{}, err
 	}
-	kid, err := randomFrom(refRest, 16)
-	if err != nil {
-		return store.ProjectJwtKey{}, err
-	}
-	der, jwk, err := jwtes.Generate(kid)
-	if err != nil {
-		return store.ProjectJwtKey{}, err
-	}
-	pub, err := json.Marshal(jwk)
-	if err != nil {
-		return store.ProjectJwtKey{}, err
-	}
-	id := uuid.New()
-	sealed, err := s.keyring.Encrypt(der, jwtAAD(id))
+	key, err := s.newJWTKey(projectID)
 	if err != nil {
 		return store.ProjectJwtKey{}, err
 	}
@@ -753,7 +757,65 @@ func (s *Service) RotateSigningKey(ctx context.Context, projectID uuid.UUID) (st
 			VerifyUntil: ptrTime(time.Now().Add(MaxAccessTokenTTL*time.Second + 5*time.Minute))}); err != nil {
 			return err
 		}
-		out, err = q.InsertJWTKey(ctx, store.InsertJWTKeyParams{ID: id, ProjectID: projectID, Kid: kid, PublicJwk: pub, PrivateEnc: sealed})
+		out, err = q.InsertJWTKey(ctx, key)
+		return err
+	})
+	return out, err
+}
+
+// newJWTKey makes a signing key for projectID, its private half sealed.
+func (s *Service) newJWTKey(projectID uuid.UUID) (store.InsertJWTKeyParams, error) {
+	kid, err := randomFrom(refRest, 16)
+	if err != nil {
+		return store.InsertJWTKeyParams{}, err
+	}
+	der, jwk, err := jwtes.Generate(kid)
+	if err != nil {
+		return store.InsertJWTKeyParams{}, err
+	}
+	pub, err := json.Marshal(jwk)
+	if err != nil {
+		return store.InsertJWTKeyParams{}, err
+	}
+	id := uuid.New()
+	sealed, err := s.keyring.Encrypt(der, jwtAAD(id))
+	if err != nil {
+		return store.InsertJWTKeyParams{}, err
+	}
+	return store.InsertJWTKeyParams{ID: id, ProjectID: projectID, Kid: kid, PublicJwk: pub, PrivateEnc: sealed}, nil
+}
+
+// RevokeSigningKey withdraws key keyID at once (a key that leaked): it
+// leaves the JWKS and the edges with the next feed, so every token it
+// signed stops verifying. Revoking the active key signs with a new one
+// from then on, which signs every user out. It returns the new active key
+// when it made one.
+func (s *Service) RevokeSigningKey(ctx context.Context, projectID, keyID uuid.UUID) (*store.ProjectJwtKey, error) {
+	key, err := s.newJWTKey(projectID)
+	if err != nil {
+		return nil, err
+	}
+	var out *store.ProjectJwtKey
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		k, err := q.LockJWTKey(ctx, store.LockJWTKeyParams{ProjectID: projectID, ID: keyID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: no such signing key", ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if k.Status == "retired" {
+			return fmt.Errorf("%w: the key is retired already", ErrConflict)
+		}
+		if err := q.RetireJWTKey(ctx, store.RetireJWTKeyParams{ProjectID: projectID, ID: keyID}); err != nil {
+			return err
+		}
+		if k.Status != "active" {
+			return nil
+		}
+		n, err := q.InsertJWTKey(ctx, key)
+		out = &n
 		return err
 	})
 	return out, err

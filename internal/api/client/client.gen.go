@@ -4493,9 +4493,12 @@ type AuthConfig struct {
 	// HookRole The role Postgres hooks run as; grant it what they read.
 	HookRole *string `json:"hook_role,omitempty"`
 
-	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
-	HookSecret         *string `json:"hook_secret,omitempty"`
-	MonthlyActiveUsers int64   `json:"monthly_active_users"`
+	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+	HookSecret *string `json:"hook_secret,omitempty"`
+
+	// HookSecretSet Whether the project has a hook secret (for those who aren't shown it).
+	HookSecretSet      *bool `json:"hook_secret_set,omitempty"`
+	MonthlyActiveUsers int64 `json:"monthly_active_users"`
 
 	// OauthCallbackUrl The redirect URI to register with OAuth providers.
 	OauthCallbackUrl *string          `json:"oauth_callback_url,omitempty"`
@@ -14160,6 +14163,11 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/rotate (the `RotateSigningKey` operationId).
 	RotateSigningKey(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+	//
+	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+	RevokeSigningKey(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// TestAuthSMTPWithBody Send a test email through the project's SMTP server (or the settings given)
 	//
 	// Takes any type of body and a specified content type.
@@ -22276,6 +22284,21 @@ func (c *Client) ListSigningKeys(ctx context.Context, id ProjectID, reqEditors .
 // Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/rotate (the `RotateSigningKey` operationId).
 func (c *Client) RotateSigningKey(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRotateSigningKeyRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+//
+// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+func (c *Client) RevokeSigningKey(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeSigningKeyRequest(c.Server, id, keyId)
 	if err != nil {
 		return nil, err
 	}
@@ -37212,6 +37235,47 @@ func NewRotateSigningKeyRequest(server string, id ProjectID) (*http.Request, err
 	return req, nil
 }
 
+// NewRevokeSigningKeyRequest constructs an http.Request for the RevokeSigningKey method
+func NewRevokeSigningKeyRequest(server string, id ProjectID, keyId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "keyId", keyId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/auth/signing-keys/%s/revoke", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewTestAuthSMTPRequest calls the generic TestAuthSMTP builder with application/json body
 func NewTestAuthSMTPRequest(server string, id ProjectID, body TestAuthSMTPJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -47443,6 +47507,13 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/rotate (the `RotateSigningKey` operationId).
 	RotateSigningKeyWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*RotateSigningKeyResponse, error)
+
+	// RevokeSigningKeyWithResponse Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+	RevokeSigningKeyWithResponse(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeSigningKeyResponse, error)
 
 	// TestAuthSMTPWithBodyWithResponse Send a test email through the project's SMTP server (or the settings given)
 	//
@@ -61551,6 +61622,54 @@ func (r RotateSigningKeyResponse) ContentType() string {
 	return ""
 }
 
+type RevokeSigningKeyResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SigningKeyList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r RevokeSigningKeyResponse) GetJSON200() *SigningKeyList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r RevokeSigningKeyResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r RevokeSigningKeyResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeSigningKeyResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeSigningKeyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RevokeSigningKeyResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type TestAuthSMTPResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -74172,6 +74291,19 @@ func (c *ClientWithResponses) RotateSigningKeyWithResponse(ctx context.Context, 
 	return ParseRotateSigningKeyResponse(rsp)
 }
 
+// RevokeSigningKeyWithResponse Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+func (c *ClientWithResponses) RevokeSigningKeyWithResponse(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeSigningKeyResponse, error) {
+	rsp, err := c.RevokeSigningKey(ctx, id, keyId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeSigningKeyResponse(rsp)
+}
+
 // TestAuthSMTPWithBodyWithResponse Send a test email through the project's SMTP server (or the settings given)
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -85893,6 +86025,39 @@ func ParseRotateSigningKeyResponse(rsp *http.Response) (*RotateSigningKeyRespons
 	}
 
 	response := &RotateSigningKeyResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SigningKeyList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeSigningKeyResponse parses an HTTP response from a RevokeSigningKeyWithResponse call
+func ParseRevokeSigningKeyResponse(rsp *http.Response) (*RevokeSigningKeyResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeSigningKeyResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

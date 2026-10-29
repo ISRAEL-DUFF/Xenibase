@@ -120,10 +120,17 @@ func (e *Edge) mfaEnroll(c *call, req Request) {
 	var en projauth.Enrolled
 	var fail *apiErr
 	err := e.authTx(c, func(tx pgx.Tx) error {
-		u, f, err := e.liveUser(ctx, tx, uid, sid, true)
+		u, s, f, err := e.liveSession(ctx, tx, uid, sid, true)
 		if err != nil || f != nil {
 			fail = f
 			return err
+		}
+		// A user with a verified factor enrols another only at aal2.
+		if below, err := belowMFA(ctx, tx, s); err != nil {
+			return err
+		} else if below {
+			fail = refuse(http.StatusForbidden, "insufficient_aal", "an aal2 session (verify a factor) is required to enrol another")
+			return nil
 		}
 		account := u.ID.String()
 		if u.Email != nil {
@@ -160,6 +167,17 @@ func (e *Edge) mfaEnroll(c *call, req Request) {
 		out["phone"] = phone
 	}
 	c.json(http.StatusOK, out)
+}
+
+// factorLocked refuses a factor locked by wrong codes.
+func factorLocked(f *projauth.Factor) *apiErr {
+	now := time.Now()
+	if !f.Locked(now) {
+		return nil
+	}
+	a := refuse(http.StatusTooManyRequests, "mfa_factor_locked", "too many wrong codes for this factor; try again later")
+	a.retryAfter = int(f.LockedUntil.Sub(now).Seconds()) + 1
+	return a
 }
 
 func (e *Edge) factorID(c *call, raw string) (uuid.UUID, bool) {
@@ -208,6 +226,9 @@ func (e *Edge) mfaChallenge(c *call, req Request, raw string) {
 			return err
 		}
 		kind = f.FactorType
+		if fail = factorLocked(f); fail != nil {
+			return nil
+		}
 		if f.FactorType == projauth.FactorPhone {
 			channel := in.Channel
 			if channel == "" {
@@ -272,7 +293,7 @@ func (e *Edge) mfaVerify(c *call, req Request, raw string) {
 	var out tokenResponse
 	var fail *apiErr
 	err = e.authTx(c, func(tx pgx.Tx) error {
-		u, f, err := e.liveUser(ctx, tx, uid, sid, true)
+		u, s, f, err := e.liveSession(ctx, tx, uid, sid, true)
 		if err != nil || f != nil {
 			fail = f
 			return err
@@ -285,15 +306,33 @@ func (e *Edge) mfaVerify(c *call, req Request, raw string) {
 		if err != nil {
 			return err
 		}
+		// A new factor raises the session only when it is the user's first,
+		// or the session is at aal2 already: otherwise an aal1 session could
+		// verify a factor it enrolled before the user's others were.
+		if fac.Status != projauth.FactorVerified {
+			if below, err := belowMFA(ctx, tx, s); err != nil {
+				return err
+			} else if below {
+				fail = refuse(http.StatusForbidden, "insufficient_aal", "verify one of the user's verified factors first (aal2)")
+				return nil
+			}
+		}
+		if fail = factorLocked(fac); fail != nil {
+			return nil
+		}
 		ok, err := projauth.VerifyChallenge(ctx, tx, fac, chID, in.Code, time.Now())
 		if err != nil {
 			return err
 		}
 		if !ok {
 			fail = refuse(http.StatusUnprocessableEntity, "mfa_verification_failed", "the code is wrong or the challenge has expired")
-			return projauth.Audit(ctx, tx, &uid, projauth.ActMFAFailed, c.ip, map[string]any{"factor_id": fac.ID})
+			details := map[string]any{"factor_id": fac.ID}
+			if fac.LockedUntil != nil {
+				details["locked_until"] = fac.LockedUntil
+			}
+			return projauth.Audit(ctx, tx, &uid, projauth.ActMFAFailed, c.ip, details)
 		}
-		s, err := projauth.StepUp(ctx, tx, sid, fac.FactorType)
+		s, err = projauth.StepUp(ctx, tx, sid, fac.FactorType)
 		if err != nil {
 			return err
 		}
@@ -331,7 +370,8 @@ func (e *Edge) mfaUnenroll(c *call, req Request, raw string) {
 	ctx := c.r.Context()
 	var fail *apiErr
 	err := e.authTx(c, func(tx pgx.Tx) error {
-		if _, f, err := e.liveUser(ctx, tx, uid, sid, true); err != nil || f != nil {
+		_, s, f, err := e.liveSession(ctx, tx, uid, sid, true)
+		if err != nil || f != nil {
 			fail = f
 			return err
 		}
@@ -344,7 +384,7 @@ func (e *Edge) mfaUnenroll(c *call, req Request, raw string) {
 			return err
 		}
 		// Removing a verified factor needs the session at aal2.
-		if aal, _ := req.Claims["aal"].(string); fac.Status == projauth.FactorVerified && aal != "aal2" {
+		if fac.Status == projauth.FactorVerified && s.AAL != "aal2" {
 			fail = refuse(http.StatusForbidden, "insufficient_aal", "verify a factor first (aal2) to remove one")
 			return nil
 		}
