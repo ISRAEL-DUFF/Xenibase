@@ -1369,11 +1369,19 @@ func (e *Edge) liveSession(ctx context.Context, tx pgx.Tx, uid, sid uuid.UUID, l
 // verified factor: such a session may not change what proves the user
 // (GoTrue's insufficient_aal), or a password alone would be enough to
 // reach aal2.
-func belowMFA(ctx context.Context, tx pgx.Tx, s *projauth.Session) (bool, error) {
-	if s.AAL == "aal2" {
+func belowMFA(ctx context.Context, tx pgx.Tx, s *projauth.Session, req Request) (bool, error) {
+	if atAAL2(s, req) {
 		return false, nil
 	}
 	return projauth.HasVerifiedFactor(ctx, tx, s.UserID)
+}
+
+// atAAL2 reports whether both the stored session and the request's token
+// are at aal2: the session catches one lowered since the token was issued,
+// and the token one issued before the session was raised.
+func atAAL2(s *projauth.Session, req Request) bool {
+	aal, _ := req.Claims["aal"].(string)
+	return s.AAL == "aal2" && aal == "aal2"
 }
 
 func (e *Edge) getUser(c *call, req Request) {
@@ -1497,7 +1505,7 @@ func (e *Edge) updateUser(c *call, req Request) {
 			return err
 		}
 		if hash != nil || (newEmail != "" && (u.Email == nil || *u.Email != newEmail)) {
-			if below, err := belowMFA(ctx, tx, s); err != nil {
+			if below, err := belowMFA(ctx, tx, s, req); err != nil {
 				return err
 			} else if below {
 				fail = refuse(http.StatusUnauthorized, "insufficient_aal",

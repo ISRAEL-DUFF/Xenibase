@@ -126,7 +126,7 @@ func (e *Edge) mfaEnroll(c *call, req Request) {
 			return err
 		}
 		// A user with a verified factor enrols another only at aal2.
-		if below, err := belowMFA(ctx, tx, s); err != nil {
+		if below, err := belowMFA(ctx, tx, s, req); err != nil {
 			return err
 		} else if below {
 			fail = refuse(http.StatusForbidden, "insufficient_aal", "an aal2 session (verify a factor) is required to enrol another")
@@ -310,7 +310,7 @@ func (e *Edge) mfaVerify(c *call, req Request, raw string) {
 		// or the session is at aal2 already: otherwise an aal1 session could
 		// verify a factor it enrolled before the user's others were.
 		if fac.Status != projauth.FactorVerified {
-			if below, err := belowMFA(ctx, tx, s); err != nil {
+			if below, err := belowMFA(ctx, tx, s, req); err != nil {
 				return err
 			} else if below {
 				fail = refuse(http.StatusForbidden, "insufficient_aal", "verify one of the user's verified factors first (aal2)")
@@ -384,7 +384,7 @@ func (e *Edge) mfaUnenroll(c *call, req Request, raw string) {
 			return err
 		}
 		// Removing a verified factor needs the session at aal2.
-		if fac.Status == projauth.FactorVerified && s.AAL != "aal2" {
+		if fac.Status == projauth.FactorVerified && !atAAL2(s, req) {
 			fail = refuse(http.StatusForbidden, "insufficient_aal", "verify a factor first (aal2) to remove one")
 			return nil
 		}

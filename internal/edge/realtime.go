@@ -779,6 +779,7 @@ func (e *Edge) bindChanges(ctx context.Context, p *project, req Request, ch *rtC
 		return nil, fmt.Errorf("realtime is off for %s.%s: turn it on in the dashboard or with xb_realtime.enable('%s.%s')", schema, table, schema, table)
 	}
 	var t *datacat.Table
+	noRLS := false
 	err = e.WithRequest(ctx, p, req, func(tx pgx.Tx) error {
 		cat, _, err := e.catalog(ctx, p, tx)
 		if err != nil {
@@ -786,6 +787,13 @@ func (e *Edge) bindChanges(ctx context.Context, p *project, req Request, ch *rtC
 		}
 		t = cat.ByName[schema+"."+table]
 		if t == nil {
+			return nil
+		}
+		// Before the privilege: anon and users hold none on a table
+		// without row-level security (the data API's grant sync takes it
+		// back), and the missing security is what the owner must fix.
+		if req.Role != "service" && !t.RLS && !p.publicTable(t) {
+			noRLS = true
 			return nil
 		}
 		var ok bool
@@ -799,6 +807,9 @@ func (e *Edge) bindChanges(ctx context.Context, p *project, req Request, ch *rtC
 	})
 	if err != nil {
 		return nil, fmt.Errorf("realtime can't reach the project's database: %w", err)
+	}
+	if noRLS {
+		return nil, fmt.Errorf("%s.%s has no row-level security: turn it on (or list the table as public) before anon or users subscribe", schema, table)
 	}
 	if t == nil {
 		return nil, fmt.Errorf("no table %s.%s in the API's exposed schemas that this key or user may read", schema, table)
