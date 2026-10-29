@@ -150,6 +150,10 @@ versions** (`GET /api/v1/admin/pg-versions`, `PATCH …/{major}`):
   it). Existing projects keep running, marked unsupported; they are never
   upgraded automatically, since a new major can break an application.
   Shared clusters of the major can still be created for them.
+- Whatever the status (preview and retired included), a project can still
+  be **restored to a point in time, branched, or have a read replica
+  detached**: the new project stays on its source's major, as long as the
+  server still has that major's image (`XENIBASE_PG_VERSIONS`).
 
 ### Major upgrades
 

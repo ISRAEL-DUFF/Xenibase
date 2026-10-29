@@ -19,6 +19,11 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A project on a retired or preview Postgres major could not be restored
+  to a point in time, branched, or have a replica detached:** each made its
+  new project as a new project would, which those majors refuse. They now
+  take any major the server has an image for, so a retired project keeps
+  its safety net.
 - **Minor upgrades took no lock, weren't operations, and weren't
   crash-safe.** Two servers could restart the same instance twice, an
   owner could queue `ha_disable` or a resize during an HA upgrade, and a

@@ -200,7 +200,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams, r Resolved) (provi
 	c, err := s.projects.Create(ctx, provision.CreateParams{
 		PgVersion: int(parentInst.PgVersion),
 		OrgID:     r.Parent.OrgID, CreatorRole: p.CreatorRole, Name: p.Name, CreatedBy: p.CreatedBy,
-		Kind: KindCreate, Tier: provision.TierShared, Sensitive: r.Parent.SensitiveData,
+		Kind: KindCreate, Tier: provision.TierShared, Sensitive: r.Parent.SensitiveData, Derived: true,
 		Params: map[string]any{"branch": fillParams{Parent: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, CopyFiles: p.CopyFiles}},
 		Branch: &provision.BranchSpec{ParentID: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, ExpiresAt: r.ExpiresAt},
 	})

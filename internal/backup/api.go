@@ -88,7 +88,7 @@ func (s *Service) PITR(ctx context.Context, p PITRParams) (provision.Created, er
 	cp := provision.CreateParams{
 		OrgID: src.OrgID, CreatorRole: p.CreatorRole,
 		Name: strings.TrimSpace(p.Name), CreatedBy: p.CreatedBy, Kind: KindRestore,
-		Tier: provision.TierDedicated, NodeID: &inst.NodeID, PgVersion: int(inst.PgVersion),
+		Tier: provision.TierDedicated, NodeID: &inst.NodeID, PgVersion: int(inst.PgVersion), Derived: true,
 		Region: src.Region, DataResidency: src.DataResidency, // a restore stays in the source's region
 		Params: map[string]any{"mode": ModePITR, "pitr": plan},
 	}

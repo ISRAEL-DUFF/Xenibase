@@ -258,9 +258,12 @@ type CreateParams struct {
 	// WAL from a server that allowed more connections).
 	MinMaxConnections int
 	// PgVersion is the Postgres major (0: the default, the newest
-	// supported). Preview allows a major in preview (V4.1 §6.1).
+	// supported). Preview allows a major in preview (V4.1 §6.1); Derived,
+	// for a project made from another's data (a restore, a branch, a
+	// detached replica), allows any installed major.
 	PgVersion int
 	Preview   bool
+	Derived   bool
 	// Region is where the project runs (empty: the home region, or NodeID's
 	// region); DataResidency keeps its data in that region's country, which
 	// the region must offer (V3 §6.3). A branch takes its parent's.
@@ -398,7 +401,10 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		tier = TierShared
 	}
 	use := ForProject
-	if p.Preview {
+	switch {
+	case p.Derived:
+		use = ForDerived
+	case p.Preview:
 		use = ForPreviewProject
 	}
 	if p.PgVersion, err = s.CheckVersion(ctx, p.PgVersion, use); err != nil {
