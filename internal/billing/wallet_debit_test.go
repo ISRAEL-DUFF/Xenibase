@@ -439,3 +439,67 @@ func TestFailedDepositEventIsSwept(t *testing.T) {
 	}
 	w.depositBooked(t, org, wid, 9_860_00)
 }
+
+// A consent to an older version of the debit terms is no consent: the
+// invoice isn't debited on issue or on a deposit, its email asks for the new
+// terms, and the org can still pay it from the wallet by asking.
+func TestWalletNotDebitedUnderSupersededTerms(t *testing.T) {
+	w := newWalletWorld(t)
+	ctx := context.Background()
+	org, wid := w.walletOrg(t, "oldterms", 100_000_00, true)
+	if _, err := w.db.Exec(ctx, `UPDATE billing_accounts SET debit_terms_version = '2025-01' WHERE org_id = $1`, org); err != nil {
+		t.Fatal(err)
+	}
+	draft := w.proDraft(t, org)
+	issued, err := w.s.Issue(ctx, draft.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.invoice(t, issued.ID); got.Status != billing.StatusIssued {
+		t.Fatalf("debited under superseded terms on issue: %s", got.Status)
+	}
+	var asked bool
+	for _, m := range w.sent.all() {
+		if strings.Contains(m.Subject, *w.invoice(t, issued.ID).Number) && m.Content != nil {
+			asked = asked || strings.Contains(m.Content.Text(), billing.DebitTermsChangedNotice)
+		}
+	}
+	if !asked {
+		t.Fatal("the invoice's email didn't ask for the new terms")
+	}
+	// A deposit, and the daily dunning, debit nothing either.
+	va, err := w.s.EnsureTransferAccount(ctx, org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := w.fake.Deposit(va.AccountNumber, 10_000_00); err != nil {
+		t.Fatal(err)
+	}
+	if e := w.event(t); e != "transfer.received posted" {
+		t.Fatalf("deposit event: %s", e)
+	}
+	if err := w.s.RunDunning(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the deposit's debit runs in the background
+	if got := w.invoice(t, issued.ID); got.Status != billing.StatusIssued || w.fake.OperatingBalance() != 0 {
+		t.Fatalf("debited under superseded terms: %s, operating %d", got.Status, w.fake.OperatingBalance())
+	}
+	view, err := w.s.Wallet(ctx, org)
+	if err != nil || view.Consent == nil || view.Consent.Current {
+		t.Fatalf("consent %+v %v", view.Consent, err)
+	}
+	// Pay from wallet still works.
+	out, err := w.s.PayInvoiceFromWallet(ctx, org, issued.ID)
+	if err != nil || !out.Succeeded {
+		t.Fatalf("pay from wallet: %+v %v", out, err)
+	}
+	paid := w.waitPaid(t, issued.ID)
+	if got := w.fake.OperatingBalance(); got != paid.TotalMinor {
+		t.Fatalf("operating %d for %d", got, paid.TotalMinor)
+	}
+	if got := w.held(t, org, billing.AccWalletBalance); got != w.fake.WalletBalance(wid) {
+		t.Fatalf("books %d, provider %d", got, w.fake.WalletBalance(wid))
+	}
+	mustCheck(t, w.db)
+}

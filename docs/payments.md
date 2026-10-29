@@ -129,7 +129,10 @@ Billing asks an owner to agree to:
 
 Xenibase stores who agreed, when, and which version of the wording
 (`DebitTermsVersion`; changing the wording asks every owner again).
-Without consent Xenibase never debits automatically. The owner can still pay
+Without consent Xenibase never debits automatically, and a consent to an
+older version of the wording counts as none: until an owner agrees to the
+new one, nothing is debited automatically, the Billing page asks for the
+new terms, and each invoice's email says it won't be debited. The owner can still pay
 one invoice from the wallet by pressing **Pay from wallet** on it, which
 needs no standing consent, and can turn automatic debits off again at any
 time. If a customer disputes a charge, Xenibase's own record of the consent

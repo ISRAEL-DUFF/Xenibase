@@ -374,6 +374,9 @@ func (s *Service) mailInvoice(ctx context.Context, inv store.Invoice) {
 	if inv.WhtExpectedMinor > 0 {
 		c.Blocks = append(c.Blocks, mail.P(fmt.Sprintf("If you withhold tax, you may deduct %s. Please send us the WHT credit note.", Naira(inv.WhtExpectedMinor))))
 	}
+	if a, err := store.New(s.db).GetBillingAccount(ctx, inv.OrgID); err == nil && inv.TotalMinor > 0 && walletID(a) != "" && ConsentOf(a) != nil && !debitsAllowed(a) {
+		c.Blocks = append(c.Blocks, mail.P(DebitTermsChangedNotice))
+	}
 	c.Blocks = append(c.Blocks, mail.Button("View and download the invoice", fmt.Sprintf("%s/org/billing?org=%s&invoice=%s", s.publicURL, inv.OrgID, inv.ID)))
 	s.notifyContent(ctx, inv.OrgID, "billing.invoice", fmt.Sprintf("Xenibase invoice %s for %s", *inv.Number, month), c)
 }

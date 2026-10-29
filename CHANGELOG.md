@@ -694,6 +694,14 @@ bundle share one version (spec §11.5).
   provider reports as still pending is retried rather than rejected, and
   an event that couldn't be stored at all is answered 500 rather than 200.
   Migration 00091 adds `attempts` and `claimed_at` to `payment_events`.
+- **Wallets are no longer debited under superseded debit terms.** The
+  version of the debit terms an owner agreed to is stored so that a change
+  of wording asks again, and the Billing page did ask, but automatic debits
+  only checked that some consent existed and went on under the old
+  wording. They now need a consent to the current version; with an older
+  one an organisation is treated as without consent until an owner agrees
+  again. **Pay from wallet** still works, and each invoice's email says the
+  invoice won't be debited and where to agree.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its

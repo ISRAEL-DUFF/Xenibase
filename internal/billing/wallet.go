@@ -27,6 +27,11 @@ const DebitTerms = "Xenibase may debit this organisation's wallet for each invoi
 	"in naira shown on the invoice, converted from the dollar price at the rate on it, and for what remains owing " +
 	"whenever the wallet is topped up. Debits can be switched off at any time; invoices are then paid by hand."
 
+// DebitTermsChangedNotice is what an invoice's email says when the org
+// agreed to an older version of the debit terms.
+const DebitTermsChangedNotice = "The terms for paying invoices from your wallet have changed since they were agreed to, so this invoice " +
+	"won't be debited from the wallet automatically. An owner can agree to the new terms on the Billing page, or pay this invoice from the wallet there."
+
 var bvnPattern = regexp.MustCompile(`^[0-9]{11}$`)
 
 // WalletSetup is what the wallet provider needs to know about a business
@@ -126,6 +131,14 @@ func ConsentOf(a store.BillingAccount) *Consent {
 	}
 	v := deref0(a.DebitTermsVersion)
 	return &Consent{At: *a.DebitConsentAt, By: a.DebitConsentBy, Version: v, Current: v == DebitTermsVersion}
+}
+
+// debitsAllowed is whether the org agreed to automatic debits under the
+// current terms. A consent to an older wording counts as none: the owners
+// are asked again (the Billing page, and each invoice's email).
+func debitsAllowed(a store.BillingAccount) bool {
+	c := ConsentOf(a)
+	return c != nil && c.Current
 }
 
 func deref0(s *string) string {
@@ -334,7 +347,7 @@ func (s *Service) chargeInvoiceFromWallet(ctx context.Context, inv store.Invoice
 		return WalletCharge{}, err
 	}
 	wid := walletID(a)
-	if wid == "" || (!explicit && a.DebitConsentAt == nil) {
+	if wid == "" || (!explicit && !debitsAllowed(a)) {
 		return WalletCharge{Skipped: true}, nil
 	}
 	// An earlier attempt that got no answer comes first.
