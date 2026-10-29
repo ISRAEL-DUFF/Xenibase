@@ -114,6 +114,13 @@ bundle share one version (spec §11.5).
   upgrade preflight's scratch instance in its first hour, and checks each
   instance again just before destroying it. A retry no longer starts a new
   container under an instance already marked deleted.
+- **A move's rollback that could not reach the source left the project
+  frozen for good.** It returned before resuming the poolers, and the
+  project stayed `moving` (or `promoting`, `demoting`, `upgrading`) with
+  its logins `NOLOGIN` until someone repaired it by hand. The poolers now
+  resume whatever happens, and a sweep every minute gives the logins back
+  and sets such a project active once its instance answers; one still
+  frozen after 10 minutes raises a `project_stuck` alert.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

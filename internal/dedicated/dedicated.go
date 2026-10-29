@@ -893,7 +893,8 @@ func (s *Service) ReapOrphans(ctx context.Context) (int, error) {
 	return removed, nil
 }
 
-// RunReaper calls ReapOrphans every interval until ctx ends.
+// RunReaper calls ReapOrphans and RepairStuckMoves (what failed rollbacks
+// left) every interval until ctx ends.
 func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -905,6 +906,9 @@ func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 		}
 		if _, err := s.ReapOrphans(ctx); err != nil && ctx.Err() == nil {
 			s.log.Warn("orphaned instance cleanup failed", "err", err)
+		}
+		if _, err := s.RepairStuckMoves(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("repairing frozen projects failed", "err", err)
 		}
 	}
 }

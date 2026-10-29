@@ -65,6 +65,14 @@ const (
 	KindAgentClientCert = "agent_client_cert"
 )
 
+// KindProjectStuck: a move, promotion, demotion or major upgrade failed and
+// its rollback still cannot unfreeze the project (its instance does not
+// answer), 10 minutes on.
+const (
+	KindProjectStuck  = "project_stuck"
+	projectStuckAfter = 10 * time.Minute
+)
+
 // Config configures the service.
 type Config struct {
 	// Interval is how often conditions are evaluated (default 30s).
@@ -257,6 +265,16 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		}
 		out = append(out, condition{KindBackupOverdue, SeverityWarning, "project", p.ID.String(), p.Name,
 			fmt.Sprintf("No backup of %s in 26 hours (%s)", p.Name, since), map[string]any{"last_backup_at": p.LastBackupAt}})
+	}
+
+	stuck, err := q.ListStuckProjects(ctx, projectStuckAfter.Seconds())
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, p := range stuck {
+		out = append(out, condition{KindProjectStuck, SeverityCritical, "project", p.ID.String(), p.Name,
+			fmt.Sprintf("%s is still %s after its operation failed: the rollback cannot give its logins back until its instance answers", p.Name, p.Status),
+			map[string]any{"status": p.Status}})
 	}
 
 	unreachable, err := q.UnreachableNodes(ctx, nodeUnreachableAfter.Seconds())

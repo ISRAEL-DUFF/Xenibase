@@ -28,3 +28,17 @@ UPDATE projects p SET instance_id = @instance_id,
   region = n.region
 FROM instances i JOIN nodes n ON n.id = i.node_id
 WHERE i.id = @instance_id AND p.id = @id;
+
+-- ListStuckProjects finds projects a move, promotion, demotion or major
+-- upgrade left in its status with no operation to finish it: a rollback
+-- that could not reach the source to give its logins back. stuck_seconds
+-- is how long since the project's last operation ended.
+-- name: ListStuckProjects :many
+-- tenant: system - the stuck-move sweep and the alerts repair or report every organisation's projects.
+SELECT p.* FROM projects p
+WHERE p.deleted_at IS NULL
+  AND p.status IN ('moving', 'promoting', 'demoting', 'upgrading')
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id AND o.status IN ('queued', 'running'))
+  AND coalesce((SELECT max(o.finished_at) FROM operations o WHERE o.project_id = p.id), p.created_at)
+      < now() - make_interval(secs => @stuck_seconds::float8)
+ORDER BY p.created_at;

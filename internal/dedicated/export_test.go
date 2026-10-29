@@ -8,3 +8,10 @@ var (
 	DemotedSettings = demotedSettings
 	Resets          = resets
 )
+
+// The rollbacks of the move-like operations.
+var (
+	FailMove    = (*Service).failMove
+	FailPromote = (*Service).failPromote
+	FailDemote  = (*Service).failDemote
+)

@@ -659,14 +659,17 @@ func (s *Service) failDemote(ctx context.Context, op store.Operation, log *jobs.
 		return s.finishDemotion(ctx, op, p, params.SourceInstance, log, time.Time{})
 	}
 	s.moveFailed(ctx, op, p.InstanceID, params.TargetInstance, p.DbName, log)
-	if err := s.unfreeze(ctx, p, log, "dedicated instance writable again; route resumed"); err != nil {
-		return err
-	}
-	if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
-		return err
+	thawErr := s.unfreeze(ctx, p, log, "dedicated instance writable again; route resumed")
+	if thawErr == nil {
+		if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
+			return err
+		}
 	}
 	if err := s.dropCopy(ctx, params.TargetInstance, p.DbName, p.OwnerRole); err != nil {
 		_ = log.Warn(ctx, "rollback", "could not drop the partial shared copy: %v", err)
+	}
+	if thawErr != nil {
+		return s.stuck(ctx, p, log, thawErr)
 	}
 	return log.Warn(ctx, "rollback", "demotion rolled back; the project stays on its dedicated instance with no data lost")
 }

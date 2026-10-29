@@ -19,6 +19,7 @@ const kindLabel: Record<string, string> = {
   pooler_allowlist_off: "Pooler ignores IP allowlists",
   pooler_config_skipped: "Pooler configuration entry left out",
   waker_down: "Waker down",
+  project_stuck: "Project left frozen by a failed move",
   failure_domain: "Shared failure domain",
   isolation_check_failed: "Isolation check",
   capacity_proposal: "Capacity proposal",
