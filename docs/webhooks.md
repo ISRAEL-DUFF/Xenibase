@@ -253,4 +253,7 @@ A job runs SQL, or calls a URL, on a schedule: Database → Scheduled jobs,
   suspended, and, for HTTP jobs, while its outbound traffic is off.
 - **History**: start, duration, status, rows affected or HTTP status, and
   the error; kept 30 days, at most 1,000 runs per job. **Run now** starts
-  one at once. Three failures in a row email the project's admins.
+  one at once, under the same overlap rule as a scheduled run: while a run
+  is going it is skipped, or queued if the job queues and none is queued
+  yet. A job never has more than one run going, however many servers or
+  clicks start it. Three failures in a row email the project's admins.

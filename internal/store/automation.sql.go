@@ -1010,6 +1010,18 @@ func (q *Queries) ListWebhooks(ctx context.Context, projectID uuid.UUID) ([]Webh
 	return items, nil
 }
 
+const lockJob = `-- name: LockJob :one
+SELECT id FROM scheduled_jobs WHERE id = $1 FOR UPDATE
+`
+
+// tenant: system - the scheduler, or a job the request already authorized.
+// Serialises the overlap check and the run insert of one job across servers.
+func (q *Queries) LockJob(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockJob, id)
+	err := row.Scan(&id)
+	return id, err
+}
+
 const markReplayed = `-- name: MarkReplayed :exec
 UPDATE webhook_deliveries SET replayed_at = now() WHERE id = ANY($1::bigint[])
 `

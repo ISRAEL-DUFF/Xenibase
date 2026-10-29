@@ -179,6 +179,11 @@ UPDATE scheduled_jobs SET next_run_at = sqlc.narg(next_run_at) WHERE id = @id;
 -- tenant: system - the scheduler.
 UPDATE scheduled_jobs SET consecutive_failures = @consecutive_failures WHERE id = @id;
 
+-- name: LockJob :one
+-- tenant: system - the scheduler, or a job the request already authorized.
+-- Serialises the overlap check and the run insert of one job across servers.
+SELECT id FROM scheduled_jobs WHERE id = @id FOR UPDATE;
+
 -- name: InsertJobRun :one
 -- tenant: system - the scheduler.
 INSERT INTO job_runs (job_id, scheduled_for, started_at, finished_at, status, error, trigger)

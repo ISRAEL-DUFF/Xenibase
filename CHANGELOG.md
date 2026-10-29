@@ -46,6 +46,17 @@ bundle share one version (spec §11.5).
   in the minute or hour run by the clock through both. No run is ever less
   than a minute after the one before. See `docs/webhooks.md` ("Scheduled
   jobs").
+- **"Run now" no longer runs a job twice.** The overlap check read the
+  job's active runs and then inserted a running one with nothing to stop
+  another server doing the same, and "Run now" is served by any API
+  server, not only the scheduler's. A manual run that met the scheduled
+  one, or two manual runs, could both start, so an `overlap: skip` job ran
+  alongside itself. The check and the insert now hold the job's row lock,
+  as does starting a queued run when the one before ends (a run queued at
+  that moment could otherwise wait until the next scheduler restart failed
+  it), and the database allows one running and one queued run per job;
+  migration 00086 fails any duplicates the race left before adding that
+  rule.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a

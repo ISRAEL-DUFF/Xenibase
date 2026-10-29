@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -467,11 +468,12 @@ func (s *Service) RunNow(ctx context.Context, j store.ScheduledJob) (store.JobRu
 // why it was skipped or queued.
 func (s *Service) dispatch(ctx context.Context, j store.ScheduledJob, scheduledFor time.Time, trigger string) (store.JobRun, error) {
 	q := store.New(s.db)
-	skip := func(reason string) (store.JobRun, error) {
+	skipped := func(q *store.Queries, reason string) (store.JobRun, error) {
 		now := s.cfg.Now()
 		return q.InsertJobRun(ctx, store.InsertJobRunParams{JobID: j.ID, ScheduledFor: scheduledFor, StartedAt: &now, FinishedAt: &now,
 			Status: RunSkipped, Error: &reason, Trigger: trigger})
 	}
+	skip := func(reason string) (store.JobRun, error) { return skipped(q, reason) }
 	p, err := q.GetProject(ctx, j.ProjectID)
 	if err != nil {
 		return store.JobRun{}, err
@@ -505,24 +507,41 @@ func (s *Service) dispatch(ctx context.Context, j store.ScheduledJob, scheduledF
 			}
 		}
 	}
-	active, err := q.ActiveJobRuns(ctx, j.ID)
+	// The overlap check and the insert run under the job's row lock: the
+	// scheduler and a "Run now" served by another server would otherwise
+	// both find no active run and both start one.
+	var r store.JobRun
+	started := false
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := q.WithTx(tx)
+		if _, err := q.LockJob(ctx, j.ID); err != nil {
+			return err
+		}
+		active, err := q.ActiveJobRuns(ctx, j.ID)
+		if err != nil {
+			return err
+		}
+		if len(active) > 0 {
+			queued := slices.ContainsFunc(active, func(r store.JobRun) bool { return r.Status == RunQueued })
+			if j.Overlap == OverlapSkip || queued {
+				r, err = skipped(q, "the previous run is still going")
+				return err
+			}
+			// Queue one run; it starts when the current one ends.
+			r, err = q.InsertJobRun(ctx, store.InsertJobRunParams{JobID: j.ID, ScheduledFor: scheduledFor, Status: RunQueued, Trigger: trigger})
+			return err
+		}
+		now := s.cfg.Now()
+		r, err = q.InsertJobRun(ctx, store.InsertJobRunParams{JobID: j.ID, ScheduledFor: scheduledFor, StartedAt: &now, Status: RunRunning, Trigger: trigger})
+		started = err == nil
+		return err
+	})
 	if err != nil {
 		return store.JobRun{}, err
 	}
-	if len(active) > 0 {
-		queued := slices.ContainsFunc(active, func(r store.JobRun) bool { return r.Status == RunQueued })
-		if j.Overlap == OverlapSkip || queued {
-			return skip("the previous run is still going")
-		}
-		// Queue one run; it starts when the current one ends.
-		return q.InsertJobRun(ctx, store.InsertJobRunParams{JobID: j.ID, ScheduledFor: scheduledFor, Status: RunQueued, Trigger: trigger})
+	if started {
+		s.start(j, p, r)
 	}
-	now := s.cfg.Now()
-	r, err := q.InsertJobRun(ctx, store.InsertJobRunParams{JobID: j.ID, ScheduledFor: scheduledFor, StartedAt: &now, Status: RunRunning, Trigger: trigger})
-	if err != nil {
-		return r, err
-	}
-	s.start(j, p, r)
 	return r, nil
 }
 
@@ -535,23 +554,36 @@ func (s *Service) start(j store.ScheduledJob, p store.Project, r store.JobRun) {
 		if ctx.Err() != nil {
 			return // stopping: a queued run waits for the next server
 		}
-		// A queued run starts now.
-		q := store.New(s.db)
-		active, err := q.ActiveJobRuns(ctx, j.ID)
-		if err != nil {
+		// A queued run starts now, under the job's lock as in dispatch, so a
+		// run queued while this one finished is not left behind.
+		var next store.JobRun
+		err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+			q := store.New(tx)
+			if _, err := q.LockJob(ctx, j.ID); err != nil {
+				return err
+			}
+			active, err := q.ActiveJobRuns(ctx, j.ID)
+			if err != nil || slices.ContainsFunc(active, func(r store.JobRun) bool { return r.Status == RunRunning }) {
+				return err
+			}
+			for _, r := range active {
+				if r.Status == RunQueued {
+					now := s.cfg.Now()
+					if err := q.StartJobRun(ctx, store.StartJobRunParams{ID: r.ID, StartedAt: &now}); err != nil {
+						return err
+					}
+					next = r
+					next.Status, next.StartedAt = RunRunning, &now
+					return nil
+				}
+			}
+			return nil
+		})
+		if err != nil || next.ID == 0 {
 			return
 		}
-		for _, next := range active {
-			if next.Status == RunQueued {
-				now := s.cfg.Now()
-				if err := q.StartJobRun(ctx, store.StartJobRunParams{ID: next.ID, StartedAt: &now}); err == nil {
-					next.Status, next.StartedAt = RunRunning, &now
-					if cur, err := q.GetJobByID(ctx, j.ID); err == nil {
-						s.start(cur, p, next)
-					}
-				}
-				return
-			}
+		if cur, err := store.New(s.db).GetJobByID(ctx, j.ID); err == nil {
+			s.start(cur, p, next)
 		}
 	}()
 }
