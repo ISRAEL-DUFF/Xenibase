@@ -1,0 +1,35 @@
+{
+  "title": "Xenibase Atlas",
+  "tagline": "How Xenibase is built, feature by feature, checked against the code.",
+  "repo": "https://github.com/ISRAEL-DUFF/Xenibase",
+  "home": "home",
+  "packages": { "root": "internal" },
+  "stats": {
+    "go-lines": { "kind": "lines", "files": ["*.go"] },
+    "go-lines-nontest": { "kind": "lines", "files": ["*.go"], "exclude": "_test\\.go$" },
+    "go-test-lines": { "kind": "lines", "files": ["*_test.go"] },
+    "ts-lines": { "kind": "lines", "files": ["web/src/*.ts", "web/src/*.tsx"] },
+    "packages": { "kind": "packages" },
+    "binaries": { "kind": "dirs", "dir": "cmd", "having": "main.go" },
+    "migrations": { "kind": "files", "dir": "internal/store/migrations", "match": "\\.sql$" },
+    "migrations-latest": { "kind": "latest", "dir": "internal/store/migrations", "match": "\\.sql$", "slice": 5 },
+    "tables": { "kind": "schema", "dir": "internal/store/migrations", "value": "tables" },
+    "query-files": { "kind": "files", "dir": "internal/store/queries", "match": "\\.sql$" },
+    "api-operations": { "kind": "matches", "file": "api/openapi.yaml", "pattern": "^\\s+operationId:" },
+    "api-paths": { "kind": "matches", "file": "api/openapi.yaml", "pattern": "^ {2}/\\S*:\\s*$" },
+    "decisions": { "kind": "matches", "file": "docs/decisions.md", "pattern": "^\\| \\d+ \\|" },
+    "go-version": { "kind": "capture", "file": "go.mod", "pattern": "^go (\\S+)" },
+    "web-pages": { "kind": "files", "dir": "web/src/pages", "match": "^[A-Z]\\w*\\.tsx$" },
+    "integration-tests": { "kind": "files", "dir": "test/integration", "match": "_test\\.go$" }
+  },
+  "parts": [
+    { "id": "A", "title": "Orientation" },
+    { "id": "B", "title": "Core platform" },
+    { "id": "C", "title": "Data safety" },
+    { "id": "D", "title": "Backend services" },
+    { "id": "E", "title": "Trust and business" },
+    { "id": "F", "title": "Running it" },
+    { "id": "G", "title": "Synthesis" },
+    { "id": "Z", "title": "About" }
+  ]
+}

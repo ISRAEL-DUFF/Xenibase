@@ -168,6 +168,42 @@ jobs:
       - name: Install from the docs
         run: make test-docs
 
+  # The engineering atlas (docs/atlas/README.md). Every reference on its pages
+  # must resolve, so a renamed function or a moved line fails here instead
+  # of leaving a broken link. And a pull request that changes the atlas's
+  # pages, partials or build must commit the rebuilt site/index.html too.
+  # (CI cannot compare the committed file with a rebuild byte for byte: a
+  # build records the commit and date it was made at, line counts of the
+  # whole tree and excerpts of the code it quotes, so it differs after any
+  # later commit.) The actions are pinned to the commits the Taskiem
+  # repository's atlas job uses.
+  atlas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          # The atlas needs no packages; without this, setup-node looks for a
+          # package manager to cache.
+          package-manager-cache: false
+      - name: Every atlas reference resolves
+        run: node docs/atlas/atlas.mjs check
+      - name: Changed pages come with the rebuilt site
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          changed=$(git diff --name-only "origin/$BASE_REF...HEAD" -- docs/atlas/pages docs/atlas/partials docs/atlas/src docs/atlas/atlas.json docs/atlas/atlas.mjs)
+          if [ -n "$changed" ] && ! git diff --quiet "origin/$BASE_REF...HEAD" -- docs/atlas/site/index.html; then exit 0; fi
+          if [ -n "$changed" ]; then
+            echo "::error title=Atlas not rebuilt::These atlas sources changed but docs/atlas/site/index.html did not. Run make atlas and commit it."
+            echo "$changed"
+            exit 1
+          fi
+
   # upgrade.sh for real (docs/deploying.md): install the previous release with
   # the bundle, prove that a release whose migration fails is rolled back with
   # its data intact, then upgrade to this commit. Slow, so it runs weekly, on
