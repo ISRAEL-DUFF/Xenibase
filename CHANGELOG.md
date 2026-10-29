@@ -106,6 +106,14 @@ bundle share one version (spec §11.5).
   seconds. `docs/migrations.md` sets the expand-then-contract rule.
 - Each call to a node's agent opened a new TLS connection; calls now reuse one
   per node.
+- **The orphan reaper could destroy a move's, promotion's or major
+  upgrade's target mid-copy.** They insert the target when they are queued
+  and the project points at it only at the cutover, so after five minutes
+  the reaper took it for a failed create's leftover. It now skips an
+  instance a queued or running operation names as its target, and an
+  upgrade preflight's scratch instance in its first hour, and checks each
+  instance again just before destroying it. A retry no longer starts a new
+  container under an instance already marked deleted.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

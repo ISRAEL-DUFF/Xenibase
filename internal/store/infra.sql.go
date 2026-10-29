@@ -347,10 +347,13 @@ func (q *Queries) ListNodeInstances(ctx context.Context, nodeID uuid.UUID) ([]Li
 const listOrphanedInstances = `-- name: ListOrphanedInstances :many
 SELECT i.id, i.node_id, i.kind, i.pg_version, i.port, i.container_id, i.cpu_limit, i.mem_limit_mb, i.volume_gb, i.status, i.created_at, i.admin_host, i.admin_port, i.host, i.admin_secret, i.profile, i.walg_prefix, i.error, i.deleted_at, i.org_id, i.walg_target_id, i.walg_key_id, i.pg_release, i.pg_release_available, i.release_checked_at, i.ha_enabled, i.sync_replication, i.patroni, i.leader_member, i.patroni_secret, i.etcd_region, i.pitr_days, i.max_connections FROM instances i
 WHERE i.deleted_at IS NULL
+  AND ($1::uuid IS NULL OR i.id = $1::uuid)
   AND i.created_at < now() - interval '5 minutes'
   AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.deleted_at IS NULL)
   -- A demoted project's stopped instance, kept as a rollback option.
   AND NOT EXISTS (SELECT 1 FROM retired_databases r WHERE r.instance_id = i.id AND r.dropped_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.status IN ('queued', 'running') AND o.params->>'target_instance' = i.id::text)
+  AND NOT (i.profile IS NOT DISTINCT FROM 'scratch' AND i.created_at > now() - interval '1 hour')
   AND (i.kind = 'dedicated' OR (i.kind = 'shared' AND i.status = 'error'))
 ORDER BY i.created_at
 `
@@ -360,10 +363,15 @@ ORDER BY i.created_at
 // clusters whose failed creation could not be rolled back (status 'error',
 // see rollbackSharedCluster). Both are what a rollback leaves when it could
 // not reach the node. The grace period keeps it clear of instances a create
-// or restore is still setting up.
+// or restore is still setting up. A move, promotion or major upgrade inserts
+// its target when it is queued, and the project points at it only from the
+// cutover, so a target named by a queued or running operation is never an
+// orphan; nor is an upgrade preflight's scratch instance in its first hour
+// (scratchTrial removes it itself). With id set it checks that one instance
+// again, just before the reaper destroys it.
 // tenant: system - platform infrastructure (nodes, instances, placement).
-func (q *Queries) ListOrphanedInstances(ctx context.Context) ([]Instance, error) {
-	rows, err := q.db.Query(ctx, listOrphanedInstances)
+func (q *Queries) ListOrphanedInstances(ctx context.Context, id *uuid.UUID) ([]Instance, error) {
+	rows, err := q.db.Query(ctx, listOrphanedInstances, id)
 	if err != nil {
 		return nil, err
 	}

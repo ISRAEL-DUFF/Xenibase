@@ -359,6 +359,11 @@ func (s *Service) Ensure(ctx context.Context, op store.Operation, p store.Projec
 	if err != nil {
 		return err
 	}
+	if inst.DeletedAt != nil {
+		// Never a new container under a removed instance's row: every
+		// query that skips deleted instances would lose sight of it.
+		return jobs.Permanent(fmt.Errorf("instance %s was removed", inst.ID))
+	}
 	pitr, err := opPITR(op)
 	if err != nil {
 		return err
@@ -848,13 +853,15 @@ func (s *Service) removeInstance(ctx context.Context, inst store.Instance) (node
 }
 
 // ReapOrphans removes instances left by a failed create whose rollback could
-// not reach the node: dedicated instances no live project uses, and shared
-// clusters marked "error" (spec §6.1: a failed create leaves nothing
-// behind). An instance whose node is
-// not healthy is left for a later pass. It returns how many were removed.
+// not reach the node: dedicated instances no live project uses and no
+// queued or running operation names as its target, and shared clusters
+// marked "error" (spec §6.1: a failed create leaves nothing behind). An
+// instance whose node is not healthy is left for a later pass. Each one is
+// checked again just before it is destroyed, since the list can be minutes
+// old by then. It returns how many were removed.
 func (s *Service) ReapOrphans(ctx context.Context) (int, error) {
 	q := store.New(s.db)
-	orphans, err := q.ListOrphanedInstances(ctx)
+	orphans, err := q.ListOrphanedInstances(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -866,6 +873,11 @@ func (s *Service) ReapOrphans(ctx context.Context) (int, error) {
 		}
 		if n.Status != "healthy" {
 			continue
+		}
+		if still, err := q.ListOrphanedInstances(ctx, &inst.ID); err != nil {
+			return removed, err
+		} else if len(still) == 0 {
+			continue // taken up since the list was made
 		}
 		node, archived, err := s.removeInstance(ctx, inst)
 		if err != nil {
