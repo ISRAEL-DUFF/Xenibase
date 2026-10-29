@@ -19,6 +19,27 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A read-only member could read as the project owner in the SQL console.**
+  Read-only sessions, read-scope tokens and the table browser's raw filter
+  now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
+  get the login on their first read-only session.
+- **Imports could connect to any address,** including the clusters and nodes
+  that trust Xenibase's own addresses, which bypassed IP allowlists. Sources
+  now pass the outbound rules (public addresses, or hosts the platform admin
+  allow-listed for the organisation; never loopback or a node), pinned to
+  the checked address for the agent's copy.
+- Tenants on a shared cluster could read each other's activity counters
+  (`pg_stat_database` and the `pg_stat_get_db_*`/`pg_stat_get_backend_*`
+  functions). They are revoked; **migration 00066 queues `apply_settings`
+  for every active shared project** to apply this to existing databases.
+- Narrowing an IP allowlist now drops the project's pooled clients from
+  addresses no longer on it; PgBouncer's admin console is limited to private
+  networks (`XENIBASE_POOLER_ADMIN_ALLOW`); a pooler host whose PgBouncer is
+  not on `auth_type = hba` is marked not ready; the waker admits only the
+  poolers (`XENIBASE_WAKER_ALLOW`), and the edge wakes a paused project only
+  for a request with one of its keys; one invalid route or node address is
+  skipped and alerted (`pooler_config_skipped`) instead of blocking every
+  region's pooler sync.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 - An audit row the metadata database refused was only logged. It is now
