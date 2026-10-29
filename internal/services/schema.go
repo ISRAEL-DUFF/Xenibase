@@ -528,6 +528,16 @@ var schemaVersions = []schemaVersion{
 		  FROM PUBLIC, {{owner}}, {{anon}}, {{hook}}`,
 		`GRANT EXECUTE ON FUNCTION xb_auth.idempotency_claim(text, text), xb_auth.idempotency_store(text, int, text) TO {{user}}, {{service}}`,
 	}},
+	{9, []string{
+		// Whether a persisted broadcast was sent on the private channel or
+		// the public one of its topic: history reads one or the other.
+		// Rows from before (and from an edge older than this) don't say,
+		// so they count as private, readable only through the topic's
+		// read policy.
+		`ALTER TABLE xb_realtime.broadcast_history ADD COLUMN IF NOT EXISTS private boolean NOT NULL DEFAULT true`,
+		`CREATE INDEX IF NOT EXISTS broadcast_history_topic_private ON xb_realtime.broadcast_history (topic, private, id)`,
+		`DROP INDEX IF EXISTS xb_realtime.broadcast_history_topic`,
+	}},
 }
 
 // exposureStmts let the request roles use what the owner makes in an

@@ -115,7 +115,7 @@ func (h *rtHub) broadcastFrom(ctx context.Context, ch *rtChannel, m rtMsg) {
 		ch.c.reply(m, "ok", nil)
 	}
 	h.relayOut(ctx, relayMsg{Kind: "bc", Topic: ch.topic, Private: ch.private, Payload: m.Payload})
-	h.persist(ctx, ch.topic, body.Event, body.Payload, ch)
+	h.persist(ctx, ch.topic, ch.private, body.Event, body.Payload, ch)
 }
 
 // fanOut delivers a broadcast payload to this process's clients on topic;
@@ -132,8 +132,9 @@ func (h *rtHub) fanOut(topic string, private bool, payload json.RawMessage, from
 	}
 }
 
-// persist keeps a broadcast as history when the owner listed its topic.
-func (h *rtHub) persist(ctx context.Context, topic, event string, payload json.RawMessage, from *rtChannel) {
+// persist keeps a broadcast as history when the owner listed its topic,
+// with whether it was sent on the topic's private channel.
+func (h *rtHub) persist(ctx context.Context, topic string, private bool, event string, payload json.RawMessage, from *rtChannel) {
 	p := h.e.lookup(h.ref)
 	if p == nil {
 		return
@@ -155,8 +156,8 @@ func (h *rtHub) persist(ctx context.Context, topic, event string, payload json.R
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO xb_realtime.broadcast_history (topic, event, payload, sender) VALUES ($1, $2, $3, $4)`,
-		name, event, string(payload), sender); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO xb_realtime.broadcast_history (topic, private, event, payload, sender) VALUES ($1, $2, $3, $4, $5)`,
+		name, private, event, string(payload), sender); err != nil {
 		h.e.cfg.Log.Warn("realtime history", "ref", h.ref, "err", err)
 	}
 }
@@ -582,20 +583,26 @@ func (e *Edge) restBroadcast(c *call, req Request) {
 		h.fanOut(topic, m.Private, payload, nil)
 		h.counted(1)
 		h.relayOut(c.r.Context(), relayMsg{Kind: "bc", Topic: topic, Private: m.Private, Payload: payload})
-		h.persist(c.r.Context(), topic, m.Event, m.Payload, nil)
+		h.persist(c.r.Context(), topic, m.Private, m.Event, m.Payload, nil)
 	}
 	c.json(http.StatusAccepted, map[string]any{"sent": len(in.Messages)})
 }
 
 // history reads a topic's persisted broadcasts: GET
-// /realtime/v1/history/<topic>?after=<id>&limit=. A private topic's history
-// needs the caller's read policy (or the secret key).
+// /realtime/v1/history/<topic>?after=<id>&limit=. That is the public
+// channel's; private=true reads the private channel's, which needs the
+// caller's read policy (or the secret key).
 func (e *Edge) history(c *call, req Request, name string) {
 	name = strings.TrimPrefix(name, rtTopicPrefix)
 	q := c.r.URL.Query()
-	if q.Get("private") == "true" {
-		ch := &rtChannel{topic: rtTopicPrefix + name, private: true}
-		if err := e.channelAccess(c.r.Context(), c.p, req, ch); err != nil || !ch.readBroadcast {
+	private := q.Get("private") == "true"
+	if private {
+		a, err := e.channelAccess(c.r.Context(), c.p, req, rtTopicPrefix+name)
+		if err != nil {
+			e.dbError(c, err)
+			return
+		}
+		if !a.readBroadcast {
 			c.fail(http.StatusForbidden, "not_allowed", "no policy on xb_realtime.channel_access lets this caller read the topic")
 			return
 		}
@@ -611,7 +618,7 @@ func (e *Edge) history(c *call, req Request, name string) {
 		return
 	}
 	rows, err := pool.Query(c.r.Context(), `SELECT id, event, payload, sender, at FROM xb_realtime.broadcast_history
-		WHERE topic = $1 AND id > $2 ORDER BY id LIMIT $3`, name, after, limit)
+		WHERE topic = $1 AND private = $2 AND id > $3 ORDER BY id LIMIT $4`, name, private, after, limit)
 	if err != nil {
 		e.dbError(c, err)
 		return
@@ -637,5 +644,5 @@ func (e *Edge) history(c *call, req Request, name string) {
 	if items == nil {
 		items = []item{}
 	}
-	c.json(http.StatusOK, map[string]any{"topic": name, "items": items})
+	c.json(http.StatusOK, map[string]any{"topic": name, "private": private, "items": items})
 }

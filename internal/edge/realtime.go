@@ -474,10 +474,15 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 	jctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if ch.private {
-		if err := rc.e.channelAccess(jctx, p, req, ch); err != nil {
+		a, err := rc.e.channelAccess(jctx, p, req, ch.topic)
+		if err == nil && !a.readBroadcast && !a.readPresence {
+			err = errNotMember
+		}
+		if err != nil {
 			rc.replyError(m, err.Error())
 			return
 		}
+		ch.readBroadcast, ch.writeBroadcast, ch.readPresence, ch.writePresence = a.readBroadcast, a.writeBroadcast, a.readPresence, a.writePresence
 	}
 	var bound []map[string]any
 	for _, pc := range jc.Config.PostgresChanges {
@@ -580,15 +585,25 @@ func (e *Edge) bindChanges(ctx context.Context, p *project, req Request, ch *rtC
 	return &rtSub{id: rtSubIDs.Add(1), ch: ch, event: event, schema: schema, table: table, filter: f, raw: filter, seen: newPKSet(10000)}, nil
 }
 
+// rtAccess is what a private channel's policies allow (§6.1).
+type rtAccess struct {
+	readBroadcast, writeBroadcast, readPresence, writePresence bool
+}
+
+// errNotMember refuses a private channel whose policies let the user read
+// nothing.
+var errNotMember = errors.New("not allowed to join this private channel: no policy on xb_realtime.channel_access lets this user read it")
+
 // channelAccess asks the owner's policies on xb_realtime.channel_access
-// what a private channel's user may do (§6.1), in a transaction rolled
+// what req may do on a private topic (§6.1), in a transaction rolled
 // back: probe() adds a row as the platform; seeing it means may receive,
-// adding one may send.
-func (e *Edge) channelAccess(ctx context.Context, p *project, req Request, ch *rtChannel) error {
+// adding one may send. The secret key may do everything. An error is the
+// policies not being reachable, not a refusal.
+func (e *Edge) channelAccess(ctx context.Context, p *project, req Request, topic string) (rtAccess, error) {
 	if req.Role == "service" {
-		return nil
+		return rtAccess{true, true, true, true}, nil
 	}
-	name := strings.TrimPrefix(ch.topic, rtTopicPrefix)
+	name := strings.TrimPrefix(topic, rtTopicPrefix)
 	var r [4]bool
 	err := e.WithRequest(ctx, p, req, func(tx pgx.Tx) error {
 		for i, ext := range []string{"broadcast", "presence"} {
@@ -611,13 +626,9 @@ func (e *Edge) channelAccess(ctx context.Context, p *project, req Request, ch *r
 		return errRollback
 	})
 	if err != nil && !errors.Is(err, errRollback) {
-		return fmt.Errorf("realtime can't check the channel's policies: %w", err)
+		return rtAccess{}, fmt.Errorf("realtime can't check the channel's policies: %w", err)
 	}
-	ch.readBroadcast, ch.writeBroadcast, ch.readPresence, ch.writePresence = r[0], r[1], r[2], r[3]
-	if !ch.readBroadcast && !ch.readPresence {
-		return errors.New("not allowed to join this private channel: no policy on xb_realtime.channel_access lets this user read it")
-	}
-	return nil
+	return rtAccess{readBroadcast: r[0], writeBroadcast: r[1], readPresence: r[2], writePresence: r[3]}, nil
 }
 
 // errRollback ends a transaction without keeping what it did.

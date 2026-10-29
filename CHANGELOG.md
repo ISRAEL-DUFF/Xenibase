@@ -31,6 +31,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A private channel's broadcast history is no longer readable with the
+  publishable key.** History was kept by topic name alone and checked the
+  read policy only when asked for `private=true`, so
+  `GET /realtime/v1/history/<topic>` without it returned a private
+  channel's messages and senders to anyone. Each kept broadcast now records
+  which channel it was sent on: the plain request reads the public
+  channel's, `private=true` the private channel's, after its read policy.
+  Broadcasts kept before this release don't say, so they are treated as
+  private until they expire. The secret key can now read a private
+  channel's history (it got 403).
 - **Heartbeats are no longer billed as realtime messages.** Every frame a
   client sent and every message queued to it counted, heartbeats and their
   replies included, so an idle connection cost about 207,000 messages a

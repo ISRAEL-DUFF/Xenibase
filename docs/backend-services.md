@@ -915,8 +915,10 @@ curl -X POST https://<ref>.<domain>/realtime/v1/api/broadcast -H "apikey: $SECRE
 
 Broadcasts on topics listed in Project → Realtime → Broadcast history
 (`xb_realtime.persisted_topics`) are kept 7 days and read with
-`GET /realtime/v1/history/<topic>?after=<id>&limit=` (add `private=true`
-for a private channel's history, which needs its read policy).
+`GET /realtime/v1/history/<topic>?after=<id>&limit=`: that is the public
+channel's history; add `private=true` for the private channel's, which
+needs its read policy (or the secret key). Broadcasts kept before this
+release are treated as private.
 
 ### Private channels
 

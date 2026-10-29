@@ -620,6 +620,14 @@ func TestRealtimeBroadcast(t *testing.T) {
 	if code, _, body := rp.ed.Do(rp.ref, "GET", "/realtime/v1/history/vip?private=true", nil, "apikey", rp.pub, "Authorization", "Bearer "+rp.alice); code != 403 {
 		t.Fatalf("history as a non-member: %d %s", code, body)
 	}
+	// The public channel's history, which anyone with the key reads, has
+	// none of the private channel's.
+	if code, _, body := rp.ed.Do(rp.ref, "GET", "/realtime/v1/history/vip", nil, "apikey", rp.pub); code != 200 || strings.Contains(body, "for members") {
+		t.Fatalf("the public history of a private topic: %d %s", code, body)
+	}
+	if code, _, body := rp.ed.Do(rp.ref, "GET", "/realtime/v1/history/vip?private=true", nil, "apikey", rp.sec); code != 200 || !strings.Contains(body, "for members") {
+		t.Fatalf("history with the secret key: %d %s", code, body)
+	}
 	if code, _, body := rp.ed.Do(rp.ref, "POST", "/realtime/v1/api/broadcast", strings.NewReader(`{"messages":[{"topic":"room1","event":"notice","payload":{"text":"from the server"}}]}`),
 		"apikey", rp.pub, "Content-Type", "application/json"); code != 403 {
 		t.Fatalf("HTTP broadcast with the publishable key: %d %s", code, body)
