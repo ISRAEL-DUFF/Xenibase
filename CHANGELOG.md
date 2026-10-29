@@ -31,6 +31,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Wildcard redirect URLs no longer allow other hosts.** A pattern was
+  matched against the whole URL as text, so `*` also matched `?` and `#`:
+  with `https://*.example.com/**`, `https://evil.test?.example.com/` was
+  allowed, and a magic link or reset requested with it sent the session to
+  `evil.test`. Redirects are now parsed and matched part by part: the
+  scheme exactly, the host label by label (`*` stands for one label or
+  part of one), the port exactly or `:*`, and the path with `*` and `**`.
+  A query or fragment needs a pattern whose path ends in `**`. URLs with a
+  user part are still refused, and a page under the site URL must be the
+  site's path or below it (`/app` no longer allows `/application`).
 - **A squatter's password no longer survives the owner's sign-up.**
   Someone who signed up first with another person's address kept their
   password: when the owner signed up too, the unconfirmed row was only

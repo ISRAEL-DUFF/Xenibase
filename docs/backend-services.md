@@ -424,8 +424,13 @@ curl -X POST .../auth/v1/signin/password -H "apikey: xb_pub_…" -d '{"email":"a
 | `GET .well-known/jwks.json` | The public keys (no key needed). |
 
 Links go only to the **site URL** (and pages under it) or the exact
-**redirect URLs** you list (`*` and `**` wildcards when allowed);
-anything else is `400 redirect_not_allowed`.
+**redirect URLs** you list; anything else is `400 redirect_not_allowed`.
+With wildcards allowed, a redirect URL may be a pattern, matched part by
+part: `*` in the host stands for one label or part of one
+(`https://*.example.com` allows `https://a.example.com` but not
+`https://a.b.example.com`), `:*` for any port, and in the path `*` is
+anything but `/` and `**` anything. A query or fragment is allowed only
+when the pattern's path ends in `**` or the pattern has one.
 
 ### Phone: SMS and WhatsApp codes
 

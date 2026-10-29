@@ -312,14 +312,17 @@ func redirectFor(a edgeapi.AuthConfig, want string) (string, bool) {
 	return "", false
 }
 
+// redirectAllowed reports whether u is somewhere links may go: under the
+// site URL, an exact redirect URL, or (with wildcards on) one matching a
+// redirect pattern. URLs with a user part are refused.
 func redirectAllowed(a edgeapi.AuthConfig, u string) bool {
 	pu, err := url.Parse(u)
-	if err != nil || pu.Host == "" || pu.User != nil {
+	if err != nil || pu.Host == "" || pu.User != nil || pu.Opaque != "" {
 		return false
 	}
 	if a.SiteURL != "" {
 		if site, err := url.Parse(a.SiteURL); err == nil && strings.EqualFold(site.Scheme, pu.Scheme) &&
-			strings.EqualFold(site.Host, pu.Host) && strings.HasPrefix(pu.Path, strings.TrimSuffix(site.Path, "/")) {
+			strings.EqualFold(site.Host, pu.Host) && pathUnder(pu.Path, site.Path) {
 			return true
 		}
 	}
@@ -327,11 +330,93 @@ func redirectAllowed(a edgeapi.AuthConfig, u string) bool {
 		if r == u {
 			return true
 		}
-		if a.AllowWildcardRedirects && strings.Contains(r, "*") && globMatch(r, u) {
+		if a.AllowWildcardRedirects && strings.Contains(r, "*") && patternAllows(r, pu) {
 			return true
 		}
 	}
 	return false
+}
+
+// pathUnder reports whether p is base or below it.
+func pathUnder(p, base string) bool {
+	base = strings.TrimSuffix(base, "/")
+	return base == "" || p == base || strings.HasPrefix(p, base+"/")
+}
+
+// patternAllows matches a redirect pattern against a parsed URL part by
+// part, never as one string: the scheme exactly; the host label by label,
+// "*" matching within one label only, and the port exactly ("*" any
+// port); the path with globMatch. A query or fragment is allowed only
+// when the pattern has a matching one or its path ends in "**".
+func patternAllows(pattern string, u *url.URL) bool {
+	scheme, rest, ok := strings.Cut(pattern, "://")
+	if !ok || !strings.EqualFold(scheme, u.Scheme) {
+		return false
+	}
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	authority, rest := rest[:end], rest[end:]
+	if strings.Contains(authority, "@") {
+		return false
+	}
+	hostPat, portPat := authority, ""
+	if i := strings.LastIndex(authority, ":"); i >= 0 && !strings.HasSuffix(authority, "]") {
+		hostPat, portPat = authority[:i], authority[i+1:]
+	}
+	if portPat != "*" && portPat != u.Port() {
+		return false
+	}
+	if !hostMatch(strings.Trim(hostPat, "[]"), u.Hostname()) {
+		return false
+	}
+	pathPat, query, fragment := rest, "", ""
+	hasQuery, hasFragment := false, false
+	if i := strings.Index(pathPat, "#"); i >= 0 {
+		pathPat, fragment, hasFragment = pathPat[:i], pathPat[i+1:], true
+	}
+	if i := strings.Index(pathPat, "?"); i >= 0 {
+		pathPat, query, hasQuery = pathPat[:i], pathPat[i+1:], true
+	}
+	if pathPat == "" {
+		pathPat = "/"
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if !globMatch(pathPat, path) {
+		return false
+	}
+	trailing := strings.HasSuffix(pathPat, "**")
+	if hasQuery {
+		if !globMatch(query, u.RawQuery) {
+			return false
+		}
+	} else if (u.RawQuery != "" || u.ForceQuery) && !trailing {
+		return false
+	}
+	if hasFragment {
+		return globMatch(fragment, u.EscapedFragment())
+	}
+	return u.Fragment == "" || trailing
+}
+
+// hostMatch matches a host pattern against a host name, ignoring case:
+// the same number of labels, each label of the pattern matching the
+// host's with "*" as any characters within it.
+func hostMatch(pattern, host string) bool {
+	ps, hs := strings.Split(strings.ToLower(pattern), "."), strings.Split(strings.ToLower(host), ".")
+	if len(ps) != len(hs) {
+		return false
+	}
+	for i := range ps {
+		if hs[i] == "" || !globMatch(strings.ReplaceAll(ps[i], "**", "*"), hs[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // globMatch: "**" matches anything, "*" anything but "/".
