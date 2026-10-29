@@ -576,7 +576,7 @@ func (s *Service) Delete(ctx context.Context, projectID uuid.UUID, confirmName s
 			return fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
 		}
 		// A parent goes only once its branches are deleted or detached (V2 §8.4).
-		if n, err := store.New(tx).CountLiveBranches(ctx, &p.ID); err != nil {
+		if n, err := store.New(tx).CountLiveBranches(ctx, store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err != nil {
 			return err
 		} else if n > 0 {
 			return fmt.Errorf("%w: the project has %d branch(es); delete or detach them first", ErrConflict, n)

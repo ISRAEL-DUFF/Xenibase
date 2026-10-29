@@ -16,8 +16,7 @@ WHERE parent_project_id = @parent_project_id AND org_id = @org_id AND deleted_at
 ORDER BY created_at DESC;
 
 -- name: CountLiveBranches :one
--- tenant: system - a parent the request already authorized.
-SELECT count(*)::int FROM projects WHERE parent_project_id = @parent_project_id AND deleted_at IS NULL;
+SELECT count(*)::int FROM projects WHERE parent_project_id = @parent_project_id AND org_id = @org_id AND deleted_at IS NULL;
 
 -- name: CountOrgBranches :one
 -- Branches that count towards the branches quota.

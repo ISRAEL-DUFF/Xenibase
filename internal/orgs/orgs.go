@@ -568,7 +568,8 @@ func (s *Service) IssueCredentials(ctx context.Context, p store.Project, userID 
 
 // Transfer moves p into toOrg (V2 §2.1). The caller has checked the actor
 // owns both organisations. Project members come along, joining toOrg as
-// members if they are not in it yet; their logins keep working.
+// members if they are not in it yet; their logins keep working. Branches,
+// and parents with live branches, are refused.
 func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID) error {
 	if p.OrgID == toOrg {
 		return fmt.Errorf("%w: the project is already in that organisation", ErrInvalid)
@@ -578,8 +579,21 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 	}
 	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		q := store.New(tx)
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM projects WHERE id = $1 AND org_id = $2 FOR UPDATE`, p.ID, p.OrgID); err != nil {
+		var parent *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT parent_project_id FROM projects WHERE id = $1 AND org_id = $2 FOR UPDATE`, p.ID, p.OrgID).Scan(&parent); errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
 			return err
+		}
+		// A branch and its parent share an organisation (V2 §8.1): a branch
+		// stays with its parent, and a parent goes once its branches have.
+		if parent != nil {
+			return fmt.Errorf("%w: a branch stays in its parent's organisation; detach it to transfer it", ErrConflict)
+		}
+		if n, err := q.CountLiveBranches(ctx, store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("%w: the project has %d branch(es); delete or detach them first", ErrConflict, n)
 		}
 		// Org targets stay with their organisation (V2 §6): a project using
 		// one, or with backups on one, moves to platform storage first.

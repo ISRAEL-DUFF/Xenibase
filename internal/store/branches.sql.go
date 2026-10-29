@@ -87,12 +87,16 @@ func (q *Queries) CopyProjectMembers(ctx context.Context, arg CopyProjectMembers
 }
 
 const countLiveBranches = `-- name: CountLiveBranches :one
-SELECT count(*)::int FROM projects WHERE parent_project_id = $1 AND deleted_at IS NULL
+SELECT count(*)::int FROM projects WHERE parent_project_id = $1 AND org_id = $2 AND deleted_at IS NULL
 `
 
-// tenant: system - a parent the request already authorized.
-func (q *Queries) CountLiveBranches(ctx context.Context, parentProjectID *uuid.UUID) (int32, error) {
-	row := q.db.QueryRow(ctx, countLiveBranches, parentProjectID)
+type CountLiveBranchesParams struct {
+	ParentProjectID *uuid.UUID
+	OrgID           uuid.UUID
+}
+
+func (q *Queries) CountLiveBranches(ctx context.Context, arg CountLiveBranchesParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countLiveBranches, arg.ParentProjectID, arg.OrgID)
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err

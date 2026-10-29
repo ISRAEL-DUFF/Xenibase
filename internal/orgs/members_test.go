@@ -2,8 +2,10 @@ package orgs_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -82,5 +84,41 @@ func TestRemovingAParentMemberLeavesItsBranches(t *testing.T) {
 	var n int
 	if err := db.QueryRow(ctx, `SELECT count(*) FROM project_members WHERE project_id = $1 AND user_id = $2`, parent.ID, dev).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("removing from a branch removed from the parent: %d %v", n, err)
+	}
+}
+
+// TestTransferKeepsBranchesWithTheirParent: a branch and its parent share
+// an organisation, so neither a branch nor a parent with live branches
+// moves; a parent whose branches are gone does.
+func TestTransferKeepsBranchesWithTheirParent(t *testing.T) {
+	ctx := context.Background()
+	db := storetest.New(t)
+	owner := uuid.New()
+	from, to := uuid.New(), uuid.New()
+	exec(t, db, `INSERT INTO users (id, email, password_hash) VALUES ($1, 'owner@example.com', 'x')`, owner)
+	exec(t, db, `INSERT INTO organizations (id, name, slug, plan_id) SELECT $1, 'From', 'from', id FROM quota_plans ORDER BY name LIMIT 1`, from)
+	exec(t, db, `INSERT INTO organizations (id, name, slug, plan_id) SELECT $1, 'To', 'to', id FROM quota_plans ORDER BY name LIMIT 1`, to)
+	exec(t, db, `INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $3, 'owner'), ($2, $3, 'owner')`, from, to, owner)
+	node, inst := uuid.New(), uuid.New()
+	exec(t, db, `INSERT INTO nodes (id, name, private_addr, role, agent_cert_fp, capacity) VALUES ($1, 'n1', '10.0.0.1', 'both', 'fp', '{}')`, node)
+	exec(t, db, `INSERT INTO instances (id, node_id, kind, pg_version, port, status) VALUES ($1, $2, 'shared', 18, 5432, 'running')`, inst, node)
+	parent := projectIn(t, db, from, inst, "shop", nil)
+	branch := projectIn(t, db, from, inst, "shop_pr1", &parent.ID)
+
+	svc := orgs.New(db, nil, nil, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := svc.Transfer(ctx, branch, to); !errors.Is(err, orgs.ErrConflict) || !strings.Contains(err.Error(), "detach") {
+		t.Fatalf("transfer a branch: %v", err)
+	}
+	if err := svc.Transfer(ctx, parent, to); !errors.Is(err, orgs.ErrConflict) || !strings.Contains(err.Error(), "branch") {
+		t.Fatalf("transfer a parent with a branch: %v", err)
+	}
+	var orgOf uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT org_id FROM projects WHERE id = $1`, parent.ID).Scan(&orgOf); err != nil || orgOf != from {
+		t.Fatalf("the parent moved: %v %v", orgOf, err)
+	}
+	// Once its branch is deleted, the parent moves.
+	exec(t, db, `UPDATE projects SET deleted_at = now(), status = 'deleted' WHERE id = $1`, branch.ID)
+	if err := svc.Transfer(ctx, parent, to); err != nil {
+		t.Fatalf("transfer a parent whose branches are gone: %v", err)
 	}
 }

@@ -271,6 +271,11 @@ func (s *Service) fill(ctx context.Context, p store.Project, params fillParams, 
 	if parent.DeletedAt != nil {
 		return jobs.Permanent(fmt.Errorf("the parent %s was deleted", parent.Name))
 	}
+	// A branch and its parent share an organisation (V2 §8.1); one that
+	// doesn't is never filled from the other organisation's data.
+	if parent.OrgID != p.OrgID {
+		return jobs.Permanent(fmt.Errorf("the parent %s is in another organisation", parent.Name))
+	}
 	if err := s.copyExtensions(ctx, parent, p, log); err != nil {
 		return err
 	}
@@ -409,6 +414,9 @@ func (s *Service) Reset(ctx context.Context, p ResetParams) (store.Operation, er
 			}
 			if parent.DeletedAt != nil {
 				return nil, fmt.Errorf("%w: the parent %s was deleted; detach or delete the branch", ErrConflict, parent.Name)
+			}
+			if parent.OrgID != b.OrgID {
+				return nil, fmt.Errorf("%w: the parent is in another organisation; detach or delete the branch", ErrConflict)
 			}
 			d, err := authz.Can(ctx, q, p.Actor, authz.BranchManage, authz.Resource{OrgID: parent.OrgID, ProjectID: parent.ID})
 			if err != nil {

@@ -27,6 +27,13 @@ bundle share one version (spec §11.5).
   for a full copy of sensitive data (403 otherwise); a token restricted to
   the parent still covers its branches. Removing someone from a project
   also removes them from its live branches and drops their logins there.
+- **A transfer can no longer split a branch from its parent's
+  organisation.** Transferring a branch, or a project with live branches,
+  is refused with a 409; before, the other organisation's admins could
+  reset a moved branch and keep receiving the parent's data. A branch whose
+  parent is in another organisation is no longer filled or reset (detach
+  or delete it), and a parent's branch count only counts its own
+  organisation's branches.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

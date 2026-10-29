@@ -124,7 +124,9 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   `XENIBASE_PUBLISHABLE_KEY` and `XENIBASE_SECRET_KEY`. Stored files are not
   copied unless you ask (**Copy its stored files too**, or `--copy-files`):
   they are then copied in the background and count toward file storage.
-- A branch can't have branches. Its parent's webhooks and jobs are not
+- A branch can't have branches, and stays in its parent's organisation:
+  a branch, or a project with branches, can't be transferred (detach or
+  delete the branches first). Its parent's webhooks and jobs are not
   copied. Branches count against your organisation's branch and storage
   quotas, and have no nightly backups unless you turn them on.
 

@@ -3,11 +3,14 @@ package branching
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/israel-duff/xenibase/internal/authz"
+	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/store"
 )
 
 // TestResetChecksTheParent: a reset copies the parent again, so the caller
@@ -84,5 +87,36 @@ func TestResetChecksTheParent(t *testing.T) {
 	}
 	if err := reset(session(dev)); err != nil {
 		t.Fatalf("a developer resetting a schema-only branch: %v", err)
+	}
+}
+
+// TestBranchInAnotherOrganisationIsNotFilled: a branch whose parent is in
+// another organisation (split by a transfer before transfers refused it)
+// is neither reset nor filled from the other organisation's data.
+func TestBranchInAnotherOrganisationIsNotFilled(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	owner := h.user(t, authz.OrgOwner)
+	parent := h.project(t, "Shop", nil)
+	branch := h.project(t, "pr-1", &parent)
+	var other uuid.UUID
+	if err := h.db.QueryRow(ctx, `INSERT INTO organizations (name, slug, plan_id, settings)
+		SELECT 'Other', 'other', plan_id, '{}' FROM organizations WHERE id = $1 RETURNING id`, h.org).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.New(h.db).InsertOrgMember(ctx, store.InsertOrgMemberParams{OrgID: other, UserID: owner, Role: authz.OrgOwner}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.New(h.db).SetProjectOrg(ctx, store.SetProjectOrgParams{ID: branch.ID, OrgID: h.org, NewOrgID: other}); err != nil {
+		t.Fatal(err)
+	}
+	branch = h.get(t, branch.ID)
+	if _, err := h.s.Reset(ctx, ResetParams{BranchID: branch.ID, Source: SourceLive, Actor: session(owner)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reset across organisations: %v", err)
+	}
+	// An operation queued before: the worker refuses it for good.
+	err := h.s.fill(ctx, branch, fillParams{Parent: parent.ID, Source: SourceLive}, nil)
+	if !jobs.IsPermanent(err) || !strings.Contains(err.Error(), "another organisation") {
+		t.Fatalf("fill across organisations: %v", err)
 	}
 }
