@@ -81,9 +81,13 @@ check "compose: every XENIBASE_EDGE_TRUSTED_PROXIES is a CIDR range ($bad)" sh -
 cd "$repo"
 inst=$(mktemp -d); mkdir -p "$inst/bin" "$inst/deploy/compose"
 cp deploy/compose/install.sh "$inst/deploy/compose/"
+mkdir -p "$inst/deploy/images/postgres"
+cp deploy/images/postgres/build.sh "$inst/deploy/images/postgres/"
+# build.sh reads the release an image holds back from its PG_VERSION.
 cat > "$inst/bin/docker" <<'D'
 #!/bin/sh
 echo "docker $*" >> "$CALLS"
+if [ "$1 $2" = "image inspect" ]; then echo "PG_VERSION=18.6-1.pgdg13+1"; fi
 D
 chmod +x "$inst/bin/docker"
 run_install() { # run_install <.env contents>
@@ -93,6 +97,7 @@ run_install() { # run_install <.env contents>
 run_install 'XENIBASE_UI_DOMAIN=app.example.test
 COMPOSE_PROFILES=services'
 check "install: builds the edge image when services are on" grep -q 'build.*-t xenibase-edge:local' "$inst/calls"
+check "install: builds and tags the instance image by its release" grep -q 'tag xenibase-postgres:18-walg3.0.9 xenibase-postgres:18.6-walg3.0.9' "$inst/calls"
 run_install 'XENIBASE_UI_DOMAIN=app.example.test'
 check "install: leaves the edge alone when services are off" sh -c '! grep -q xenibase-edge "$1"' _ "$inst/calls"
 
