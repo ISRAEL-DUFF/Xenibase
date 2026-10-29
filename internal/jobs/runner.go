@@ -36,6 +36,10 @@ type RunnerConfig struct {
 	RetryMax  time.Duration
 	// WorkerID identifies this process in locked_by. Default host-pid-rand.
 	WorkerID string
+	// UnservedAfter is how long a runnable operation of a kind this runner
+	// doesn't serve may wait before it is failed as one no worker runs.
+	// Default 24h.
+	UnservedAfter time.Duration
 }
 
 func (c *RunnerConfig) setDefaults() {
@@ -53,6 +57,9 @@ func (c *RunnerConfig) setDefaults() {
 	}
 	if c.RetryMax <= 0 {
 		c.RetryMax = 5 * time.Minute
+	}
+	if c.UnservedAfter <= 0 {
+		c.UnservedAfter = 24 * time.Hour
 	}
 	if c.WorkerID == "" {
 		host, _ := os.Hostname()
@@ -167,6 +174,15 @@ func (r *Runner) reclaimLoop(ctx context.Context) {
 		}
 		for _, id := range ids {
 			r.log.Warn("requeued operation with expired lease", "operation_id", id)
+		}
+		unserved, err := r.q.FailUnservedOperations(ctx, store.FailUnservedOperationsParams{
+			Kinds: r.names, AfterSeconds: r.cfg.UnservedAfter.Seconds(),
+		})
+		if err != nil && ctx.Err() == nil {
+			r.log.Error("fail unserved operations", "err", err)
+		}
+		for _, u := range unserved {
+			r.log.Error("failed an operation no worker runs", "operation_id", u.ID, "kind", u.Kind)
 		}
 		select {
 		case <-ctx.Done():

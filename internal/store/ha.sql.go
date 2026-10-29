@@ -389,7 +389,7 @@ func (q *Queries) InsertInstanceMember(ctx context.Context, arg InsertInstanceMe
 }
 
 const latestRegionOperation = `-- name: LatestRegionOperation :one
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations WHERE kind = $1 AND project_id IS NULL AND params->>'region' = $2::text
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations WHERE kind = $1 AND project_id IS NULL AND params->>'region' = $2::text
 ORDER BY created_at DESC LIMIT 1
 `
 
@@ -417,6 +417,7 @@ func (q *Queries) LatestRegionOperation(ctx context.Context, arg LatestRegionOpe
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.FinishedAt,
+		&i.Exclusive,
 	)
 	return i, err
 }

@@ -666,8 +666,43 @@ func (s *Service) withIdleProject(ctx context.Context, id uuid.UUID, allowed []s
 		if busy {
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
-		return f(tx, p)
+		if err := f(tx, p); errors.Is(err, jobs.ErrProjectBusy) {
+			return fmt.Errorf("%w: %w", ErrConflict, err)
+		} else if err != nil {
+			return err
+		}
+		return nil
 	})
+}
+
+// EnqueueIfIdleTx queues an exclusive operation on a project from inside
+// tx, as withIdleProject would: under the project's row lock, only if it
+// is live and active with no operation pending. It reports whether it
+// queued; a busy project is skipped, not an error (the nightly scheduler
+// tries again on its next tick).
+func EnqueueIfIdleTx(ctx context.Context, tx pgx.Tx, ep jobs.EnqueueParams) (bool, error) {
+	if ep.ProjectID == nil {
+		return false, errors.New("EnqueueIfIdleTx needs a project")
+	}
+	q := store.New(tx)
+	p, err := q.GetLiveProjectForUpdate(ctx, *ep.ProjectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if p.Status != StatusActive {
+		return false, nil
+	}
+	// A new statement: it sees what committed while we waited for the lock.
+	if busy, err := q.ProjectHasActiveOperation(ctx, &p.ID); err != nil || busy {
+		return false, err
+	}
+	if _, err := jobs.Enqueue(ctx, tx, ep); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Get returns a live project.

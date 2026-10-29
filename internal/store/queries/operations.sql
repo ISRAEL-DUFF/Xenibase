@@ -1,7 +1,9 @@
 -- name: EnqueueOperation :one
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
-INSERT INTO operations (kind, project_id, params, created_by)
-VALUES (@kind, sqlc.narg(project_id), @params, sqlc.narg(created_by))
+-- A project has one exclusive operation queued or running at a time
+-- (operations_one_exclusive_per_project); a background one may run beside it.
+INSERT INTO operations (kind, project_id, params, created_by, exclusive)
+VALUES (@kind, sqlc.narg(project_id), @params, sqlc.narg(created_by), @exclusive)
 RETURNING *;
 
 -- name: GetOperation :one
@@ -88,9 +90,28 @@ SET status = 'queued', locked_by = NULL, locked_at = NULL,
 WHERE status = 'running' AND locked_at < now() - make_interval(secs => @lease_seconds::float8)
 RETURNING id;
 
+-- ProjectHasActiveOperation reports any operation queued or running on
+-- the project, background ones included: a new exclusive one waits for
+-- them too.
 -- name: ProjectHasActiveOperation :one
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 SELECT EXISTS (
   SELECT 1 FROM operations
   WHERE project_id = @project_id AND status IN ('queued', 'running')
 );
+
+-- FailUnservedOperations fails operations of a kind this worker doesn't
+-- run that have waited, runnable, for longer than @after_seconds: no
+-- worker runs that kind (an older or newer server's, or a typo), and a
+-- pending exclusive one would block its project for good.
+-- name: FailUnservedOperations :many
+-- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
+UPDATE operations
+SET status = 'failed', params = params - 'secrets', finished_at = now(),
+    error = 'no worker runs operations of kind ' || kind || '; gave up after waiting ' || (now() - run_after)::text,
+    log = log || jsonb_build_array(jsonb_build_object(
+      'ts', now(), 'step', 'queue', 'level', 'error',
+      'msg', 'no worker runs operations of kind ' || kind || '; failed after waiting since ' || run_after::text))
+WHERE status = 'queued' AND NOT (kind = ANY(@kinds::text[]))
+  AND run_after < now() - make_interval(secs => @after_seconds::float8)
+RETURNING id, kind;

@@ -315,7 +315,7 @@ func (s *Service) rollbackCreate(ctx context.Context, op store.Operation, log *j
 	}
 	// OnFail runs once, and the project is already gone from every list:
 	// hand the database and roles to an operation that keeps retrying.
-	cleanup, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID,
+	cleanup, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID, Background: true,
 		Params: map[string]any{"after": op.ID}})
 	if qerr != nil {
 		return fmt.Errorf("%w (and queueing the cleanup failed: %v)", err, qerr)

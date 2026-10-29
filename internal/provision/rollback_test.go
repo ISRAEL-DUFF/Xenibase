@@ -56,7 +56,7 @@ func TestDropProjectObjectsRefusesLiveProject(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	p, _ := h.create(t)
-	op, err := jobs.Enqueue(ctx, h.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID})
+	op, err := jobs.Enqueue(ctx, h.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID, Background: true})
 	if err != nil {
 		t.Fatal(err)
 	}

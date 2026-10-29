@@ -825,7 +825,7 @@ func (q *Queries) ListOrgMembers(ctx context.Context, orgID uuid.UUID) ([]ListOr
 }
 
 const listOrgOperations = `-- name: ListOrgOperations :many
-SELECT o.id, o.kind, o.project_id, o.params, o.status, o.attempts, o.run_after, o.locked_by, o.locked_at, o.log, o.error, o.created_by, o.created_at, o.finished_at FROM operations o JOIN projects p ON p.id = o.project_id
+SELECT o.id, o.kind, o.project_id, o.params, o.status, o.attempts, o.run_after, o.locked_by, o.locked_at, o.log, o.error, o.created_by, o.created_at, o.finished_at, o.exclusive FROM operations o JOIN projects p ON p.id = o.project_id
 WHERE p.org_id = $1
   AND ($2::text IS NULL OR o.status = $2)
   AND ($3::text IS NULL OR o.kind = $3)
@@ -877,6 +877,7 @@ func (q *Queries) ListOrgOperations(ctx context.Context, arg ListOrgOperationsPa
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}
@@ -1082,7 +1083,7 @@ func (q *Queries) ListPlatformInvitations(ctx context.Context) ([]ListPlatformIn
 }
 
 const listPlatformOperations = `-- name: ListPlatformOperations :many
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations
 WHERE project_id IS NULL
   AND ($1::text IS NULL OR status = $1)
   AND ($2::text IS NULL OR kind = $2)
@@ -1121,6 +1122,7 @@ func (q *Queries) ListPlatformOperations(ctx context.Context, arg ListPlatformOp
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}

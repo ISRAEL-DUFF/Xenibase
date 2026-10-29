@@ -488,7 +488,9 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 				// Daily base backup; WAL is archived continuously (spec §6.4).
 				kind, params = KindBaseBackup, map[string]any{"scheduled": true}
 			}
-			if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &id, Params: params}); err != nil {
+			// The list was read without locks: queue only on a project
+			// still idle under its row lock, as a request would.
+			if _, err := provision.EnqueueIfIdleTx(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &id, Params: params}); err != nil {
 				return err
 			}
 		}
@@ -502,7 +504,7 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 			}
 			for _, p := range drift {
 				id := p.ID
-				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindStorageSwitch, ProjectID: &id, Params: map[string]any{}}); err != nil {
+				if _, err := provision.EnqueueIfIdleTx(ctx, tx, jobs.EnqueueParams{Kind: KindStorageSwitch, ProjectID: &id, Params: map[string]any{}}); err != nil {
 					return err
 				}
 			}
@@ -522,7 +524,7 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 				// Alternate between primary and copy targets (V3 §2.5).
 				// The first test (no last operation) reads a copy if any.
 				next := RestoreTestParams{FromCopy: !restoreTestParams(last).FromCopy}
-				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next}); err != nil {
+				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next, Background: true}); err != nil {
 					return err
 				}
 			}

@@ -45,10 +45,15 @@ What happens:
    hands back the attempt it was running when it stops, so a restart does
    not use up an attempt (an operation on its last attempt runs again
    rather than failing). Only a server that crashes or is killed before it
-   could hand back costs the operation an attempt.
+   could hand back costs the operation an attempt; one killed on the last
+   attempt gets one more run, which finds finished work done, before the
+   operation gives up. An operation of a kind the new server no longer
+   runs fails after a day, saying so.
 5. Migrations may queue one-off `apply_settings` operations (for example,
    00018 gives older shared projects their `temp_file_limit`); they finish
-   in the background and show on Operations.
+   in the background and show on Operations. From 00063 a project has at
+   most one exclusive operation queued or running, so a migration that
+   queues one must skip projects that already have one.
 
 Check afterwards: `docker compose exec xenibase-server
 xenibase-server -version` shows the new version, Nodes shows every agent

@@ -156,7 +156,7 @@ func (s *Service) RevokeCredentials(ctx context.Context, p store.Project, userID
 	if err := s.dropDBUser(ctx, p.InstanceID, p.DbName, p.OwnerRole, cur.RoleName); err != nil {
 		s.log.Warn("drop a revoked login; retrying as an operation", "role", cur.RoleName, "err", err)
 		pid := p.ID
-		if _, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropDBUser, ProjectID: &pid,
+		if _, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropDBUser, ProjectID: &pid, Background: true,
 			Params: dropDBUserParams{Role: cur.RoleName}}); qerr != nil {
 			return errors.Join(err, qerr)
 		}
