@@ -209,6 +209,57 @@ func (a *Admin) statsSum(ctx context.Context, cols ...string) (map[string]int64,
 	return out, rows.Err()
 }
 
+// Setting returns one PgBouncer setting's current value (SHOW CONFIG).
+func (a *Admin) Setting(ctx context.Context, key string) (string, error) {
+	conn, err := pgx.ConnectConfig(ctx, a.cfg)
+	if err != nil {
+		return "", fmt.Errorf("pooler %s (%s): connect admin console: %w", a.Name, a.Addr(), err)
+	}
+	defer conn.Close(context.Background())
+	rows, err := conn.Query(ctx, "SHOW CONFIG")
+	if err != nil {
+		return "", fmt.Errorf("pooler %s: SHOW CONFIG: %w", a.Name, err)
+	}
+	defer rows.Close()
+	ki, vi := -1, -1
+	for i, fd := range rows.FieldDescriptions() {
+		switch fd.Name {
+		case "key":
+			ki = i
+		case "value":
+			vi = i
+		}
+	}
+	if ki < 0 || vi < 0 {
+		return "", fmt.Errorf("pooler %s: SHOW CONFIG has no key and value columns", a.Name)
+	}
+	for rows.Next() {
+		raw := rows.RawValues()
+		if ki < len(raw) && vi < len(raw) && string(raw[ki]) == key {
+			return string(raw[vi]), nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("pooler %s: SHOW CONFIG has no %s", a.Name, key)
+}
+
+// EnforcesHBA checks that the PgBouncer applies hba.conf (auth_type =
+// hba). One with auth_type = scram-sha-256 (the pgbouncer.ini before
+// 4.2.4) ignores the file, so IP allowlists and the admin console's
+// networks are stored but not enforced. It returns why not, or "".
+func (a *Admin) EnforcesHBA(ctx context.Context) (string, error) {
+	v, err := a.Setting(ctx, "auth_type")
+	if err != nil {
+		return "", err
+	}
+	if v != "hba" {
+		return fmt.Sprintf("PgBouncer %s has auth_type = %s, not hba: it ignores hba.conf, so IP allowlists are not enforced (update its pgbouncer.ini)", a.Name, v), nil
+	}
+	return "", nil
+}
+
 // Ping checks the admin console answers (SHOW VERSION).
 func (a *Admin) Ping(ctx context.Context) error { return a.exec(ctx, "SHOW VERSION") }
 

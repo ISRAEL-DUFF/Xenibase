@@ -80,6 +80,11 @@ PgBouncer. Upgrade the pooler hosts (their agent and PgBouncer configuration)
 **before** xenibase-server: an older agent refuses a bundle with `hba.conf`
 in it, and an older PgBouncer configuration ignores the file, so a list would
 be stored but not enforced. See the changelog's upgrade notes for v4.2.4.
+xenibase-server checks: a pooler host whose PgBouncer reports any
+`auth_type` but `hba` (`SHOW CONFIG`) counts as not ready, so it can't take
+the floating IP, and raises the "pooler host not ready" alert (Admin → Nodes
+gives the reason); a local pooler raises "pooler ignores IP allowlists"
+(`pooler_allowlist_off`).
 
 The same file keeps the poolers' admin console (database `pgbouncer`) off
 the internet: it accepts logins only from loopback and the private ranges

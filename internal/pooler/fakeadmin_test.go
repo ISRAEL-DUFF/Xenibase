@@ -10,7 +10,7 @@ import (
 )
 
 // fakeConsole is a PgBouncer admin console that answers SHOW commands from
-// tables and records every other command.
+// tables, acknowledges every other command, and records them all.
 type fakeConsole struct {
 	addr   string
 	mu     sync.Mutex
@@ -94,9 +94,7 @@ func (f *fakeConsole) serve(c net.Conn) {
 		cmd := strings.TrimSpace(q.String)
 		f.mu.Lock()
 		tbl, isTable := f.tables[strings.ToUpper(cmd)]
-		if !isTable {
-			f.cmds = append(f.cmds, cmd)
-		}
+		f.cmds = append(f.cmds, cmd)
 		f.mu.Unlock()
 		if isTable {
 			var rd pgproto3.RowDescription

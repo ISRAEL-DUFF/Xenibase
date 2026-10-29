@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/israel-duff/xenibase/internal/store"
@@ -38,7 +39,13 @@ func TestDropDisallowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"KILL_CLIENT 1", "KILL_CLIENT 3", "KILL_CLIENT 4"}
-	if got := fake.commands(); n != 3 || !slices.Equal(got, want) {
+	var got []string
+	for _, c := range fake.commands() {
+		if strings.HasPrefix(c, "KILL") {
+			got = append(got, c)
+		}
+	}
+	if n != 3 || !slices.Equal(got, want) {
 		t.Fatalf("dropped %d: %q, want %q", n, got, want)
 	}
 

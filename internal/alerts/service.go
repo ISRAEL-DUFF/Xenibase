@@ -37,6 +37,9 @@ const (
 	// Standby edge pooler (V3 §2.1).
 	KindPoolerHostNotReady = "pooler_host_not_ready"
 	KindPoolerSplitBrain   = "pooler_split_brain"
+	// A pooler ignores hba.conf (auth_type is not hba): IP allowlists are
+	// stored but not enforced.
+	KindPoolerAllowlistOff = "pooler_allowlist_off"
 	KindIsolationCheck     = "isolation_check_failed"
 	// Capacity automation (V3 §5.2): a proposal waits for approval, or a
 	// provisioning failed in the last day.
@@ -356,6 +359,15 @@ func (s *Service) poolerConditions(ctx context.Context) []condition {
 			out = append(out, condition{KindPoolerDown, SeverityCritical, "pooler", a.Name, a.Name + " pooler (" + a.Addr() + ")",
 				fmt.Sprintf("The %s pooler at %s is down: %v", a.Name, a.Addr(), err), map[string]any{"address": a.Addr()}})
 		}
+		if err == nil {
+			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			why, err := a.EnforcesHBA(pctx)
+			cancel()
+			if err == nil && why != "" {
+				out = append(out, condition{KindPoolerAllowlistOff, SeverityCritical, "pooler", a.Name, a.Name + " pooler (" + a.Addr() + ")",
+					why, map[string]any{"address": a.Addr()}})
+			}
+		}
 	}
 	return out
 }
@@ -425,7 +437,7 @@ func (s *Service) poolerHostConditions(ctx context.Context) ([]condition, error)
 		}
 		if notReady && time.Since(since) >= s.cfg.PoolerGrace {
 			out = append(out, condition{KindPoolerHostNotReady, SeverityCritical, "node", h.ID.String(), h.Name,
-				fmt.Sprintf("Pooler host %s can't serve: a PgBouncer is down or its configuration is stale, so it can't take the floating IP", h.Name),
+				fmt.Sprintf("Pooler host %s can't serve: a PgBouncer is down, its configuration is stale, or it ignores hba.conf (IP allowlists not enforced), so it can't take the floating IP. Admin → Nodes shows which.", h.Name),
 				map[string]any{"generation": h.PoolerGeneration, "vrrp_state": h.PoolerVrrpState}})
 		}
 		if checked && h.Status == "healthy" && h.PoolerVrrpState != nil && *h.PoolerVrrpState == "MASTER" {

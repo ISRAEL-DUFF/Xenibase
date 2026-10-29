@@ -166,6 +166,12 @@ a test that failed before.
   database `pgbouncer` too, behind only its password. It now takes logins
   only from loopback and the private ranges (`XENIBASE_POOLER_ADMIN_ALLOW`
   to change them) and rejects them from everywhere else.
+- **Nothing checked that allowlists were enforced** (low). A PgBouncer on the
+  pre-4.2.4 `pgbouncer.ini` (`auth_type = scram-sha-256`) ignores
+  `hba.conf` but reported ready. The arbiter now reads `auth_type` from
+  `SHOW CONFIG` on each pooler host (every minute) and counts a host that
+  isn't on `hba` as not ready; the alerts check local poolers the same way
+  (`pooler_allowlist_off`).
 
 ## V3 review of payments and billing (M27)
 
