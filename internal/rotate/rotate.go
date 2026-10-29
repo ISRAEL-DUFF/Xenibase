@@ -50,6 +50,7 @@ var columns = []column{
 	{"project auth SMTP settings", "project_auth_config", "project_id", "providers_enc", "project_auth_config.providers_enc:", true},
 	{"queued auth message", "auth_message_outbox", "id", "message_enc", "auth_email_outbox.message_enc:", true},
 	{"device sign-in token", "device_auth_requests", "device_code_hash", "sealed_token", "device:", false},
+	{"edge credential", "edge_credentials", "id", "secret_enc", "edge_credentials.secret_enc:", true},
 }
 
 // Settings rows hold sealed blobs inside JSON (JSON encodes []byte as

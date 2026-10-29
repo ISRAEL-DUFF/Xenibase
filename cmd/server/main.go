@@ -44,6 +44,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/costs"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/dedicated"
+	"github.com/israel-duff/xenibase/internal/edgecred"
 	"github.com/israel-duff/xenibase/internal/floatip"
 	"github.com/israel-duff/xenibase/internal/freetier"
 	"github.com/israel-duff/xenibase/internal/ha"
@@ -110,6 +111,9 @@ func run() error {
 	healthcheck := flag.String("healthcheck", "", "GET this URL's /healthz and exit 0 if healthy (for container health checks)")
 	rotateKey := flag.Bool("rotate-master-key", false,
 		"re-encrypt every stored secret under XENIBASE_MASTER_KEY (old key in XENIBASE_MASTER_KEY_PREVIOUS), verify, and exit")
+	issueEdge := flag.String("issue-edge-credential", "", "print the credential of the xenibase-edge with this name, bound to -edge-region, and exit")
+	edgeRegion := flag.String("edge-region", "", "the region an edge credential serves (with -issue-edge-credential)")
+	revokeEdge := flag.String("revoke-edge-credential", "", "revoke the credential of the xenibase-edge with this name and exit")
 	flag.Parse()
 
 	v := version.Get()
@@ -158,6 +162,9 @@ func run() error {
 	log.Info("master key loaded", "key_id", keyring.PrimaryID().String(), "previous_keys", len(cfg.PreviousMasterKeys))
 	if *rotateKey {
 		return rotateMasterKey(cfg, keyring, log)
+	}
+	if *issueEdge != "" || *revokeEdge != "" {
+		return edgeCredential(cfg, keyring, log, *issueEdge, *edgeRegion, *revokeEdge)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -395,7 +402,11 @@ func run() error {
 	// xenibase-edge follows.
 	var servicesSvc *services.Service
 	if projects != nil {
-		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret}, log)
+		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret,
+			EdgeSecretAllRegions: cfg.Edge.SecretAllRegions}, log)
+		if cfg.Edge.SecretAllRegions {
+			log.Warn("XENIBASE_EDGE_SECRET_ALL_REGIONS is deprecated: the platform-wide edge secret serves every region; give each regional edge its own credential (xenibase-server -issue-edge-credential)")
+		}
 		if branchSvc != nil {
 			branchSvc.API = servicesSvc // branches get an API of their own (V4.1 §9.5)
 		}
@@ -471,6 +482,9 @@ func run() error {
 			Bootstrap: cloud.Bootstrap{ServerURL: cfg.Cloud.ServerURL, ServerCA: cfg.Cloud.ServerCA, AgentImage: cfg.Cloud.AgentImage,
 				PGImage: cfg.Cloud.PGImage, PrivateCIDR: cfg.Cloud.PrivateCIDR},
 			Edge: edgeBoot, RegionAPIDomain: regionSvc.APIDomain,
+			EdgeCredential: func(ctx context.Context, name, region string) (string, error) {
+				return edgecred.Issue(ctx, pool, keyring, name, region, nil)
+			},
 		}, log)
 		for name, k := range capacitySvc.Kinds() {
 			kinds[name] = k

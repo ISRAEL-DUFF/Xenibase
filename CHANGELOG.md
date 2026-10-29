@@ -34,6 +34,16 @@ bundle share one version (spec §11.5).
   name, including one just added and a removed one. It now registers only
   the bundle's local node (`XENIBASE_SHARED_NODE_NAME`), never a removed
   node, and only once; afterwards use a token from Nodes → Re-register.
+- **Each edge can have its own credential, bound to a region.** One
+  platform-wide `XENIBASE_EDGE_SECRET` authenticated every edge, and the edge
+  chose its region, so any edge (and every edge node's cloud-init) could
+  read every region's projects. `xenibase-server -issue-edge-credential
+  <name> -edge-region <region>` issues a credential the server binds to its
+  region; edge nodes Xenibase creates get one. The platform-wide secret now
+  serves only regions without their own API domain
+  (`XENIBASE_EDGE_SECRET_ALL_REGIONS=true` restores the old scope,
+  deprecated). See `docs/upgrade.md` before upgrading an install with a
+  region API domain.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 

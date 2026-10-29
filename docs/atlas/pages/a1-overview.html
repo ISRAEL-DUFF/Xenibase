@@ -56,14 +56,14 @@
     <tr><td><code>xenibase-server</code></td><td>Agents</td><td>HTTPS with mutual TLS. <code>xenibase-server</code> is a small CA (<code>internal/agentca</code>): it issues each agent a server certificate at registration, pinned by fingerprint, and presents a client certificate of its own (<x-page id="nodes-agents--identity">Nodes and agents</x-page>).</td></tr>
     <tr><td><code>xenibase-server</code></td><td>PgBouncer</td><td>Files written atomically into the pooler directory (or pushed to pooler hosts through their agents), then <code>RELOAD</code>, <code>PAUSE</code>, <code>RESUME</code>, <code>KILL</code> on the admin console.</td></tr>
     <tr><td>App servers</td><td>PgBouncer</td><td>Postgres over TLS (<code>client_tls_sslmode = require</code>). <code>:5432</code> is session mode, <code>:6543</code> transaction mode. PgBouncer authenticates with the SCRAM verifier and passes SCRAM through to the backend.</td></tr>
-    <tr><td><code>xenibase-edge</code></td><td><code>xenibase-server</code></td><td>Long-polled configuration feed and reports, signed with the shared edge secret (<x-ref path="internal/edgeapi/edgeapi.go" symbol="func Signed("><code>edgeapi.Signed</code></x-ref>: HMAC-SHA256 over the time, method, request URI and body, five minutes' tolerance).</td></tr>
+    <tr><td><code>xenibase-edge</code></td><td><code>xenibase-server</code></td><td>Long-polled configuration feed and reports, signed with the edge's own region-bound credential or the platform-wide edge secret (<x-ref path="internal/edgeapi/edgeapi.go" symbol="func Signed("><code>edgeapi.Signed</code></x-ref>: HMAC-SHA256 over the time, method, request URI and body, five minutes' tolerance).</td></tr>
     <tr><td><code>xenibase-edge</code></td><td>PgBouncer</td><td>Transaction-mode connections as the project's request roles, one transaction per request.</td></tr>
     <tr><td><code>xenibase-server</code></td><td><code>xenibase-status</code></td><td>Signed heartbeats and incidents (<code>internal/statusapi</code>).</td></tr>
   </tbody>
 </table></div>
 <x-include name="architecture-map.html"/>
-<div class="callout risk"><span class="callout-label">Risk</span>
-  <p>There is one edge secret for the whole platform, "the same everywhere" (<x-ref path="docs/backend-services.md" symbol="XENIBASE_EDGE_SECRET` (server and edges)">backend services guide</x-ref>), and the feed returns every region's projects when the caller leaves <code>region</code> empty (<x-ref path="internal/api/services.go" symbol="func (s *Server) EdgeConfig("><code>EdgeConfig</code></x-ref>). A feed entry carries the project's edge login password and its request roles' passwords. So anyone holding the secret of any one edge node, including one created by capacity automation in a small region, can read the database logins of every project with backend services in every region. A per-edge or per-region secret, with the server fixing the region from the credential rather than the query, would contain a compromised edge to its region.</p>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>One edge secret for the whole platform used to authenticate every edge, and the feed returned every region's projects when the caller left <code>region</code> empty, so the secret of any one edge node read the database logins of every project in every region. An edge in a region with its own API domain now has its own credential, bound to that region on the server (<x-ref path="internal/services/edgecreds.go" symbol="func (s *Service) VerifyEdge("><code>VerifyEdge</code></x-ref>), and the platform-wide secret serves only the regions without their own domain (<x-ref path="docs/backend-services.md" symbol="**Edge credentials.**">backend services guide</x-ref>).</p>
 </div>
 
 <h2>Repository layout</h2>
@@ -93,7 +93,7 @@
 <x-packages names="nodes,agentapi,agentca,agentsvc,docker,cloud"/>
 
 <h3>B · Connections</h3>
-<x-packages names="pooler,floatip,tlscert,waker,edge,edgeapi,bloom"/>
+<x-packages names="pooler,floatip,tlscert,waker,edge,edgeapi,edgecred,bloom"/>
 
 <h3>B · The metadata data model</h3>
 <x-packages names="store"/>

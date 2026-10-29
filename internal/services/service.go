@@ -61,7 +61,12 @@ type Config struct {
 	Domain       string
 	RegionDomain func(region string) string
 	// EdgeSecret signs xenibase-edge's requests. Empty disables the feed.
+	// It serves the regions without their own API domain; an edge for
+	// another region needs its own credential (EdgeScope).
 	EdgeSecret string
+	// EdgeSecretAllRegions lets EdgeSecret serve every region, as before
+	// edges had their own credentials (XENIBASE_EDGE_SECRET_ALL_REGIONS).
+	EdgeSecretAllRegions bool
 	// CaptchaVerifyURL is Turnstile's siteverify endpoint (tests point it
 	// at a fake); empty is Cloudflare's.
 	CaptchaVerifyURL string

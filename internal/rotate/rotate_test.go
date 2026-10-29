@@ -39,6 +39,7 @@ var sealedColumns = []sealedColumn{
 	{"project_auth_config", "project_id", "providers_enc", "project_auth_config.providers_enc:", false},
 	{"auth_message_outbox", "id", "message_enc", "auth_email_outbox.message_enc:", false},
 	{"device_auth_requests", "device_code_hash", "sealed_token", "device:", true},
+	{"edge_credentials", "id", "secret_enc", "edge_credentials.secret_enc:", false},
 }
 
 var sealedSettings = []struct {

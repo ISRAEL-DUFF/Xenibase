@@ -675,13 +675,16 @@ func (s *Server) ListAuthAudit(w http.ResponseWriter, r *http.Request, id gen.Pr
 
 // EdgeAuthMessage implements POST /api/v1/edge/auth-message.
 func (s *Server) EdgeAuthMessage(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.edgeAuth(w, r)
+	body, scope, ok := s.edgeAuth(w, r)
 	if !ok {
 		return
 	}
 	var m edgeapi.AuthMessage
 	if err := json.Unmarshal(body, &m); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "not an auth message")
+		return
+	}
+	if !s.edgeRef(w, r, scope, m.Ref, "auth message") {
 		return
 	}
 	if err := s.services.QueueAuthMessage(r.Context(), m); err != nil {
@@ -705,13 +708,16 @@ func (s *Server) EdgeAuthMessage(w http.ResponseWriter, r *http.Request) {
 
 // EdgeAuthHook implements POST /api/v1/edge/auth-hook.
 func (s *Server) EdgeAuthHook(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.edgeAuth(w, r)
+	body, scope, ok := s.edgeAuth(w, r)
 	if !ok {
 		return
 	}
 	var h edgeapi.AuthHook
 	if err := json.Unmarshal(body, &h); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "not an auth hook event")
+		return
+	}
+	if !s.edgeRef(w, r, scope, h.Ref, "auth hook") {
 		return
 	}
 	d, err := s.services.AuthHook(r.Context(), h)
