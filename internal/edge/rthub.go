@@ -193,7 +193,11 @@ func (h *rtHub) leave(ch *rtChannel) {
 	if len(h.channels) == 0 {
 		h.emptyAt = time.Now()
 	}
+	subs := ch.subs
 	h.mu.Unlock()
+	for _, s := range subs {
+		s.seen.release()
+	}
 	h.untrackChannel(ch)
 }
 
@@ -873,6 +877,7 @@ func (h *rtHub) dropSubs(subs []*rtSub) {
 			}
 		}
 		s.ch.subs = kept
+		s.seen.release()
 	}
 }
 

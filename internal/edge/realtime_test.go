@@ -3,10 +3,15 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
 	"github.com/israel-duff/xenibase/internal/edgeapi"
@@ -234,5 +239,145 @@ func TestRealtimeRelayParts(t *testing.T) {
 	h.relayIn(ctx, nil, splitRelay("edge-other-1", 10, b)[0])
 	if len(h.bc.parts) != 1 || h.bc.partBytes > len(b) {
 		t.Fatalf("after expiry: %d messages, %d bytes", len(h.bc.parts), h.bc.partBytes)
+	}
+}
+
+// rtServe is the test edge behind an HTTP server.
+func rtServe(t *testing.T, e *Edge) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(e)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// rtDial opens a realtime WebSocket to the test project with key.
+func rtDial(t *testing.T, srv *httptest.Server, ref, key string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	u := strings.Replace(srv.URL, "http://", "ws://", 1) + "/realtime/v1/websocket?vsn=1.0.0&apikey=" + url.QueryEscape(key)
+	ws, res, err := websocket.Dial(ctx, u, &websocket.DialOptions{Host: ref + ".edge.test"})
+	if res != nil && res.Body != nil {
+		_ = res.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	ws.SetReadLimit(8 << 20)
+	t.Cleanup(func() { _ = ws.CloseNow() })
+	return ws
+}
+
+// TestRealtimeFrameLimit: a frame over 64 KB closes the connection.
+func TestRealtimeFrameLimit(t *testing.T) {
+	e, _ := rtTestEdge(t)
+	ws := rtDial(t, rtServe(t, e), rtTestRef, "xb_pub_rtunit")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	big, _ := json.Marshal(map[string]any{"topic": "realtime:room", "event": evBroadcast, "ref": "1",
+		"payload": broadcastOf(rtMaxFrame)})
+	_ = ws.Write(ctx, websocket.MessageText, big)
+	_, _, err := ws.Read(ctx)
+	if websocket.CloseStatus(err) != websocket.StatusMessageTooBig {
+		t.Fatalf("a frame of %d bytes: %v", len(big), err)
+	}
+}
+
+// TestRealtimeSubscriptionCaps: a join may bind at most 20 subscriptions,
+// and a connection hold at most 100, refused before any is checked.
+func TestRealtimeSubscriptionCaps(t *testing.T) {
+	e, _ := rtTestEdge(t)
+	h := e.hub(rtTestRef)
+	ctx := context.Background()
+	rc := testConn(h, Request{Role: "anon"})
+	changes := func(n int) map[string]any {
+		pcs := make([]map[string]any, n)
+		for i := range pcs {
+			pcs[i] = map[string]any{"event": "*", "schema": "public", "table": "items"}
+		}
+		return map[string]any{"config": map[string]any{"postgres_changes": pcs}}
+	}
+	rc.join(ctx, msg("realtime:many", phxJoin, changes(rtMaxSubs+1)), nil)
+	if got, _ := replies(t, rc); len(got) != 1 || !strings.Contains(got[0], "a channel may have at most 20") {
+		t.Fatalf("a join with %d subscriptions: %v", rtMaxSubs+1, got)
+	}
+	// 95 subscriptions already, over five channels.
+	for i := range 5 {
+		ch := testChannel(rc, fmt.Sprintf("realtime:held%d", i))
+		for range 19 {
+			ch.subs = append(ch.subs, &rtSub{ch: ch, schema: "public", table: "items", seen: newPKSet(rtSeenKeys, &rc.seen, rtConnSeenKeys)})
+		}
+	}
+	rc.join(ctx, msg("realtime:more", phxJoin, changes(6)), nil)
+	if got, _ := replies(t, rc); len(got) != 1 || !strings.Contains(got[0], "a connection may have at most 100") {
+		t.Fatalf("a join past %d subscriptions on the connection: %v", rtMaxConnSubs, got)
+	}
+}
+
+// TestRealtimeSeenKeysBounded: a connection's subscriptions remember at
+// most rtConnSeenKeys keys between them, each its own newest; a key
+// removed and added again counts from when it came back.
+func TestRealtimeSeenKeysBounded(t *testing.T) {
+	var shared atomic.Int64
+	a, b := newPKSet(10, &shared, 15), newPKSet(10, &shared, 15)
+	for i := range 10 {
+		a.add(fmt.Sprint("a", i))
+		b.add(fmt.Sprint("b", i))
+	}
+	if n := shared.Load(); n != 15 || len(a.set)+len(b.set) != 15 || len(a.set) < 5 {
+		t.Fatalf("shared %d, a %d, b %d", n, len(a.set), len(b.set))
+	}
+	if !b.has("b9") || b.has("b0") {
+		t.Fatal("b let its newest go")
+	}
+	b.release()
+	if n := shared.Load(); n != int64(len(a.set)) {
+		t.Fatalf("after b ended: shared %d, a %d", n, len(a.set))
+	}
+
+	s := newPKSet(3, nil, 0)
+	for _, k := range []string{"x", "y", "z"} {
+		s.add(k)
+	}
+	s.remove("x")
+	s.add("x")
+	s.add("w") // y goes, not the x that came back
+	if !s.has("x") || s.has("y") || !s.has("z") || !s.has("w") {
+		t.Fatalf("set %v", s.set)
+	}
+	for i := range 1000 {
+		s.add(fmt.Sprint(i))
+		s.remove(fmt.Sprint(i))
+	}
+	if len(s.order) > 2*len(s.set)+64 {
+		t.Fatalf("%d entries kept for %d keys", len(s.order), len(s.set))
+	}
+}
+
+// TestRealtimeSendQueueBytes: a client that stops reading is disconnected
+// once 4 MB wait for it, though a single larger message still goes.
+func TestRealtimeSendQueueBytes(t *testing.T) {
+	e, _ := rtTestEdge(t)
+	h := e.hub(rtTestRef)
+	rc := testConn(h, Request{Role: "anon"})
+	huge := rtMsg{Topic: "realtime:room", Event: evBroadcast, Payload: json.RawMessage(`"` + strings.Repeat("x", 5<<20) + `"`)}
+	if !rc.send(huge) {
+		t.Fatal("one message larger than the queue's bound, on an empty queue, was refused")
+	}
+	<-rc.out
+	rc.queued.Add(-int64(len(encodeMsg(huge, false))))
+	mb := rtMsg{Topic: "realtime:room", Event: evBroadcast, Payload: json.RawMessage(`"` + strings.Repeat("x", 1<<20) + `"`)}
+	for i := range 3 {
+		if !rc.send(mb) {
+			t.Fatalf("message %d refused", i+1)
+		}
+	}
+	if rc.send(mb) {
+		t.Fatal("a fourth MB queued to a client that reads nothing")
+	}
+	select {
+	case <-rc.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the slow client wasn't disconnected")
 	}
 }

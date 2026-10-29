@@ -31,6 +31,15 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A realtime connection's memory is bounded.** A join could bind any
+  number of database-change subscriptions, each remembering up to 10,000
+  rows for deletes, so one client with the publishable key could make the
+  edge hold gigabytes; and a client that stopped reading could have 64 MB
+  queued for it. A channel now binds at most **20** subscriptions and a
+  connection **100** (refused in the join's reply), a connection's
+  subscriptions remember 20,000 rows between them, a frame is at most
+  **64 KB** (256 KB before; the connection is closed with 1009), and a
+  client with 4 MB waiting is disconnected as too slow.
 - **Realtime broadcasts can no longer fill the project's database.** With
   the publishable key, a client could send 600 broadcasts of 256 KB a
   minute, and with a second edge process listening each one over 7,800

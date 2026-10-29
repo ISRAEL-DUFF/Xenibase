@@ -218,7 +218,7 @@ func TestRealtimeHistoryKeepsPrivateApart(t *testing.T) {
 // channel of rc.
 func changesOn(rc *rtConn, topic, table string) (*rtChannel, *rtSub) {
 	ch := &rtChannel{c: rc, topic: topic, req: rc.base, readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}
-	s := &rtSub{id: rtSubIDs.Add(1), ch: ch, event: "*", schema: "public", table: table, seen: newPKSet(10000)}
+	s := &rtSub{id: rtSubIDs.Add(1), ch: ch, event: "*", schema: "public", table: table, seen: newPKSet(rtSeenKeys, &rc.seen, rtConnSeenKeys)}
 	ch.subs = []*rtSub{s}
 	rc.mu.Lock()
 	rc.channels[topic] = ch

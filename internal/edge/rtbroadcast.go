@@ -40,6 +40,8 @@ const (
 	// rtMaxMessage is the largest broadcast or presence message a client
 	// sends, and the largest broadcast sent over HTTP.
 	rtMaxMessage = 32 << 10
+	// rtMaxHTTPBroadcast is the largest body of an HTTP broadcast.
+	rtMaxHTTPBroadcast = 256 << 10
 	// rtBytesPerSecond bounds the broadcasts and presence a project's
 	// clients send through one edge process, all of which may be relayed
 	// to its other processes through its database.
@@ -736,7 +738,7 @@ func (e *Edge) restBroadcast(c *call, req Request) {
 			Private bool            `json:"private"`
 		} `json:"messages"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(c.w, c.r.Body, rtMaxFrame)).Decode(&in); err != nil || len(in.Messages) == 0 || len(in.Messages) > 100 {
+	if err := json.NewDecoder(http.MaxBytesReader(c.w, c.r.Body, rtMaxHTTPBroadcast)).Decode(&in); err != nil || len(in.Messages) == 0 || len(in.Messages) > 100 {
 		c.fail(http.StatusBadRequest, "bad_request", "send {\"messages\": [{topic, event, payload}]}, 1 to 100 of them")
 		return
 	}

@@ -952,7 +952,9 @@ Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects
 and refetches). A connection joins at most 100 channels, sends at most 600
 broadcasts and presence updates a minute, and a broadcast or presence
-message is at most 32 KB (other frames 256 KB). A project's clients may
+message is at most 32 KB (other frames 64 KB). A channel may have at most 20
+`postgres_changes` subscriptions and a connection 100, and a client that
+has 4 MB waiting for it is disconnected. A project's clients may
 send at most 1 MB of broadcasts and presence a second through each
 xenibase-edge process, and a topic kept as history keeps at most 256 KB a
 minute per process; past these a broadcast is refused with a

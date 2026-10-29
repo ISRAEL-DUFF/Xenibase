@@ -32,11 +32,22 @@ const (
 	rtIdle = 2 * time.Minute
 	// rtMaxChannels is the channels one connection may join.
 	rtMaxChannels = 100
-	// rtMaxFrame is the largest message a client may send.
-	rtMaxFrame = 256 << 10
-	// rtSendQueue is the messages queued to a slow client before it is
-	// disconnected (it refetches on reconnect).
-	rtSendQueue = 256
+	// rtMaxFrame is the largest message a client may send (a broadcast or
+	// presence message is at most rtMaxMessage).
+	rtMaxFrame = 64 << 10
+	// rtMaxSubs and rtMaxConnSubs are the postgres_changes subscriptions a
+	// channel and a connection may have (§6.3).
+	rtMaxSubs     = 20
+	rtMaxConnSubs = 100
+	// rtSeenKeys is the primary keys one subscription remembers for
+	// deletes, rtConnSeenKeys those of all a connection's subscriptions.
+	rtSeenKeys     = 10000
+	rtConnSeenKeys = 20000
+	// rtSendQueue is the messages, and rtSendQueueBytes the bytes, queued
+	// to a slow client before it is disconnected (it refetches on
+	// reconnect). A message larger than that goes when the queue is empty.
+	rtSendQueue      = 256
+	rtSendQueueBytes = 4 << 20
 	// rtSendsPerMinute bounds a connection's broadcasts and presence
 	// updates (each is fanned out, and relayed through the database).
 	rtSendsPerMinute = 600
@@ -55,6 +66,10 @@ type rtConn struct {
 	out   chan []byte
 	done  chan struct{}
 	close sync.Once
+	// queued is the bytes in out; seen the primary keys its subscriptions
+	// remember.
+	queued atomic.Int64
+	seen   atomic.Int64
 
 	mu       sync.Mutex
 	channels map[string]*rtChannel // by topic
@@ -194,6 +209,7 @@ func (rc *rtConn) writeLoop(ctx context.Context) {
 			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err := rc.ws.Write(wctx, websocket.MessageText, b)
 			cancel()
+			rc.queued.Add(-int64(len(b)))
 			if err != nil {
 				rc.shutdown(websocket.StatusGoingAway, "")
 				return
@@ -234,7 +250,9 @@ func (rc *rtConn) shutdown(code websocket.StatusCode, reason string) {
 		for _, ch := range chans {
 			rc.hub.leave(ch)
 		}
-		_ = rc.ws.Close(code, reason)
+		if rc.ws != nil { // nil in unit tests
+			_ = rc.ws.Close(code, reason)
+		}
 	})
 }
 
@@ -246,6 +264,12 @@ func (rc *rtConn) send(m rtMsg) bool {
 		return false
 	default:
 	}
+	n := int64(len(b))
+	if q := rc.queued.Add(n); q > rtSendQueueBytes && q != n {
+		rc.queued.Add(-n)
+		go rc.shutdown(websocket.StatusTryAgainLater, "too slow to keep up; reconnect and refetch")
+		return false
+	}
 	select {
 	case rc.out <- b:
 		if billable(m) {
@@ -253,6 +277,7 @@ func (rc *rtConn) send(m rtMsg) bool {
 		}
 		return true
 	default:
+		rc.queued.Add(-n)
 		go rc.shutdown(websocket.StatusTryAgainLater, "too slow to keep up; reconnect and refetch")
 		return false
 	}
@@ -452,6 +477,13 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 			return
 		}
 	}
+	if n := len(jc.Config.PostgresChanges); n > rtMaxSubs {
+		rc.replyError(m, fmt.Sprintf("a channel may have at most %d postgres_changes subscriptions", rtMaxSubs))
+		return
+	} else if n > 0 && rc.subscriptions()+n > rtMaxConnSubs {
+		rc.replyError(m, fmt.Sprintf("a connection may have at most %d postgres_changes subscriptions", rtMaxConnSubs))
+		return
+	}
 	ch := &rtChannel{c: rc, topic: m.Topic, joinRef: m.JoinRef, private: jc.Config.Private,
 		bcSelf: jc.Config.Broadcast.Self, bcAck: jc.Config.Broadcast.Ack, presence: jc.Config.Presence.Key,
 		readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}
@@ -515,6 +547,23 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 	if ch.readPresence {
 		rc.hub.presenceState(ch)
 	}
+}
+
+// subscriptions are the connection's postgres_changes subscriptions.
+func (rc *rtConn) subscriptions() int {
+	rc.mu.Lock()
+	chans := make([]*rtChannel, 0, len(rc.channels))
+	for _, ch := range rc.channels {
+		chans = append(chans, ch)
+	}
+	rc.mu.Unlock()
+	rc.hub.mu.Lock()
+	defer rc.hub.mu.Unlock()
+	n := 0
+	for _, ch := range chans {
+		n += len(ch.subs)
+	}
+	return n
 }
 
 // bindChanges checks a postgres_changes binding: the table has realtime on,
@@ -585,7 +634,7 @@ func (e *Edge) bindChanges(ctx context.Context, p *project, req Request, ch *rtC
 	if f != nil && t.Col(f.Column) == nil {
 		return nil, fmt.Errorf("filter: %s.%s has no column %q", schema, table, f.Column)
 	}
-	return &rtSub{id: rtSubIDs.Add(1), ch: ch, event: event, schema: schema, table: table, filter: f, raw: filter, seen: newPKSet(10000)}, nil
+	return &rtSub{id: rtSubIDs.Add(1), ch: ch, event: event, schema: schema, table: table, filter: f, raw: filter, seen: newPKSet(rtSeenKeys, &ch.c.seen, rtConnSeenKeys)}, nil
 }
 
 // rtAccess is what a private channel's policies allow (§6.1).
@@ -637,15 +686,30 @@ func (e *Edge) channelAccess(ctx context.Context, p *project, req Request, topic
 // errRollback ends a transaction without keeping what it did.
 var errRollback = errors.New("rollback")
 
-// pkSet is a bounded set of primary keys (oldest out first).
+// pkSet is a bounded set of primary keys (oldest out first). The sets of
+// one connection also share a bound: shared counts their keys, and a set
+// adding past sharedMax lets its own oldest go (keeping at least one).
 type pkSet struct {
-	mu    sync.Mutex
-	max   int
-	set   map[string]struct{}
-	order []string
+	mu        sync.Mutex
+	max       int
+	set       map[string]uint64 // key -> when it was added
+	order     []pkEntry         // oldest first; removed keys stay until they come up
+	n         uint64
+	shared    *atomic.Int64
+	sharedMax int64
 }
 
-func newPKSet(n int) *pkSet { return &pkSet{max: n, set: map[string]struct{}{}} }
+type pkEntry struct {
+	key string
+	at  uint64
+}
+
+func newPKSet(n int, shared *atomic.Int64, sharedMax int64) *pkSet {
+	if shared == nil {
+		shared = new(atomic.Int64)
+	}
+	return &pkSet{max: n, set: map[string]uint64{}, shared: shared, sharedMax: sharedMax}
+}
 
 func (s *pkSet) add(k string) {
 	s.mu.Lock()
@@ -653,12 +717,34 @@ func (s *pkSet) add(k string) {
 	if _, ok := s.set[k]; ok {
 		return
 	}
-	s.set[k] = struct{}{}
-	s.order = append(s.order, k)
-	for len(s.order) > s.max {
-		delete(s.set, s.order[0])
+	s.n++
+	s.set[k] = s.n
+	s.order = append(s.order, pkEntry{k, s.n})
+	total := s.shared.Add(1)
+	for len(s.set) > s.max || (s.sharedMax > 0 && total > s.sharedMax && len(s.set) > 1) {
+		if o := s.order[0]; s.set[o.key] == o.at {
+			delete(s.set, o.key)
+			total = s.shared.Add(-1)
+		}
 		s.order = s.order[1:]
 	}
+	if len(s.order) > 2*len(s.set)+64 {
+		kept := make([]pkEntry, 0, len(s.set))
+		for _, o := range s.order {
+			if s.set[o.key] == o.at {
+				kept = append(kept, o)
+			}
+		}
+		s.order = kept
+	}
+}
+
+// release forgets every key (the subscription ended).
+func (s *pkSet) release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shared.Add(-int64(len(s.set)))
+	s.set, s.order = map[string]uint64{}, nil
 }
 
 func (s *pkSet) has(k string) bool {
@@ -671,7 +757,10 @@ func (s *pkSet) has(k string) bool {
 func (s *pkSet) remove(k string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.set, k)
+	if _, ok := s.set[k]; ok {
+		delete(s.set, k)
+		s.shared.Add(-1)
+	}
 }
 
 func randRef() string {
