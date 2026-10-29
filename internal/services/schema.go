@@ -528,6 +528,23 @@ var schemaVersions = []schemaVersion{
 		  FROM PUBLIC, {{owner}}, {{anon}}, {{hook}}`,
 		`GRANT EXECUTE ON FUNCTION xb_auth.idempotency_claim(text, text), xb_auth.idempotency_store(text, int, text) TO {{user}}, {{service}}`,
 	}},
+	{8, []string{
+		// Signed upload URLs not used yet (V4 §5.4), with the signer's role
+		// and claims: the upload's row is written as them, and using the URL
+		// removes its row in the same step, so a URL uploads once.
+		`CREATE TABLE IF NOT EXISTS xb_storage.upload_tokens (
+		  id         uuid PRIMARY KEY,
+		  bucket     text NOT NULL,
+		  path       text NOT NULL,
+		  role       text NOT NULL,
+		  claims     jsonb NOT NULL DEFAULT '{}',
+		  created_at timestamptz NOT NULL DEFAULT now(),
+		  expires_at timestamptz NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS upload_tokens_expiry ON xb_storage.upload_tokens (expires_at)`,
+		`REVOKE ALL ON xb_storage.upload_tokens FROM PUBLIC`,
+		`GRANT SELECT, INSERT, DELETE ON xb_storage.upload_tokens TO {{edge}}`,
+	}},
 }
 
 // exposureStmts let the request roles use what the owner makes in an

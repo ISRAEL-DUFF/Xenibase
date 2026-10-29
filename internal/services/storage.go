@@ -146,12 +146,19 @@ func (s *Service) sweepProject(ctx context.Context, r store.StorageProjectsRow) 
 		gone = append(gone, x)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for _, x := range gone {
 		if err := cl.AbortMultipart(ctx, objectsKey(r.Ref, x.version), x.uploadID); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	// Signed upload URLs never used (schema version 8 on).
+	_, err = conn.Exec(ctx, `DO $$ BEGIN
+		IF to_regclass('xb_storage.upload_tokens') IS NOT NULL THEN DELETE FROM xb_storage.upload_tokens WHERE expires_at < now(); END IF;
+	END $$`)
+	return err
 }
 
 // collectGarbage removes the bytes (and renders) of versions no row points

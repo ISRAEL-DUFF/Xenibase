@@ -733,7 +733,7 @@ too.
 | `GET /storage/v1/public/<bucket>/<path>` | A public bucket's file, no key |
 | `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size, a `/render/sign/` URL that serves only that render, never the original) |
 | `POST /storage/v1/object/sign/<bucket>` | Signed URLs for several `paths` |
-| `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL (2 hours) for a client without a session |
+| `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL for a client without a session: 2 hours at most, used once, and written as the signer, so their policies apply to what is uploaded |
 | `POST /storage/v1/upload/<bucket>/<path>` | Start a large upload (`size`, `mime_type`) |
 | `GET`, `DELETE /storage/v1/upload/<id>`; `POST …/<id>/complete` | Its status and the parts still to send; abort; finish |
 | `GET /storage/v1/list/<bucket>?prefix=&cursor=&limit=` | Files and folders under a prefix (`POST /storage/v1/object/list/<bucket>` takes the same as JSON) |

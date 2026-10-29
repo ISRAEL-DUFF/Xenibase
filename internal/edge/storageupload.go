@@ -321,7 +321,7 @@ func (e *Edge) completeUpload(c *call, id uuid.UUID) {
 	req := Request{Role: s.Role, Claims: s.Claims, Timeout: time.Duration(c.p.cfg.Settings.StatementTimeoutMs) * time.Millisecond}
 	u := upload{bucket: s.Bucket, path: s.Path, version: s.Version, size: s.Size, mime: s.MIMEType, etag: etag, owner: s.Owner,
 		metadata: s.Metadata, upsert: s.Upsert}
-	o, err := e.commit(ctx, c, &req, sc, cl, u)
+	o, err := e.commit(ctx, c, req, sc, cl, u, nil)
 	_ = e.dropSession(context.WithoutCancel(ctx), c.p, id)
 	if err != nil {
 		e.storageError(c, err)

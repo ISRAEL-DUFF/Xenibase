@@ -326,25 +326,23 @@ func (e *Edge) mayWrite(ctx context.Context, c *call, req Request, u upload) err
 	return err
 }
 
-// commit writes u's row, as req's role or (signed upload URLs, whose
-// signing checked the policies) the edge's login; the stored bytes are
-// removed when it fails.
-func (e *Edge) commit(ctx context.Context, c *call, req *Request, sc *edgeapi.StorageConfig, cl *storage.Client, u upload) (*Object, error) {
+// commit writes u's row as req's role (for a signed upload URL, its
+// signer's, spending the URL's token); the stored bytes are removed when
+// it fails.
+func (e *Edge) commit(ctx context.Context, c *call, req Request, sc *edgeapi.StorageConfig, cl *storage.Client, u upload, token *uuid.UUID) (*Object, error) {
 	var o *Object
-	var err error
-	if req != nil {
-		err = e.asRole(ctx, c, *req, func(tx pgx.Tx) error {
+	write := func() error {
+		return e.asRole(ctx, c, req, func(tx pgx.Tx) error {
 			var err error
 			o, err = scanObject(tx.QueryRow(ctx, files.InsertSQL(u.upsert), u.args()...))
 			return err
 		})
+	}
+	var err error
+	if token == nil {
+		err = write()
 	} else {
-		var pool interface {
-			QueryRow(context.Context, string, ...any) pgx.Row
-		}
-		if pool, err = e.dbPool(ctx, c.p); err == nil {
-			o, err = scanObject(pool.QueryRow(ctx, files.InsertSQL(u.upsert), u.args()...))
-		}
+		err = e.spendToken(ctx, c.p, *token, write)
 	}
 	if err != nil {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -358,6 +356,26 @@ func (e *Edge) commit(ctx context.Context, c *call, req *Request, sc *edgeapi.St
 		e.collectSoon(c.p)
 	}
 	return o, nil
+}
+
+// spendToken runs write while removing a signed upload URL's token, in the
+// edge's own transaction around it: the token is spent only by a write that
+// commits, and a second upload with it waits on the row, then finds it gone.
+func (e *Edge) spendToken(ctx context.Context, p *project, id uuid.UUID, write func() error) error {
+	pool, err := e.dbPool(ctx, p)
+	if err != nil {
+		return err
+	}
+	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM xb_storage.upload_tokens WHERE id = $1 AND expires_at > now()`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errTokenSpent
+		}
+		return write()
+	})
 }
 
 // checkSize checks a size against the bucket's, the plan's (and the
@@ -513,9 +531,10 @@ func (c *countingHash) Read(p []byte) (int, error) {
 // Put is the client's body ending early rather than the object store failing.
 func (c *countingHash) cutShort(size int64) bool { return c.n < size && c.srcErr != nil }
 
-// putObject stores a direct upload's bytes and writes its row. req nil is a
-// signed upload URL (policies already checked); owner is who it's for.
-func (e *Edge) putObject(c *call, req *Request, bucket, path string, upsert bool, owner *uuid.UUID) {
+// putObject stores a direct upload's bytes and writes its row as req's
+// role; owner is who it's for, and token a signed upload URL's, spent by
+// the write.
+func (e *Edge) putObject(c *call, req Request, bucket, path string, upsert bool, owner *uuid.UUID, token *uuid.UUID) {
 	sc, cl, ok := e.store(c)
 	if !ok {
 		return
@@ -559,11 +578,9 @@ func (e *Edge) putObject(c *call, req *Request, bucket, path string, upsert bool
 		return
 	}
 	u := upload{bucket: bucket, path: path, version: uuid.New(), size: src.size, mime: mt, owner: owner, metadata: md, upsert: upsert}
-	if req != nil {
-		if err := e.mayWrite(ctx, c, *req, u); err != nil {
-			e.storageError(c, err)
-			return
-		}
+	if err := e.mayWrite(ctx, c, req, u); err != nil {
+		e.storageError(c, err)
+		return
 	}
 	var r io.Reader = br
 	size := src.size
@@ -596,7 +613,7 @@ func (e *Edge) putObject(c *call, req *Request, bucket, path string, upsert bool
 	}
 	sum := hex.EncodeToString(ch.h.Sum(nil))
 	u.size, u.etag, u.checksum = size, etag, &sum
-	o, err := e.commit(ctx, c, req, sc, cl, u)
+	o, err := e.commit(ctx, c, req, sc, cl, u, token)
 	if err != nil {
 		e.storageError(c, err)
 		return
@@ -841,7 +858,7 @@ func (e *Edge) moveOrCopy(c *call, req Request, copyIt bool) {
 		return
 	}
 	u.etag = etag
-	o, err := e.commit(ctx, c, &req, sc, cl, u)
+	o, err := e.commit(ctx, c, req, sc, cl, u, nil)
 	if err != nil {
 		e.storageError(c, err)
 		return

@@ -336,6 +336,15 @@ bundle share one version (spec §11.5).
   to `object/sign` in it downloaded the full-size file. A token with a
   transform now serves only that render (`400 invalid_signature` on the
   download route).
+- **A signed upload URL skipped the storage policies on what it wrote, and
+  could be used again and again.** The upload's row was written with the
+  edge's own login, so a policy on the type, size or metadata never
+  applied, and an upsert URL could overwrite its path as often as its
+  holder liked, for up to 7 days. A signed upload is now written as the
+  user who signed it (their role and claims are kept with the URL in the
+  new `xb_storage.upload_tokens`, project schema version 8), the URL
+  uploads once (only an upload that commits uses it up, on any edge), and
+  it lasts 2 hours at most, as documented.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -349,6 +358,11 @@ bundle share one version (spec §11.5).
 - Migration 00075 gives the nightly and archive backups of projects deleted
   before the upgrade, on platform targets, their final backup's expiry, and
   at least seven days: they are deleted from a week after the upgrade.
+- Signed upload URLs made before the upgrade stop working (`400
+  invalid_signature`): they have no row in `xb_storage.upload_tokens`, so
+  they can't be used once. Apps sign a new URL; they last 2 hours at most.
+  A project's signed uploads fail until its schema reaches version 8, which
+  the backend services reconciler applies within minutes of the upgrade.
 
 ## v4.2.4
 
