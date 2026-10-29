@@ -419,7 +419,7 @@ curl -X POST .../auth/v1/signin/password -H "apikey: xb_pub_…" -d '{"email":"a
 | `POST recover` | A password-reset link and code; verifying it signs the user in to set a new password. |
 | `POST token?grant_type=refresh_token` | `{"refresh_token":"…"}`: new tokens; the refresh token is single use. |
 | `POST signout?scope=local\|others\|global` | With the access token: this session, the others, or every session. |
-| `GET user`, `PATCH user` | The signed-in user with their `identities` and `factors`; change the password, `data` (merged into the user's metadata), the email (confirmed by a link sent to the new address) or the `phone` (confirmed by a code to the new number). |
+| `GET user`, `PATCH user` | The signed-in user with their `identities` and `factors`; change the password, `data` (merged into the user's metadata), the email (confirmed by a link sent to the new address) or the `phone` (confirmed by a code to the new number). A user with a verified factor changes the password or email only at `aal2` (`401 insufficient_aal`). |
 | `GET settings` | Which methods are on and the password rules, for your sign-in form. |
 | `GET .well-known/jwks.json` | The public keys (no key needed). |
 
@@ -516,9 +516,9 @@ Users enrol an authenticator app (TOTP) or, when allowed, a phone:
 
 | Endpoint (with the user's token) | |
 | --- | --- |
-| `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. |
+| `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. A user who already has a verified factor enrols another only at `aal2` (`403 insufficient_aal`). |
 | `POST factors/{id}/challenge` | A challenge (a phone factor gets a code). |
-| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. |
+| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. A new factor is verified only when it is the user's first or the session is at `aal2`. |
 | `DELETE factors/{id}` | Removes a factor (a verified one needs `aal2`). |
 
 `/mfa/enroll`, `/mfa/challenge` and `/mfa/verify` (with `factor_id` in the

@@ -31,6 +31,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A password alone no longer reaches `aal2`.** A session at `aal1`
+  could enrol a TOTP factor of its own and verify it, which raised the
+  session to `aal2`, past `mfa_required` and policies on `xb_auth.aal()`;
+  it could also change the password or email. Once a user has a verified
+  factor, an `aal1` session is now refused enrolment (`403
+  insufficient_aal`), password and email changes (`401
+  insufficient_aal`), and verifying a factor enrolled before the user's
+  first was verified, as GoTrue does. The check reads the session's level
+  from the database, not the token; a user's first factor still raises the
+  session that verifies it.
 - **Wildcard redirect URLs no longer allow other hosts.** A pattern was
   matched against the whole URL as text, so `*` also matched `?` and `#`:
   with `https://*.example.com/**`, `https://evil.test?.example.com/` was

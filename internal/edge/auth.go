@@ -1314,16 +1314,35 @@ func (e *Edge) signout(c *call, req Request) {
 
 // liveUser is the token's user while its session lasts.
 func (e *Edge) liveUser(ctx context.Context, tx pgx.Tx, uid, sid uuid.UUID, lock bool) (*projauth.User, *apiErr, error) {
-	if _, err := projauth.GetSession(ctx, tx, sid); errors.Is(err, projauth.ErrNotFound) {
-		return nil, refuse(http.StatusUnauthorized, "session_not_found", "the session has ended; sign in again"), nil
+	u, _, fail, err := e.liveSession(ctx, tx, uid, sid, lock)
+	return u, fail, err
+}
+
+// liveSession is liveUser with the session as it is now (its aal may have
+// changed since the token was signed).
+func (e *Edge) liveSession(ctx context.Context, tx pgx.Tx, uid, sid uuid.UUID, lock bool) (*projauth.User, *projauth.Session, *apiErr, error) {
+	s, err := projauth.GetSession(ctx, tx, sid)
+	if errors.Is(err, projauth.ErrNotFound) || (err == nil && s.UserID != uid) {
+		return nil, nil, refuse(http.StatusUnauthorized, "session_not_found", "the session has ended; sign in again"), nil
 	} else if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	u, err := projauth.GetUser(ctx, tx, uid, lock)
 	if errors.Is(err, projauth.ErrNotFound) {
-		return nil, refuse(http.StatusUnauthorized, "user_not_found", "the user no longer exists"), nil
+		return nil, nil, refuse(http.StatusUnauthorized, "user_not_found", "the user no longer exists"), nil
 	}
-	return u, nil, err
+	return u, s, nil, err
+}
+
+// belowMFA reports whether session s is below aal2 while its user has a
+// verified factor: such a session may not change what proves the user
+// (GoTrue's insufficient_aal), or a password alone would be enough to
+// reach aal2.
+func belowMFA(ctx context.Context, tx pgx.Tx, s *projauth.Session) (bool, error) {
+	if s.AAL == "aal2" {
+		return false, nil
+	}
+	return projauth.HasVerifiedFactor(ctx, tx, s.UserID)
 }
 
 func (e *Edge) getUser(c *call, req Request) {
@@ -1441,9 +1460,19 @@ func (e *Edge) updateUser(c *call, req Request) {
 	var u *projauth.User
 	var fail *apiErr
 	err := e.authTx(c, func(tx pgx.Tx) error {
+		var s *projauth.Session
 		var err error
-		if u, fail, err = e.liveUser(ctx, tx, uid, sid, true); err != nil || fail != nil {
+		if u, s, fail, err = e.liveSession(ctx, tx, uid, sid, true); err != nil || fail != nil {
 			return err
+		}
+		if hash != nil || (newEmail != "" && (u.Email == nil || *u.Email != newEmail)) {
+			if below, err := belowMFA(ctx, tx, s); err != nil {
+				return err
+			} else if below {
+				fail = refuse(http.StatusUnauthorized, "insufficient_aal",
+					"an aal2 session (verify a factor) is required to change the email or password of a user with MFA")
+				return nil
+			}
 		}
 		up := projauth.Update{PasswordHash: hash}
 		if in.Data != nil {
