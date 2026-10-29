@@ -49,6 +49,7 @@ type Service struct {
 
 	mu     sync.Mutex
 	health map[uuid.UUID]Status
+	agents agentClients
 }
 
 // Status is the last known state of a node's agent.
