@@ -855,7 +855,9 @@ client.channel("todos")
 A channel can carry database changes, broadcast and presence at once.
 Signed-in clients send their access token in the join (supabase-js does);
 a channel may be told a new one with an `access_token` message before
-the old expires, and a channel whose token has expired is closed.
+the old expires, and a channel whose token has expired is closed within
+10 seconds (at once if a message is due to it or it sends one). A
+connection opened with a bearer token takes that token's expiry.
 
 ### Database changes
 
@@ -938,7 +940,9 @@ CREATE POLICY members_send ON xb_realtime.channel_access FOR INSERT TO <db>_user
   WITH CHECK (EXISTS (SELECT 1 FROM room_members m WHERE m.room = topic AND m.user_id = xb_auth.uid()));
 ```
 
-The edge checks them in a transaction it rolls back when a client joins.
+The edge checks them in a transaction it rolls back when a client joins,
+when it sends a new access token, and again every minute: a user your
+policies no longer allow is closed out of the channel.
 A private channel and a public one of the same name don't hear each other.
 
 ### Limits and use

@@ -47,7 +47,7 @@ func testConn(h *rtHub, base Request) *rtConn {
 // its listener.
 func testChannel(rc *rtConn, topic string) *rtChannel {
 	ch := &rtChannel{c: rc, topic: topic, presence: uuid.NewString(), req: rc.base,
-		readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}
+		acc: rtAccess{readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}}
 	rc.mu.Lock()
 	rc.channels[topic] = ch
 	rc.mu.Unlock()
@@ -379,5 +379,87 @@ func TestRealtimeSendQueueBytes(t *testing.T) {
 	case <-rc.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the slow client wasn't disconnected")
+	}
+}
+
+// closedFor waits for rc to be told channel topic is closed for reason.
+func closedFor(t *testing.T, rc *rtConn, topic, reason string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	told := false
+	for {
+		select {
+		case b := <-rc.out:
+			m, _, _ := decodeMsg(b)
+			if m.Topic != topic {
+				continue
+			}
+			switch {
+			case m.Event == evSystem && strings.Contains(string(m.Payload), reason):
+				told = true
+			case m.Event == phxClose && told:
+				rc.mu.Lock()
+				_, still := rc.channels[topic]
+				rc.mu.Unlock()
+				if still {
+					t.Fatalf("%s: closed but still joined", topic)
+				}
+				return
+			case m.Event == evBroadcast || m.Event == evPresenceDiff:
+				t.Fatalf("%s: %s delivered to a channel that should be closed", topic, m.Event)
+			}
+		case <-deadline:
+			t.Fatalf("%s wasn't closed for %q", topic, reason)
+		}
+	}
+}
+
+// TestRealtimeTokenExpiry: a channel whose user's token has expired gets
+// no broadcast or presence and is closed, by the message or by the timer;
+// one on a connection upgraded with a bearer token expires with that
+// token, and can't be joined once it has.
+func TestRealtimeTokenExpiry(t *testing.T) {
+	e, _ := rtTestEdge(t)
+	h := e.hub(rtTestRef)
+	ctx := context.Background()
+	sender := testConn(h, Request{Role: "anon"})
+	testChannel(sender, "realtime:room")
+	user := func(exp time.Time) *rtConn {
+		return testConn(h, Request{Role: "user", Claims: map[string]any{"role": "user", "sub": uuid.NewString(), "exp": float64(exp.Unix())}})
+	}
+
+	// A bearer-upgraded connection's channel takes its token's expiry.
+	bearer := user(time.Now().Add(time.Hour))
+	ch := testChannel(bearer, "realtime:room")
+	if err := ch.setToken(bearer, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, expired := ch.request(); expired || ch.exp.IsZero() || ch.userID == nil {
+		t.Fatalf("a channel on a bearer connection: exp %v, user %v", ch.exp, ch.userID)
+	}
+	ch.mu.Lock()
+	ch.exp = time.Now().Add(-time.Second)
+	ch.mu.Unlock()
+	sender.handle(ctx, msg("realtime:room", evBroadcast, broadcastOf(10)))
+	closedFor(t, bearer, "realtime:room", "has expired")
+
+	// Presence, the same.
+	stale := user(time.Now().Add(-time.Minute))
+	ch = testChannel(stale, "realtime:room")
+	_ = ch.setToken(stale, "")
+	sender.handle(ctx, msg("realtime:room", evPresence, map[string]any{"type": "presence", "event": "track", "payload": map[string]any{}}))
+	closedFor(t, stale, "realtime:room", "has expired")
+
+	// The timer, with nothing sent on the topic.
+	quiet := user(time.Now().Add(-time.Minute))
+	ch = testChannel(quiet, "realtime:lonely")
+	_ = ch.setToken(quiet, "")
+	quiet.recheck(ctx)
+	closedFor(t, quiet, "realtime:lonely", "has expired")
+
+	// And no new channel on it.
+	quiet.join(ctx, msg("realtime:again", phxJoin, map[string]any{"config": map[string]any{}}), nil)
+	if got, _ := replies(t, quiet); len(got) != 1 || !strings.Contains(got[0], "has expired") {
+		t.Fatalf("a join on an expired bearer connection: %v", got)
 	}
 }

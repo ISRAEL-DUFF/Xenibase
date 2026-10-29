@@ -31,6 +31,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Realtime channels follow their user's token and the channel policies
+  while open.** A private channel's policies were asked only at join, so a
+  member removed from a room kept hearing it, and a new `access_token`
+  switched user without asking them; an expired token closed a channel only
+  at its table's next change, never for broadcast or presence, and never on
+  a connection opened with a bearer token. Now a channel is closed within
+  10 seconds of its token expiring (at once if a message is due to it or
+  it sends one), a connection's bearer token expires its channels too, a new
+  token is checked against the policies, and private channels are checked
+  again every minute.
 - **A realtime connection's memory is bounded.** A join could bind any
   number of database-change subscriptions, each remembering up to 10,000
   rows for deletes, so one client with the publishable key could make the

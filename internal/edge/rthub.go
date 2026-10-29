@@ -639,8 +639,7 @@ func (h *rtHub) deliver(ctx context.Context, p *project, keys map[string][]strin
 		for _, s := range subs {
 			req, expired := s.ch.request()
 			if expired {
-				s.ch.system("error", evPostgresChanges, "the access token has expired: send a new one")
-				go s.ch.c.closeChannel(s.ch)
+				s.ch.expire()
 				continue
 			}
 			fp := fingerprint(req)

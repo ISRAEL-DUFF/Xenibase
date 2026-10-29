@@ -217,7 +217,7 @@ func TestRealtimeHistoryKeepsPrivateApart(t *testing.T) {
 // changesOn adds a subscription to every change of public.<table> on a new
 // channel of rc.
 func changesOn(rc *rtConn, topic, table string) (*rtChannel, *rtSub) {
-	ch := &rtChannel{c: rc, topic: topic, req: rc.base, readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}
+	ch := &rtChannel{c: rc, topic: topic, req: rc.base, acc: rtAccess{readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}}
 	s := &rtSub{id: rtSubIDs.Add(1), ch: ch, event: "*", schema: "public", table: table, seen: newPKSet(rtSeenKeys, &rc.seen, rtConnSeenKeys)}
 	ch.subs = []*rtSub{s}
 	rc.mu.Lock()
@@ -369,4 +369,78 @@ func TestRealtimeBroadcastsSpareTheDatabase(t *testing.T) {
 		_, b := replies(t, to)
 		delivered += b
 	}
+}
+
+// TestRealtimePrivateChannelsRechecked: a private channel's policies are
+// asked again when its token changes and every minute, so a user removed
+// from a room, or a token swapped for a non-member's, stops hearing it.
+func TestRealtimePrivateChannelsRechecked(t *testing.T) {
+	rp := newRTProject(t)
+	ctx := context.Background()
+	alice, bob := uuid.New(), uuid.New()
+	for _, st := range []string{
+		`CREATE TABLE public.members (user_id uuid PRIMARY KEY)`,
+		`GRANT SELECT ON public.members TO ` + rp.pc.UserRole,
+		`INSERT INTO public.members VALUES ('` + alice.String() + `')`,
+		`CREATE POLICY members ON xb_realtime.channel_access FOR SELECT TO ` + rp.pc.UserRole +
+			` USING (topic = 'vip' AND (current_setting('xb.claims', true)::jsonb ->> 'sub')::uuid IN (SELECT user_id FROM public.members))`,
+	} {
+		if _, err := rp.db.Exec(ctx, st); err != nil {
+			t.Fatalf("%s: %v", st, err)
+		}
+	}
+	p := rp.project(t)
+	h := rp.e.hub(rp.pc.Ref)
+	sender := testConn(h, Request{Role: "service"})
+	testChannel(sender, "realtime:vip").private = true
+	joined := func(token string) (*rtConn, *rtChannel) {
+		rc := testConn(h, Request{Role: "anon"})
+		ch := testChannel(rc, "realtime:vip")
+		ch.private = true
+		if err := ch.setToken(rc, token); err != nil {
+			t.Fatal(err)
+		}
+		req, _ := ch.request()
+		a, err := rp.e.channelAccess(ctx, p, req, ch.topic)
+		if err != nil || !a.readBroadcast {
+			t.Fatalf("alice's access: %+v %v", a, err)
+		}
+		ch.setAccess(a, ch.gen)
+		return rc, ch
+	}
+	hears := func(rc *rtConn) bool {
+		sender.handle(ctx, msg("realtime:vip", evBroadcast, broadcastOf(10)))
+		_, n := replies(t, rc)
+		return n == 1
+	}
+
+	// Removed from the room: within a minute of the last check.
+	rc, ch := joined(rp.token(t, alice.String(), time.Hour))
+	if !hears(rc) {
+		t.Fatal("a member doesn't hear the room")
+	}
+	if _, err := rp.db.Exec(ctx, `DELETE FROM public.members`); err != nil {
+		t.Fatal(err)
+	}
+	rc.recheck(ctx)
+	if !hears(rc) {
+		t.Fatal("asked again before the minute was up")
+	}
+	ch.mu.Lock()
+	ch.checkedAt = time.Now().Add(-rtRecheck)
+	ch.mu.Unlock()
+	rc.recheck(ctx)
+	closedFor(t, rc, "realtime:vip", "not allowed")
+
+	// A token swapped for a non-member's.
+	if _, err := rp.db.Exec(ctx, `INSERT INTO public.members VALUES ('`+alice.String()+`')`); err != nil {
+		t.Fatal(err)
+	}
+	rc, _ = joined(rp.token(t, alice.String(), time.Hour))
+	rc.handle(ctx, msg("realtime:vip", evAccessToken, map[string]any{"access_token": rp.token(t, alice.String(), 2*time.Hour)}))
+	if got, _ := replies(t, rc); len(got) != 1 || !strings.Contains(got[0], `"ok"`) {
+		t.Fatalf("a member's fresh token: %v", got)
+	}
+	rc.handle(ctx, msg("realtime:vip", evAccessToken, map[string]any{"access_token": rp.token(t, bob.String(), time.Hour)}))
+	closedFor(t, rc, "realtime:vip", "not allowed")
 }

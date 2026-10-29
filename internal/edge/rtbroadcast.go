@@ -174,7 +174,7 @@ func (h *rtHub) broadcastFrom(ctx context.Context, ch *rtChannel, m rtMsg) {
 		ch.c.replyError(m, "a broadcast is {type: broadcast, event, payload}")
 		return
 	}
-	if ch.private && !ch.writeBroadcast {
+	if acc, _ := ch.receives(); !acc.writeBroadcast {
 		ch.c.replyError(m, "not allowed to send on this private channel: no INSERT policy on xb_realtime.channel_access lets this user")
 		return
 	}
@@ -218,7 +218,12 @@ func (h *rtHub) fanOut(topic string, private bool, payload json.RawMessage, from
 		if to == from && !from.bcSelf {
 			continue
 		}
-		if private && !to.readBroadcast {
+		acc, expired := to.receives()
+		if expired {
+			to.expire()
+			continue
+		}
+		if !acc.readBroadcast {
 			continue
 		}
 		to.c.send(rtMsg{JoinRef: to.joinRef, Topic: topic, Event: evBroadcast, Payload: payload})
@@ -288,7 +293,7 @@ func (h *rtHub) presenceFrom(ctx context.Context, ch *rtChannel, m rtMsg) {
 		ch.c.replyError(m, "presence is {type: presence, event: track|untrack, payload}")
 		return
 	}
-	if ch.private && !ch.writePresence {
+	if acc, _ := ch.receives(); !acc.writePresence {
 		ch.c.replyError(m, "not allowed to track presence on this private channel")
 		return
 	}
@@ -373,7 +378,12 @@ func (h *rtHub) dropChannel(ch *rtChannel) map[string][]map[string]any {
 func (h *rtHub) presenceDiff(topic string, private bool, joins, leaves map[string][]map[string]any) {
 	payload := rawJSON(map[string]any{"joins": metas(joins), "leaves": metas(leaves)})
 	for _, to := range h.local(topic, private) {
-		if private && !to.readPresence {
+		acc, expired := to.receives()
+		if expired {
+			to.expire()
+			continue
+		}
+		if !acc.readPresence {
 			continue
 		}
 		to.c.send(rtMsg{JoinRef: to.joinRef, Topic: topic, Event: evPresenceDiff, Payload: payload})

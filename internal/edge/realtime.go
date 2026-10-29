@@ -53,6 +53,10 @@ const (
 	rtSendsPerMinute = 600
 	// rtTopicPrefix starts every channel topic.
 	rtTopicPrefix = "realtime:"
+	// rtRecheck is how often a private channel's policies are asked again
+	// (§6.1); expiry is checked on every message and every rtTick.
+	rtRecheck = time.Minute
+	rtTick    = 10 * time.Second
 )
 
 // rtConn is one client's WebSocket.
@@ -89,15 +93,20 @@ type rtChannel struct {
 	req    Request
 	userID *uuid.UUID
 	exp    time.Time // the user token's expiry (zero: none)
+	gen    int       // counts identity changes
+	// What a private channel's policies allow (public channels: all), and
+	// when they were asked.
+	acc       rtAccess
+	checkedAt time.Time
 
 	private  bool
 	bcSelf   bool
 	bcAck    bool
 	presence string // presence key
-	// What a private channel's policies allow (public channels: all).
-	readBroadcast, writeBroadcast, readPresence, writePresence bool
 
 	subs []*rtSub
+	// closing is set once the channel is being closed for an expired token.
+	closing atomic.Bool
 }
 
 // rtSub is one postgres_changes binding of a channel.
@@ -219,7 +228,7 @@ func (rc *rtConn) writeLoop(ctx context.Context) {
 }
 
 func (rc *rtConn) idleLoop(ctx context.Context) {
-	t := time.NewTicker(10 * time.Second)
+	t := time.NewTicker(rtTick)
 	defer t.Stop()
 	for {
 		select {
@@ -232,8 +241,63 @@ func (rc *rtConn) idleLoop(ctx context.Context) {
 				rc.shutdown(websocket.StatusPolicyViolation, "no heartbeat")
 				return
 			}
+			rc.recheck(ctx)
 		}
 	}
+}
+
+// recheck closes the channels whose token has expired, and asks a private
+// channel's policies again every rtRecheck: a user removed from a room
+// stops hearing it within a minute.
+func (rc *rtConn) recheck(ctx context.Context) {
+	rc.mu.Lock()
+	chans := make([]*rtChannel, 0, len(rc.channels))
+	for _, ch := range rc.channels {
+		chans = append(chans, ch)
+	}
+	rc.mu.Unlock()
+	for _, ch := range chans {
+		ch.mu.Lock()
+		req, gen, expired := ch.req, ch.gen, !ch.exp.IsZero() && time.Now().After(ch.exp)
+		due := ch.private && time.Since(ch.checkedAt) >= rtRecheck
+		ch.mu.Unlock()
+		if expired {
+			ch.expire()
+			continue
+		}
+		if !due {
+			continue
+		}
+		p := rc.e.lookup(rc.hub.ref)
+		if p == nil {
+			return
+		}
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		a, err := rc.e.channelAccess(cctx, p, req, ch.topic)
+		cancel()
+		if err != nil {
+			// Kept as it was until the policies can be asked.
+			rc.e.cfg.Log.Warn("realtime channel policies", "ref", rc.hub.ref, "err", err)
+			continue
+		}
+		if !a.readBroadcast && !a.readPresence {
+			ch.system("error", "", errNotMember.Error())
+			rc.closeChannel(ch)
+			continue
+		}
+		if had := ch.setAccess(a, gen); had.writePresence && !a.writePresence {
+			rc.hub.untrackChannel(ch)
+		}
+	}
+}
+
+// expire closes a channel whose token has expired, once.
+func (ch *rtChannel) expire() {
+	if !ch.closing.CompareAndSwap(false, true) {
+		return
+	}
+	ch.system("error", "", "the access token has expired: send a new one")
+	go ch.c.closeChannel(ch)
 }
 
 // shutdown leaves every channel and closes the socket, once.
@@ -350,13 +414,17 @@ func (rc *rtConn) handle(ctx context.Context, m rtMsg) {
 			AccessToken string `json:"access_token"`
 		}
 		_ = json.Unmarshal(m.Payload, &p)
-		if err := ch.setToken(rc, p.AccessToken); err != nil {
+		if err := rc.retoken(ctx, ch, p.AccessToken); err != nil {
 			ch.system("error", "", err.Error())
 			rc.closeChannel(ch)
 			return
 		}
 		rc.reply(m, "ok", nil)
 	case evBroadcast, evPresence:
+		if _, expired := ch.request(); expired {
+			ch.expire()
+			return
+		}
 		if !rc.e.limits.allow("rt:"+rc.id, rtSendsPerMinute) {
 			rc.replyError(m, fmt.Sprintf("rate_limited: at most %d broadcasts and presence updates a minute per connection", rtSendsPerMinute))
 			return
@@ -403,43 +471,98 @@ type joinConfig struct {
 	AccessToken string `json:"access_token"`
 }
 
-// setToken changes the channel's user from an access token: "" keeps the
-// connection's key role.
-func (ch *rtChannel) setToken(rc *rtConn, token string) error {
+// identity is who an access token makes a channel of rc: "" (or the
+// publishable key, which supabase-js sends when signed out) keeps the
+// connection's own, a bearer token's user when it was upgraded with one.
+func identity(rc *rtConn, token string) (Request, error) {
 	req := rc.base
-	var uid *uuid.UUID
-	var exp time.Time
 	if token = strings.TrimSpace(token); token != "" && rc.base.Role != "service" {
 		p := rc.e.lookup(rc.hub.ref)
 		if p == nil {
-			return errors.New("the project's backend services are off")
+			return req, errors.New("the project's backend services are off")
 		}
-		// supabase-js sends the publishable key as the token when signed out.
 		if _, isKey := p.keys[edgeapi.HashKey(token)]; !isKey {
 			claims, err := jwtes.Verify(token, p.jwks, p.cfg.Ref, time.Now())
 			if err != nil {
-				return fmt.Errorf("invalid token: %w", err)
+				return req, fmt.Errorf("invalid token: %w", err)
 			}
 			if claims["role"] != "user" {
-				return errors.New("invalid token: not a user's access token")
+				return req, errors.New("invalid token: not a user's access token")
 			}
 			req = Request{Role: "user", Claims: claims, Timeout: rc.base.Timeout}
 			if mfaRequired(p.cfg.Auth, req) {
-				return errors.New("this project requires a second factor: verify one to reach aal2")
+				return req, errors.New("this project requires a second factor: verify one to reach aal2")
 			}
-			if sub, _ := claims["sub"].(string); sub != "" {
-				if u, err := uuid.Parse(sub); err == nil {
-					uid = &u
-				}
+		}
+	}
+	return req, nil
+}
+
+// setIdentity makes req the channel's: its user and its token's expiry
+// come from its claims.
+func (ch *rtChannel) setIdentity(req Request) {
+	var uid *uuid.UUID
+	var exp time.Time
+	if req.Role == "user" {
+		if sub, _ := req.Claims["sub"].(string); sub != "" {
+			if u, err := uuid.Parse(sub); err == nil {
+				uid = &u
 			}
-			if f, ok := claims["exp"].(float64); ok {
-				exp = time.Unix(int64(f), 0)
-			}
+		}
+		if f, ok := req.Claims["exp"].(float64); ok {
+			exp = time.Unix(int64(f), 0)
 		}
 	}
 	ch.mu.Lock()
 	ch.req, ch.userID, ch.exp = req, uid, exp
+	ch.gen++
 	ch.mu.Unlock()
+}
+
+// setToken changes the channel's user from an access token.
+func (ch *rtChannel) setToken(rc *rtConn, token string) error {
+	req, err := identity(rc, token)
+	if err != nil {
+		return err
+	}
+	ch.setIdentity(req)
+	return nil
+}
+
+// retoken is an access_token message: the channel's new user, with a
+// private channel's policies asked again as them.
+func (rc *rtConn) retoken(ctx context.Context, ch *rtChannel, token string) error {
+	req, err := identity(rc, token)
+	if err != nil {
+		return err
+	}
+	var a rtAccess
+	if ch.private {
+		p := rc.e.lookup(rc.hub.ref)
+		if p == nil {
+			return errors.New("the project's backend services are off")
+		}
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if a, err = rc.e.channelAccess(cctx, p, req, ch.topic); err != nil {
+			return err
+		}
+		if !a.readBroadcast && !a.readPresence {
+			return errNotMember
+		}
+	}
+	ch.setIdentity(req)
+	if _, expired := ch.request(); expired {
+		return errors.New("the access token has expired: send a new one")
+	}
+	if ch.private {
+		ch.mu.Lock()
+		gen := ch.gen
+		ch.mu.Unlock()
+		if had := ch.setAccess(a, gen); had.writePresence && !a.writePresence {
+			rc.hub.untrackChannel(ch)
+		}
+	}
 	return nil
 }
 
@@ -449,6 +572,27 @@ func (ch *rtChannel) request() (req Request, expired bool) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	return ch.req, !ch.exp.IsZero() && time.Now().After(ch.exp)
+}
+
+// receives is what the channel may receive now: what its policies allow,
+// and whether its token has expired.
+func (ch *rtChannel) receives() (acc rtAccess, expired bool) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	return ch.acc, !ch.exp.IsZero() && time.Now().After(ch.exp)
+}
+
+// setAccess records what the policies allow, asked as identity gen (not
+// recorded when the identity changed since); it returns what they allowed
+// before.
+func (ch *rtChannel) setAccess(a rtAccess, gen int) rtAccess {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	had := ch.acc
+	if ch.gen == gen {
+		ch.acc, ch.checkedAt = a, time.Now()
+	}
+	return had
 }
 
 func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
@@ -486,7 +630,7 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 	}
 	ch := &rtChannel{c: rc, topic: m.Topic, joinRef: m.JoinRef, private: jc.Config.Private,
 		bcSelf: jc.Config.Broadcast.Self, bcAck: jc.Config.Broadcast.Ack, presence: jc.Config.Presence.Key,
-		readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}
+		acc: rtAccess{readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}}
 	if ch.joinRef == nil {
 		ch.joinRef = m.Ref
 	}
@@ -495,6 +639,11 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 	}
 	if err := ch.setToken(rc, jc.AccessToken); err != nil {
 		rc.replyError(m, err.Error())
+		return
+	}
+	if _, expired := ch.request(); expired {
+		// The connection's own bearer token, past its expiry.
+		rc.replyError(m, "the access token has expired: send a new one")
 		return
 	}
 	p := rc.e.lookup(rc.hub.ref)
@@ -514,7 +663,7 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 			rc.replyError(m, err.Error())
 			return
 		}
-		ch.readBroadcast, ch.writeBroadcast, ch.readPresence, ch.writePresence = a.readBroadcast, a.writeBroadcast, a.readPresence, a.writePresence
+		ch.acc, ch.checkedAt = a, time.Now()
 	}
 	var bound []map[string]any
 	for _, pc := range jc.Config.PostgresChanges {
@@ -544,7 +693,7 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 	if len(bound) > 0 {
 		ch.system("ok", evPostgresChanges, "Subscribed to PostgreSQL")
 	}
-	if ch.readPresence {
+	if acc, _ := ch.receives(); acc.readPresence {
 		rc.hub.presenceState(ch)
 	}
 }
