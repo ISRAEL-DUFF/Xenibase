@@ -63,7 +63,7 @@
   <tbody>
     <tr><td>Agent CA</td><td><code>Xenibase agent CA</code></td><td>Signs the two below</td><td>20 years</td><td>Once</td></tr>
     <tr><td>Agent</td><td><code>node:&lt;uuid&gt;</code>, SANs from the advertised host</td><td>TLS <strong>server</strong> only (<code>ExtKeyUsageServerAuth</code>)</td><td>2 years</td><td>At each registration (<x-ref path="internal/agentca/agentca.go" symbol="func (ca *CA) SignAgent("><code>SignAgent</code></x-ref>)</td></tr>
-    <tr><td>xenibase-server</td><td><code>xenibase-server</code></td><td>TLS <strong>client</strong> only</td><td>30 days</td><td>Once per process start (<x-ref path="internal/agentca/agentca.go" symbol="func (ca *CA) ServerClientCert() (tls.Certificate, error) {"><code>ServerClientCert</code></x-ref>)</td></tr>
+    <tr><td>xenibase-server</td><td><code>xenibase-server</code></td><td>TLS <strong>client</strong> only</td><td>30 days</td><td>At start, then again whenever 7 days or less are left (<x-ref path="internal/nodes/clientcert.go" symbol="func (c *clientCerts) get() (*tls.Certificate, error) {"><code>clientCerts.get</code></x-ref>)</td></tr>
   </tbody>
 </table></div>
 <p>The CSR's own subject is ignored. The server writes the node's UUID into the certificate, so an agent cannot ask for another node's name. <code>SignAgent</code> checks the CSR's signature, which proves the agent holds the key.</p>
@@ -75,8 +75,8 @@
 <div class="callout drift"><span class="callout-label">Spec and code differ</span>
   <p>The V1 spec (§3.3) says the server "issues each agent a client certificate at registration". Agents get server certificates. The client certificate is the server's, and every agent accepts any unexpired one the CA signed with that subject. There is no per-server identity: a copy of any server's client certificate commands every agent until it expires.</p>
 </div>
-<div class="callout risk"><span class="callout-label">Risk</span>
-  <p><strong>The server's client certificate expires 30 days after the process starts, and nothing renews it.</strong> <code>nodes.NewService</code> calls <code>ServerClientCert</code> once and keeps the result for the life of the process (<x-ref path="internal/nodes/nodes.go" symbol="cert, err := ca.ServerClientCert()"><code>NewService</code></x-ref>). An agent checks the expiry on every handshake. The overlay test above shows an expired certificate refused with "certificate has expired". So a <code>xenibase-server</code> that runs for more than 30 days without a restart loses every agent at once. Instance creation, start and stop, backups, restores, imports, etcd changes and pooler-host pushes all fail, and health checks mark every node unreachable. A restart cures it, which is why short-lived deployments never see it. Renewing the certificate in the background (for example through <code>tls.Config.GetClientCertificate</code>, a day before expiry) and alerting on its age would close it.</p>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>The server's client certificate used to be issued once, in <code>nodes.NewService</code>, and kept for the life of the process, so a <code>xenibase-server</code> that ran for more than 30 days without a restart lost every agent at once. Every handshake now asks <x-ref path="internal/nodes/clientcert.go" symbol="func (c *clientCerts) get() (*tls.Certificate, error) {"><code>clientCerts.get</code></x-ref> (through <code>tls.Config.GetClientCertificate</code>), which reissues it when 7 days or less are left and keeps the current one if that fails. The alerts loop asks too, so it renews on an idle server, and the <code>agent_client_cert</code> alert fires when under 3 days are left. <code>TestClientCertRenewed</code> reaches an agent with a certificate issued 40 days ago.</p>
 </div>
 
 <h2 id="nodes-agents--commands">What the control plane can make an agent do</h2>

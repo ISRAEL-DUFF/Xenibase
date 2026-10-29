@@ -50,10 +50,10 @@ func (s *Service) dial(n store.Node) (*Agent, error) {
 	}
 	pin := *n.AgentCertFp
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{s.clientCert},
-		RootCAs:      s.ca.Pool(),
-		ServerName:   host,
-		MinVersion:   tls.VersionTLS13,
+		GetClientCertificate: s.certs.getClientCertificate,
+		RootCAs:              s.ca.Pool(),
+		ServerName:           host,
+		MinVersion:           tls.VersionTLS13,
 		VerifyPeerCertificate: func(raw [][]byte, chains [][]*x509.Certificate) error {
 			if len(raw) == 0 || agentca.Fingerprint(raw[0]) != pin {
 				return errors.New("agent certificate does not match the pinned fingerprint")

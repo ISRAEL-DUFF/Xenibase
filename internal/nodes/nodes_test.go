@@ -124,6 +124,27 @@ func TestRegisterAndHealth(t *testing.T) {
 	}
 }
 
+// TestClientCertRenewed: a server whose client certificate has run out
+// (it was issued 40 days ago) still reaches its agents, because the
+// handshake gets a fresh one.
+func TestClientCertRenewed(t *testing.T) {
+	e := setup(t, "")
+	e.startAgent(t, e.token, "")
+	if err := nodes.SetClientCertIssuedAt(e.svc, time.Now().Add(-40*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := e.svc.ForNode(context.Background(), e.node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Health(context.Background()); err != nil {
+		t.Fatalf("health with an expired client certificate: %v", err)
+	}
+	if left := time.Until(e.svc.ClientCertExpiry()); left < 29*24*time.Hour {
+		t.Fatalf("client certificate expires in %s", left)
+	}
+}
+
 func TestPinnedFingerprint(t *testing.T) {
 	e := setup(t, "")
 	e.startAgent(t, e.token, "")

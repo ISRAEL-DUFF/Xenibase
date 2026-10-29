@@ -25,6 +25,10 @@ bundle share one version (spec §11.5).
   sign-in tokens and the etcd CA key, and still reported success. If you
   rotated before, run the rotation again with the old key in
   `XENIBASE_MASTER_KEY_PREVIOUS` (`docs/operations.md`, "Secrets").
+- **xenibase-server renews its certificate for agents.** It was issued at
+  start for 30 days and never renewed, so a server that ran longer lost
+  every agent. It is now reissued with 7 days left, and the new
+  `agent_client_cert` alert fires if under 3 days remain.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 

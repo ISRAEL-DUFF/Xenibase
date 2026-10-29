@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -40,12 +39,12 @@ var (
 
 // Service manages nodes and their agents.
 type Service struct {
-	db         *pgxpool.Pool
-	ca         *agentca.CA
-	clientCert tls.Certificate
-	bootstrap  string // install-time token, see Register
-	home       string // the home region (V3 §6.1)
-	log        *slog.Logger
+	db        *pgxpool.Pool
+	ca        *agentca.CA
+	certs     *clientCerts // xenibase-server's client certificate
+	bootstrap string       // install-time token, see Register
+	home      string       // the home region (V3 §6.1)
+	log       *slog.Logger
 
 	mu     sync.Mutex
 	health map[uuid.UUID]Status
@@ -80,11 +79,11 @@ func (s *Service) regionOr(r string) string {
 // lets the install bundle's own agent register the local node without an
 // operator; empty disables it.
 func NewService(db *pgxpool.Pool, ca *agentca.CA, bootstrapToken string, log *slog.Logger) (*Service, error) {
-	cert, err := ca.ServerClientCert()
+	certs, err := newClientCerts(ca.ServerClientCertAt, time.Now, log)
 	if err != nil {
 		return nil, err
 	}
-	return &Service{db: db, ca: ca, clientCert: cert, bootstrap: bootstrapToken, log: log, health: map[uuid.UUID]Status{}}, nil
+	return &Service{db: db, ca: ca, certs: certs, bootstrap: bootstrapToken, log: log, health: map[uuid.UUID]Status{}}, nil
 }
 
 // newToken returns a registration token, its hash, and its expiry (a day).

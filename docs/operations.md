@@ -20,6 +20,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Pooler host not ready | critical | An edge pooler host can't serve or is stale ([standby edge pooler](edge-poolers.md)) |
   | Pooler split brain | critical | Both edge pooler hosts say keepalived made them MASTER |
   | Isolation check | critical | The nightly tenant-isolation check found a problem |
+  | Agent client certificate | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
 
 - **Operations** shows every long action with its step log.
 - **Metrics** (per project and per node) charts size, connections, TPS,

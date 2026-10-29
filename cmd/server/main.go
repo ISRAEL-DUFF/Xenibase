@@ -522,9 +522,13 @@ func run() error {
 		bg.Add(1)
 		go func() { defer bg.Done(); isoChecks.Run(bgCtx) }()
 		consoleSvc = console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
-		alertSvc = alerts.New(pool, keyring, alerts.Config{
+		alertCfg := alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
-		}, log)
+		}
+		if nodeSvc != nil {
+			alertCfg.ClientCertExpiry = nodeSvc.ClientCertExpiry
+		}
+		alertSvc = alerts.New(pool, keyring, alertCfg, log)
 		bg.Add(1)
 		go func() { defer bg.Done(); alertSvc.Run(bgCtx) }()
 		collector := metrics.NewCollector(pool, projects, pm, nodeSvc, cfg.Insight.MetricsInterval, log)

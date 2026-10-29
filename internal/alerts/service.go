@@ -53,6 +53,10 @@ const (
 	nodeDiskThreshold      = 0.85
 	nodeUnreachableAfter   = 2 * time.Minute
 	projectSizeFreshWithin = 30 * time.Minute
+	clientCertWarnWithin   = 3 * 24 * time.Hour
+	// xenibase-server's client certificate for agents is close to expiry:
+	// renewing it keeps failing.
+	KindAgentClientCert = "agent_client_cert"
 )
 
 // Config configures the service.
@@ -69,6 +73,9 @@ type Config struct {
 	// WakerAddr returns the waker's address as the poolers reach it ("" when
 	// there is none); checked for "waker down" with the poolers' grace.
 	WakerAddr func() string
+	// ClientCertExpiry returns when xenibase-server's agent client
+	// certificate expires (renewing it first when due); nil skips the check.
+	ClientCertExpiry func() time.Time
 }
 
 // Service evaluates conditions and delivers notifications.
@@ -312,6 +319,7 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 
 	out = append(out, s.poolerConditions(ctx)...)
 	out = append(out, s.wakerConditions(ctx)...)
+	out = append(out, s.clientCertConditions()...)
 	hostConds, err := s.poolerHostConditions(ctx)
 	if err != nil {
 		errs = append(errs, err)
@@ -395,6 +403,23 @@ func (s *Service) wakerConditions(ctx context.Context) []condition {
 	return []condition{{KindWakerDown, SeverityCritical, "control_plane", "waker", "waker",
 		fmt.Sprintf("The waker at %s doesn't accept connections: paused Free projects can't resume when a client connects (they can still be resumed from the dashboard), and pausing is on hold.", addr),
 		map[string]any{"address": addr}}}
+}
+
+// clientCertConditions reports xenibase-server's agent client certificate
+// when less than clientCertWarnWithin is left: it is renewed with a week
+// left, so renewing has been failing. Once it expires no agent accepts the
+// server.
+func (s *Service) clientCertConditions() []condition {
+	if s.cfg.ClientCertExpiry == nil {
+		return nil
+	}
+	exp := s.cfg.ClientCertExpiry()
+	if time.Until(exp) > clientCertWarnWithin {
+		return nil
+	}
+	return []condition{{KindAgentClientCert, SeverityCritical, "control_plane", "agent_client_cert", "agent client certificate",
+		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until it restarts.", exp.UTC().Format(time.RFC3339)),
+		map[string]any{"expires_at": exp.UTC().Format(time.RFC3339)}}}
 }
 
 // poolerHostConditions reports pooler hosts (V3 §2.1) that answer but
