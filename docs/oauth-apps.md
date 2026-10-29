@@ -163,7 +163,10 @@ The token does what the user granted and never more than the user can
 do: it loses access when they leave the organisation, when their role is
 lowered, when the organisation is suspended, and when it expires.
 Destructive actions need the `admin` scope and a typed `confirm` field
-(see [the CLI guide](cli.md#tokens)). Rate limits are the usual 600
+(see [the CLI guide](cli.md#tokens)). It can't create tokens
+(`POST /api/v1/tokens` answers `403 token_not_allowed`): your app holds
+exactly what the user consented to, and nothing that outlives a
+disconnect. Rate limits are the usual 600
 requests a minute per token and 1,200 per organisation
 ([error codes](errors.md)).
 

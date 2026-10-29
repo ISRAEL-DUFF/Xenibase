@@ -66,6 +66,9 @@ see and can revoke every token scoped to their organisation
 (**Organisation → API tokens**). You get an email when a token is
 created and a week before it expires.
 
+A token made by another token (`xenibase tokens create` run with a
+token) is revoked with it, however that one is revoked.
+
 A **password reset** by email and a **two-factor reset** by the platform
 admin revoke every token you have, since they are how an account is taken
 back; so does changing your password, unless you untick **Also revoke my
@@ -79,7 +82,8 @@ sends you to Xenibase's consent page, where you choose the organisation,
 see and narrow the scopes it asks for, can restrict it to some projects,
 and pick how long the access lasts; approving sends you back to the app.
 What the app gets is an ordinary token with exactly that: it never does
-more than you can, and it stops when you leave the organisation.
+more than you can, it stops when you leave the organisation, and it can't
+create tokens of its own.
 
 Connected apps are listed under **Account → Connected apps** with the
 app's name, organisation, scopes and last use. **Disconnect** revokes the

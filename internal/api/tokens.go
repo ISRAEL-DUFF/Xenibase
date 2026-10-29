@@ -178,6 +178,12 @@ func (s *Server) checkTokenGrant(w http.ResponseWriter, r *http.Request, orgID u
 			s.internalError(w, "authorize", err)
 			return false
 		}
+		if row.OauthClientID != nil {
+			// A connected app holds exactly what the user consented to; a
+			// token of its own making would be one more to track down.
+			writeError(w, http.StatusForbidden, "token_not_allowed", "a connected app's token can't create tokens")
+			return false
+		}
 		if s.now().Add(expiresIn).After(row.ExpiresAt) {
 			writeError(w, http.StatusForbidden, "insufficient_scope", "a token can't create a token that outlives it")
 			return false
@@ -240,7 +246,8 @@ func (s *Server) CreateToken(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	p := tokens.CreateParams{UserID: sess.UserID, OrgID: req.OrgId, Name: req.Name, Scopes: scopes, ExpiresIn: expiryDays(req.ExpiresInDays), Via: "ui"}
 	if sess.Token != nil {
-		p.Via = "api"
+		// Revoking the token that made it revokes this one.
+		p.Via, p.ParentID = "api", &sess.Token.ID
 	}
 	if req.ProjectIds != nil {
 		p.Projects = *req.ProjectIds

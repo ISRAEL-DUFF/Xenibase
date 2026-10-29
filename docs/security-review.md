@@ -119,7 +119,7 @@ review found and fixed.
 | Org scoping in the data layer (V2 §2.6) | Every query on a tenant table filters by `org_id`, or says why it is system-wide (`-- tenant: system`) | `TestTenantQueriesAreScoped` (CI lint), `TestTwoOrgsSeeOnlyTheirOwn` |
 | Opaque names (V2 §10.2) | `p_<10 base32>` databases and roles; nothing descriptive written into Postgres; Xenibase's own sessions use generic `application_name`s | `TestOtherTenantsCannotDiscoverProjectNames` |
 | Quotas and resource limits (V2 §10.3–10.4) | Plans checked before every create; soft and hard storage locks; `temp_file_limit` and statement reaper on the shared tier; a soft lock applies to SQL jobs too | `TestQuotasAndDedicatedRequests`, `TestStorageLimitLocks`, `TestReaperEndsLongStatements`, `TestJobSQLCannotEscalate` |
-| API tokens (V2 §7.2) | Hashed; one org; scopes; project restriction; expiry; refused for disabled or unverified users and suspended orgs; a removed member's tokens fail the membership check | `TestAPITokens`, `TestRestrictedWriteTokenInCI`, `TestTokenRateLimit`, `TestDeviceLogin` |
+| API tokens (V2 §7.2) | Hashed; one org; scopes; project restriction; expiry; refused for disabled or unverified users and suspended orgs; a removed member's tokens fail the membership check; a token made by a token is revoked with it, and an OAuth app's token can't make tokens | `TestAPITokens`, `TestRestrictedWriteTokenInCI`, `TestTokenRateLimit`, `TestDeviceLogin` |
 | Outbound requests (V2 §9.1, §10.7) | `internal/outbound`, also for a project's own SMTP server and SMS provider `base_url`: https only (http to allow-listed hosts); every resolved address checked (IPv4-mapped, NAT64 and 6to4 addresses as the IPv4 address they embed); link-local and metadata never, even allow-listed; the request connects to the checked address, without proxies or redirects; per-org rate limits and counters; outbound off per org | `internal/outbound` tests, `TestWebhookDelivery`, `TestScheduledJobs` |
 | Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it; it can't invite, change roles or transfer ownership, so it grants nothing that outlives it, and nobody accepts an invitation they sent themselves | `TestSuspensionAndBreakGlass`, `TestBreakGlassCannotGrantMembership` |
 | Webhook trigger function (V2 §9.1) | `xenibase.webhook_enqueue()` is `SECURITY DEFINER` with `search_path = pg_catalog, pg_temp`, in a superuser-owned schema with all access revoked from `PUBLIC` (so tenants can't call it or attach it to triggers); a `xenibase` schema anything else owns is dropped first; the worker delivers an outbox row only for one of its own project's webhooks | `TestWebhookDelivery`, `TestWebhooksAcrossCopies` |
@@ -244,6 +244,13 @@ before.
   change too, unless the user keeps them), and creating a token or
   approving a device login from a session needs a recent step-up
   (`TestRecoveryRevokesTokens`, `TestTokensNeedARecentStepUp`).
+- **An app's tokens outlived disconnecting it** (high). An OAuth token with
+  `write` could create a token of its own, which had no app recorded, so
+  Disconnect and disabling the app left it working for up to a year.
+  Tokens now record the token that created them (`parent_id`), revoking
+  one revokes its descendants, and an app's token can't create tokens
+  (`TestRevokingATokenRevokesWhatItMade`, `TestTokenMadeByATokenGoesWithIt`,
+  `TestOAuthFlowOverHTTP`).
 - **Invitations were an unlimited mail relay with linked names** (medium).
   Organisation invitations are capped a day per organisation and per
   inviter, and user-chosen names in email are never links

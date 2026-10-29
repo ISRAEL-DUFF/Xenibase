@@ -68,6 +68,7 @@ type ApiToken struct {
 	ExpiryNotifiedAt *time.Time
 	CreatedAt        time.Time
 	OauthClientID    *uuid.UUID
+	ParentID         *uuid.UUID
 }
 
 type AuditLog struct {

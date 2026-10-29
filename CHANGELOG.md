@@ -39,6 +39,13 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Disconnecting an app no longer leaves tokens it made for itself.** An
+  OAuth app's token with `write` could create a token of its own, which
+  carried no record of the app, so **Disconnect** and disabling the app left
+  it working for up to a year. A token created by a token now records its
+  parent, and revoking a token, however it is revoked, revokes the tokens
+  it made and theirs; and an OAuth app's token can't create tokens at all
+  (`403 token_not_allowed`).
 - **Taking an account back now revokes its API tokens, and a session mints
   them only after a step-up.** A password reset, a password change and a
   two-factor reset ended sessions but left every API token working, though
@@ -695,6 +702,11 @@ bundle share one version (spec §11.5).
   the new `files_share_backups` alert.
 
 ### Upgrading
+- Migration 00088 adds `api_tokens.parent_id` and a trigger that revokes a
+  token's descendants with it. Tokens created by other tokens before the
+  upgrade have no recorded parent: to find any an OAuth app made for
+  itself, look under Organisation → API tokens for tokens created via
+  `api` by a user with a connected app, and revoke them.
 - A password reset, a two-factor reset, and (by default) a password change
   now revoke every API token the user has, including the CLI's and
   connected apps': CI jobs using a revoked token fail with

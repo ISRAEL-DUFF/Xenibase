@@ -200,6 +200,9 @@ type CreateParams struct {
 	// OAuthClientID is the third-party app the token is issued to (Via
 	// oauth), shown with the token as the app's name.
 	OAuthClientID *uuid.UUID
+	// ParentID is the token that created this one (Via api): revoking the
+	// parent revokes it.
+	ParentID *uuid.UUID
 }
 
 // Created is a new token: Secret is shown once.
@@ -248,6 +251,7 @@ func (s *Service) create(ctx context.Context, q *store.Queries, p CreateParams) 
 	row, err := q.InsertAPIToken(ctx, store.InsertAPITokenParams{
 		UserID: p.UserID, OrgID: p.OrgID, Name: name, TokenHash: Hash(secret), Prefix: secret[:displayLen],
 		Scopes: scopes, ProjectIds: p.Projects, ExpiresAt: s.cfg.Now().Add(exp), CreatedVia: via, OauthClientID: p.OAuthClientID,
+		ParentID: p.ParentID,
 	})
 	if err != nil {
 		return Created{}, err

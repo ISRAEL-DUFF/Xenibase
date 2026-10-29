@@ -330,6 +330,20 @@ func TestOAuthFlowOverHTTP(t *testing.T) {
 	if st, body := taskiem.bearer(access, "GET", "/api/v1/me"); st != 200 {
 		t.Fatalf("second token: %d %s", st, body)
 	}
+	// With write, it still can't make tokens of its own, which disconnecting
+	// the app would leave behind.
+	mint, _ := http.NewRequest("POST", ts.URL+"/api/v1/tokens", strings.NewReader(`{"name":"mine","org_id":"`+org.String()+`","scopes":["read"],"expires_in_days":7}`))
+	mint.Header.Set("Content-Type", "application/json")
+	mint.Header.Set("Authorization", "Bearer "+access)
+	if res, err := http.DefaultClient.Do(mint); err != nil {
+		t.Fatal(err)
+	} else {
+		raw, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusForbidden || !strings.Contains(string(raw), "token_not_allowed") {
+			t.Fatalf("an app's token creating a token: %d %s", res.StatusCode, raw)
+		}
+	}
 	if st, out := taskiem.post("/api/v1/oauth/revoke", map[string]string{"token": access, "client_id": clientID, "client_secret": "xbc_wrong"}, false); st != 401 || out["error"] != "invalid_client" {
 		t.Fatalf("revoke with the wrong secret: %d %v", st, out)
 	}
