@@ -31,6 +31,9 @@ var (
 	RunDemote  = (*Service).runDemote
 )
 
+// PlaceArchive exposes placeArchive.
+var PlaceArchive = (*Service).placeArchive
+
 // InsertUpgradeTarget exposes the major upgrade's target creation.
 func InsertUpgradeTarget(s *Service, ctx context.Context, src store.Instance, version int) (uuid.UUID, error) {
 	return s.insertUpgradeTarget(ctx, store.New(s.db), src, version)

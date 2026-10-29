@@ -140,6 +140,10 @@ bundle share one version (spec §11.5).
   point-in-time recovery (and billing) whatever the project paid for. The
   preflight and the upgrade now refuse a node without room for it, and the
   new instance keeps the project's window.
+- **A region move left the project's WAL archive in the old region.** The
+  new instance's archive was placed from the project before the cutover,
+  so it went to the old region's storage. It now goes by the region of the
+  new instance's node.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

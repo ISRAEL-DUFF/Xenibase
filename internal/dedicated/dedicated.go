@@ -323,16 +323,24 @@ func (s *Service) walgForBackup(ctx context.Context, b store.Backup, inst store.
 }
 
 // placeArchive records, for an instance that has never run, the target and
-// key its project's backups use now.
+// key its project's backups use now. It goes by the region of the
+// instance's node: a region move's target runs before the cutover moves
+// the project's region, and its archive belongs where it will serve.
 func (s *Service) placeArchive(ctx context.Context, inst store.Instance, p store.Project) (store.Instance, error) {
 	if inst.WalgTargetID != nil || inst.WalgPrefix == nil {
 		return inst, nil
 	}
+	q := store.New(s.db)
+	n, err := q.GetNode(ctx, inst.NodeID)
+	if err != nil {
+		return inst, err
+	}
+	// A data-residency project never leaves its region (checkMoveRegion).
+	p.Region = n.Region
 	targetID, keyID, err := s.secrets.ProjectWALG(ctx, p)
 	if err != nil {
 		return inst, jobs.Permanent(err)
 	}
-	q := store.New(s.db)
 	if err := q.SetInstanceWALG(ctx, store.SetInstanceWALGParams{ID: inst.ID, WalgPrefix: inst.WalgPrefix, WalgTargetID: &targetID, WalgKeyID: keyID}); err != nil {
 		return inst, err
 	}
