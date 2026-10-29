@@ -42,3 +42,22 @@ WHERE p.deleted_at IS NULL
   AND coalesce((SELECT max(o.finished_at) FROM operations o WHERE o.project_id = p.id), p.created_at)
       < now() - make_interval(secs => @stuck_seconds::float8)
 ORDER BY p.created_at;
+
+-- MoveNameInUse reports whether a queued or running operation owns the
+-- move objects named after it (logical.Name: its id's first 16 hex digits).
+-- name: MoveNameInUse :one
+-- tenant: system - the move sweep checks replication objects on every instance against the operations still to finish.
+SELECT EXISTS (SELECT 1 FROM operations
+  WHERE status IN ('queued', 'running') AND starts_with(replace(id::text, '-', ''), @id_prefix::text));
+
+-- MoveDatabaseBusy reports whether a queued or running operation is moving
+-- a project's database named db_name to or from the instance.
+-- name: MoveDatabaseBusy :one
+-- tenant: system - the move sweep checks replication objects on every instance against the operations still to finish.
+SELECT EXISTS (SELECT 1 FROM operations o JOIN projects p ON p.id = o.project_id
+  WHERE o.status IN ('queued', 'running') AND p.db_name = @db_name::text
+    AND @instance_id::text IN (o.params->>'source_instance', o.params->>'target_instance'));
+
+-- name: ProjectDatabaseNames :many
+-- tenant: system - the move sweep looks only at Xenibase's own databases on an instance.
+SELECT DISTINCT db_name FROM projects WHERE db_name = ANY(@names::text[]);

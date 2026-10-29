@@ -31,6 +31,12 @@ var (
 	RunDemote  = (*Service).runDemote
 )
 
+// The postgresql.conf of a dedicated instance and of a shared cluster.
+var (
+	Settings       = settings
+	SharedSettings = sharedSettings
+)
+
 // PlaceArchive exposes placeArchive.
 var PlaceArchive = (*Service).placeArchive
 

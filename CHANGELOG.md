@@ -144,6 +144,15 @@ bundle share one version (spec §11.5).
   new instance's archive was placed from the project before the cutover,
   so it went to the old region's storage. It now goes by the region of the
   new instance's node.
+- **Replication objects a move's cleanup could not remove stayed for
+  ever.** A slot with no consumer kept WAL until the disk filled (on a
+  shared cluster, for every tenant there), and the DDL block kept refusing
+  the tenant's schema changes. An hourly sweep now removes the
+  `xenibase_move_*` subscriptions, publications, inactive slots, logins
+  and DDL blocks in project databases that no queued or running operation
+  owns, and instances cap slot WAL (`max_slot_wal_keep_size`: a quarter of
+  a dedicated volume, 10 GB on an agent-run shared cluster) from their next
+  restart.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

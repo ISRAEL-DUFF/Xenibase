@@ -276,6 +276,9 @@ func run() error {
 		// Postgres minor releases, one instance at a time in the weekly
 		// maintenance window (V3 §2.4).
 		go func() { defer bg.Done(); backups.Dedicated.RunMaintenance(bgCtx, 5*time.Minute) }()
+		// Replication objects a move's cleanup could not remove.
+		bg.Add(1)
+		go func() { defer bg.Done(); backups.Dedicated.RunMoveSweep(bgCtx, time.Hour) }()
 		// Databases and roles of deleted shared projects that a failed
 		// rollback left behind.
 		bg.Add(1)

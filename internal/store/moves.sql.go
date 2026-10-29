@@ -160,6 +160,42 @@ func (q *Queries) MoveCutOver(ctx context.Context, arg MoveCutOverParams) error 
 	return err
 }
 
+const moveDatabaseBusy = `-- name: MoveDatabaseBusy :one
+SELECT EXISTS (SELECT 1 FROM operations o JOIN projects p ON p.id = o.project_id
+  WHERE o.status IN ('queued', 'running') AND p.db_name = $1::text
+    AND $2::text IN (o.params->>'source_instance', o.params->>'target_instance'))
+`
+
+type MoveDatabaseBusyParams struct {
+	DbName     string
+	InstanceID string
+}
+
+// MoveDatabaseBusy reports whether a queued or running operation is moving
+// a project's database named db_name to or from the instance.
+// tenant: system - the move sweep checks replication objects on every instance against the operations still to finish.
+func (q *Queries) MoveDatabaseBusy(ctx context.Context, arg MoveDatabaseBusyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, moveDatabaseBusy, arg.DbName, arg.InstanceID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const moveNameInUse = `-- name: MoveNameInUse :one
+SELECT EXISTS (SELECT 1 FROM operations
+  WHERE status IN ('queued', 'running') AND starts_with(replace(id::text, '-', ''), $1::text))
+`
+
+// MoveNameInUse reports whether a queued or running operation owns the
+// move objects named after it (logical.Name: its id's first 16 hex digits).
+// tenant: system - the move sweep checks replication objects on every instance against the operations still to finish.
+func (q *Queries) MoveNameInUse(ctx context.Context, idPrefix string) (bool, error) {
+	row := q.db.QueryRow(ctx, moveNameInUse, idPrefix)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const movePhase = `-- name: MovePhase :exec
 UPDATE moves SET phase = $1, tables_total = coalesce($2, tables_total),
   tables_ready = coalesce($3, tables_ready), lag_bytes = coalesce($4, lag_bytes),
@@ -188,6 +224,31 @@ func (q *Queries) MovePhase(ctx context.Context, arg MovePhaseParams) error {
 		arg.OperationID,
 	)
 	return err
+}
+
+const projectDatabaseNames = `-- name: ProjectDatabaseNames :many
+SELECT DISTINCT db_name FROM projects WHERE db_name = ANY($1::text[])
+`
+
+// tenant: system - the move sweep looks only at Xenibase's own databases on an instance.
+func (q *Queries) ProjectDatabaseNames(ctx context.Context, names []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, projectDatabaseNames, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var db_name string
+		if err := rows.Scan(&db_name); err != nil {
+			return nil, err
+		}
+		items = append(items, db_name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const startMove = `-- name: StartMove :one

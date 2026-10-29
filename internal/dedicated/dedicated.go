@@ -152,11 +152,12 @@ func ProfileByName(name string) (provision.Profile, bool) {
 }
 
 // settings is postgresql.conf for a profile (spec §4.2: its own tuning)
-// with maxConnections connections.
-func settings(p provision.Profile, maxConnections int) map[string]string {
+// with maxConnections connections, on a volume of volumeGB.
+func settings(p provision.Profile, maxConnections, volumeGB int) map[string]string {
 	mb := func(n int) string { return strconv.Itoa(n) + "MB" }
 	return map[string]string{
 		"max_connections":            strconv.Itoa(maxConnections),
+		"max_slot_wal_keep_size":     slotWALCap(volumeGB),
 		"shared_buffers":             mb(p.MemoryMB / 4),
 		"effective_cache_size":       mb(p.MemoryMB * 3 / 4),
 		"maintenance_work_mem":       mb(min(max(p.MemoryMB/16, 64), 2048)),
@@ -167,6 +168,15 @@ func settings(p provision.Profile, maxConnections int) map[string]string {
 		"shared_preload_libraries":   "pg_stat_statements",
 		"log_min_duration_statement": "5s",
 	}
+}
+
+// slotWALCap is the most WAL a replication slot may hold back on a volume
+// of volumeGB: a quarter of it, at least 1 GB. A slot whose consumer has
+// gone (a move's that its cleanup missed, a standby that never returns)
+// is invalidated at that point instead of filling the disk; a standby
+// further behind than that has to be rebuilt.
+func slotWALCap(volumeGB int) string {
+	return strconv.Itoa(max(volumeGB/4, 1)*1024) + "MB"
 }
 
 // Validate implements provision.InstanceManager.
@@ -509,7 +519,7 @@ func (s *Service) instanceSpec(ctx context.Context, inst store.Instance) (agenta
 	prof := profileOf(inst)
 	return agentapi.InstanceSpec{
 		ID: inst.ID.String(), Kind: agentapi.InstanceDedicated, CPUs: prof.CPUs, MemoryMB: prof.MemoryMB,
-		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, int(inst.MaxConnections)), WALG: &w,
+		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, int(inst.MaxConnections), SizeOf(inst).DiskGB), WALG: &w,
 		PGVersion: int(inst.PgVersion),
 	}, nil
 }

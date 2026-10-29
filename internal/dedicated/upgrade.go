@@ -223,7 +223,7 @@ func (s *Service) scratchTrial(ctx context.Context, p store.Project, src *pgx.Co
 	prof := provision.Profile{Name: name, CPUs: 0.5, MemoryMB: int(mem)}
 	res, err := agent.CreateInstance(ctx, agentapi.InstanceSpec{
 		ID: id.String(), Kind: agentapi.InstanceDedicated, CPUs: prof.CPUs, MemoryMB: prof.MemoryMB,
-		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, provision.MaxConnectionsFor(prof.MemoryMB)), PGVersion: version,
+		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, provision.MaxConnectionsFor(prof.MemoryMB), int(vol)), PGVersion: version,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start a Postgres %d instance to test on: %w", version, err)
