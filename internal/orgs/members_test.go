@@ -22,7 +22,7 @@ func projectIn(t *testing.T, db *pgxpool.Pool, org, inst uuid.UUID, name string,
 	t.Helper()
 	ctx := context.Background()
 	id := uuid.New()
-	p, err := store.New(db).InsertProject(ctx, store.InsertProjectParams{
+	_, err := store.New(db).InsertProject(ctx, store.InsertProjectParams{
 		Region: "eu-central", ID: id, OrgID: org, Name: name, Slug: name, DbName: "p_" + name, OwnerRole: "p_" + name + "_owner",
 		ScramVerifier: "x", Tier: "shared", InstanceID: inst, Settings: []byte(`{}`),
 	})
@@ -30,7 +30,7 @@ func projectIn(t *testing.T, db *pgxpool.Pool, org, inst uuid.UUID, name string,
 		t.Fatal(err)
 	}
 	exec(t, db, `UPDATE projects SET status = 'active', parent_project_id = $2, branch_source = CASE WHEN $2::uuid IS NULL THEN NULL ELSE 'live' END WHERE id = $1`, id, parent)
-	p, err = store.New(db).GetProject(ctx, id)
+	p, err := store.New(db).GetProject(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}

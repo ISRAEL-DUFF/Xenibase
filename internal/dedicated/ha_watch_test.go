@@ -89,7 +89,7 @@ type patroniStub struct {
 
 func newPatroniStub(t *testing.T) *patroniStub {
 	p := &patroniStub{}
-	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.down {

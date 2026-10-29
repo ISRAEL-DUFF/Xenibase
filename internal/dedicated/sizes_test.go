@@ -109,7 +109,7 @@ func TestUpgradeTargetChecksRoomAndKeepsPITRDays(t *testing.T) {
 	src.PitrDays = 30
 
 	setCapacity(2, 4) // the source's 1.5 CPU and 3 GB leave no room for another
-	if _, err := dedicated.InsertUpgradeTarget(e.svc, ctx, src, 18); !errors.Is(err, provision.ErrConflict) {
+	if _, err := dedicated.InsertUpgradeTarget(ctx, e.svc, src, 18); !errors.Is(err, provision.ErrConflict) {
 		t.Fatalf("an upgrade target on a full node: %v, want a conflict", err)
 	}
 	var count int
@@ -118,7 +118,7 @@ func TestUpgradeTargetChecksRoomAndKeepsPITRDays(t *testing.T) {
 	}
 
 	setCapacity(4, 8)
-	id, err := dedicated.InsertUpgradeTarget(e.svc, ctx, src, 18)
+	id, err := dedicated.InsertUpgradeTarget(ctx, e.svc, src, 18)
 	if err != nil {
 		t.Fatalf("an upgrade target on a node with room: %v", err)
 	}

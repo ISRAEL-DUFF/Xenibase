@@ -95,7 +95,7 @@ func TestDeleteExpiresEarlierBackups(t *testing.T) {
 	nightly, copied, archive, v1 := backup("logical", &platform, "succeeded"), backup("logical", &platform, "copied"), backup("archive", &platform, "succeeded"), backup("logical", nil, "succeeded")
 	inOwnBucket, failed := backup("logical", &own, "succeeded"), backup("logical", &platform, "failed")
 	finalExpiry := time.Now().Add(29 * 24 * time.Hour).Truncate(time.Second)
-	h.s.FinalBackup = func(ctx context.Context, p store.Project, log *jobs.StepLogger) error {
+	h.s.FinalBackup = func(ctx context.Context, p store.Project, _ *jobs.StepLogger) error {
 		_, err := h.db.Exec(ctx, `INSERT INTO backups (project_id, kind, object_key, started_at, finished_at, status, storage_target_id, expires_at)
 			VALUES ($1, 'final', 'final', now(), now(), 'succeeded', $2, $3)`, p.ID, platform, finalExpiry)
 		return err
