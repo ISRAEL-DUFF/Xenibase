@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/auditlog"
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/crypto"
@@ -265,7 +266,7 @@ func newMatrixWorld(t *testing.T) *matrixWorld {
 	w.invitation = uuid.New()
 
 	// The guard in front of a server that answers 501 everywhere.
-	s := &Server{log: log, db: pool, auth: svc}
+	s := &Server{log: log, db: pool, auth: svc, audit: auditlog.New(pool, log, auditlog.Config{})}
 	r := chi.NewRouter()
 	r.Use(s.guard)
 	gen.HandlerWithOptions(stubServer{}, gen.ChiServerOptions{BaseRouter: r})

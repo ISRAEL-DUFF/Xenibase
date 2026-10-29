@@ -18,6 +18,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/alerts"
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/auditlog"
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/billing"
@@ -59,6 +60,7 @@ type Server struct {
 	exporting map[uuid.UUID]int
 	log       *slog.Logger
 	db        DB
+	audit     *auditlog.Writer
 	streamer  *jobs.Streamer
 	projects  *provision.Service
 	dev       bool
@@ -122,6 +124,10 @@ type Options struct {
 	DevEndpoints bool
 	// StreamCtx ends open SSE streams when done; nil means never.
 	StreamCtx context.Context
+	// Audit writes audit rows; the caller runs it (Run, then Close at
+	// shutdown). Nil means one of NewHandler's own, retried until
+	// StreamCtx ends.
+	Audit *auditlog.Writer
 	// Projects runs provisioning; nil disables the projects endpoints.
 	Projects *provision.Service
 	// UI is the web UI build output; UIIndex names its entry document.
@@ -224,12 +230,17 @@ func NewHandler(opts Options) http.Handler {
 		orgRate = DefaultOrgTokenRate
 	}
 	s.tokenLimit, s.orgTokenLimit = auth.NewLimiter(rate, time.Minute), auth.NewLimiter(orgRate, time.Minute)
+	streamCtx := opts.StreamCtx
+	if streamCtx == nil {
+		streamCtx = context.Background()
+	}
 	if opts.DB != nil && opts.Notifier != nil {
-		streamCtx := opts.StreamCtx
-		if streamCtx == nil {
-			streamCtx = context.Background()
-		}
 		s.streamer = jobs.NewStreamer(streamCtx, opts.DB, opts.Notifier, opts.Logger)
+	}
+	s.audit = opts.Audit
+	if s.audit == nil && opts.DB != nil {
+		s.audit = auditlog.New(opts.DB, opts.Logger, auditlog.Config{})
+		go s.audit.Run(streamCtx)
 	}
 
 	r := chi.NewRouter()

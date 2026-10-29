@@ -560,12 +560,10 @@ func (s *Server) orgEvent(r *http.Request, org uuid.UUID, action string, detail 
 	b, _ := json.Marshal(detail)
 	target := "org"
 	id := org.String()
-	if err := store.New(s.db).InsertAudit(r.Context(), store.InsertAuditParams{
+	s.audit.Write(r.Context(), store.InsertAuditParams{
 		UserID: &sess.UserID, Action: action, Detail: b, Ip: ipFrom(r.Context()), Outcome: "success",
 		ActorKind: "session", OrgID: &org, TargetType: &target, TargetID: &id,
-	}); err != nil {
-		s.log.Error("write org audit", "action", action, "err", err)
-	}
+	})
 }
 
 // AdminSetOrgCluster implements POST /api/v1/admin/orgs/{org}/cluster.

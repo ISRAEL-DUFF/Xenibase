@@ -137,6 +137,26 @@ platform (Platform audit).
 Projects created before V2 are in the platform admin's personal
 organisation, unchanged: same URLs, passwords, and backups.
 
+## The audit log
+
+Every mutating API request, and the downloads of backups and backup keys,
+writes an audit row when the handler returns. The row is written after the
+change, not in the same transaction, so what is guaranteed is this:
+
+- If the metadata database refuses the insert (a failover, a full disk), the
+  row is kept in xenibase-server's memory and retried every 5 seconds, in
+  order, with the time of the request, until it is written.
+- Up to 10,000 rows wait. Past that the oldest is given up on, and a row
+  given up on (also any still waiting when the server stops) is logged at
+  error level as `audit row not written` with the whole row as JSON, so it
+  can be put back by hand.
+- `/metrics` counts it: `xenibase_audit_write_failures_total`,
+  `xenibase_audit_pending`, `xenibase_audit_retried_total` and
+  `xenibase_audit_dropped_total`. These are the process's own and are served
+  while the database is down. Alert on `xenibase_audit_dropped_total > 0`,
+  and on `xenibase_audit_pending > 0` for more than a few minutes.
+- A crash of xenibase-server (or the machine) loses the rows still waiting.
+
 ## Quotas, storage locks and usage
 
 Each organisation has a plan (Organisations → the org → Plan), with

@@ -31,6 +31,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/alerts"
 	"github.com/israel-duff/xenibase/internal/api"
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/auditlog"
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/billing"
@@ -592,9 +593,13 @@ func run() error {
 	if certs != nil {
 		tlsStatus = func() gen.TlsStatus { return toAPITLS(certs.Status()) }
 	}
+	auditWriter := auditlog.New(pool, log, auditlog.Config{})
+	bg.Add(1)
+	go func() { defer bg.Done(); auditWriter.Run(bgCtx) }()
 	handler := api.NewHandler(api.Options{
 		Logger:       log,
 		DB:           pool,
+		Audit:        auditWriter,
 		Notifier:     notifier,
 		DevEndpoints: cfg.DevEndpoints,
 		StreamCtx:    bgCtx,
@@ -682,6 +687,10 @@ func run() error {
 	}
 	stopBG()
 	bg.Wait()
+	// Requests have drained: write the audit rows still waiting for a retry.
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 10*time.Second)
+	auditWriter.Close(closeCtx)
+	cancelClose()
 
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
