@@ -144,7 +144,8 @@ versions** (`GET /api/v1/admin/pg-versions`, `PATCH …/{major}`):
 - **Deprecating** needs a retirement date at least **180 days** ahead.
   Owners and admins of every organisation with a project on that major
   are emailed at once, with their projects and the link to each one's
-  upgrade, and again at 90, 30 and 7 days before the date (once per step).
+  upgrade, and again at 90, 30 and 7 days before the date (once per step;
+  a mail that fails is sent again at the next hourly check).
   Those projects show a banner on their overview and Compute pages.
 - **Retired:** a deprecated major is retired once its date passes (or
   when an admin retires it, which is refused while projects still run on

@@ -19,6 +19,10 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A Postgres version notice whose email failed was never resent:** its
+  record was written before the send. It is now kept only when the mail
+  goes, still once across servers, so the next hourly check sends it
+  again; the deprecation notice is retried too, until the first reminder.
 - **The instance image did not pin the Postgres minor release:** it was
   built from the moving `postgres:<major>` tag, so nodes ran whatever
   release they last pulled, and a rebuild left the previous release
