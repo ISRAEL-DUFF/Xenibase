@@ -532,6 +532,30 @@ func (s *Server) RotateSigningKey(w http.ResponseWriter, r *http.Request, id gen
 	writeJSON(w, http.StatusOK, signingKeysOut(ks))
 }
 
+// RevokeSigningKey implements POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke.
+func (s *Server) RevokeSigningKey(w http.ResponseWriter, r *http.Request, id gen.ProjectID, keyID openapi_types.UUID) {
+	if !s.requireServices(w) {
+		return
+	}
+	a := auditFrom(r.Context())
+	a.target("project", id.String())
+	a.set("key_id", keyID.String())
+	k, err := s.services.RevokeSigningKey(r.Context(), id, keyID)
+	if err != nil {
+		s.servicesError(w, "revoke signing key", err)
+		return
+	}
+	if k != nil {
+		a.set("new_kid", k.Kid)
+	}
+	ks, err := s.services.SigningKeys(r.Context(), id)
+	if err != nil {
+		s.servicesError(w, "signing keys", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, signingKeysOut(ks))
+}
+
 // ListAuthUsers implements GET /api/v1/projects/{id}/auth/users.
 func (s *Server) ListAuthUsers(w http.ResponseWriter, r *http.Request, id gen.ProjectID, params gen.ListAuthUsersParams) {
 	if !s.requireServices(w) {

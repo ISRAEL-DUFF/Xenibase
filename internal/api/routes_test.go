@@ -443,6 +443,7 @@ var specMatrix = map[authz.Action][]string{
 		// V4 §4 auth settings, templates, SMTP and signing keys
 		"PATCH /api/v1/projects/{id}/auth/config", "POST /api/v1/projects/{id}/auth/smtp/test",
 		"POST /api/v1/projects/{id}/auth/templates/preview", "POST /api/v1/projects/{id}/auth/signing-keys/rotate",
+		"POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke",
 		// V4 §9 the Supabase migration helper
 		"POST /api/v1/projects/{id}/migrate/supabase",
 	},

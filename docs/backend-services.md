@@ -579,7 +579,10 @@ send) or `"captcha_token"` (`400 captcha_failed` otherwise).
 - **Your servers verify tokens with the JWKS endpoint**; there is no shared
   secret. Rotating the key (Authentication → Signing keys, or
   `xenibase auth rotate-key`) signs new tokens with a new key and keeps the
-  old one in the JWKS for a day, so nobody is signed out.
+  old one in the JWKS for a day, so nobody is signed out. If a key leaked,
+  **Revoke** it there (`POST …/auth/signing-keys/{keyId}/revoke`): it leaves
+  the JWKS and the edges at once, so tokens it signed stop working within
+  seconds; revoking the active key makes a new one and signs everyone out.
 - Refresh tokens rotate on every use. **Presenting a refresh token that was
   already used ends its whole session** (`400 refresh_token_reused`): a
   stolen token is good for one refresh at most, and only until the

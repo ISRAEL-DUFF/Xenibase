@@ -6,6 +6,14 @@ bundle share one version (spec §11.5).
 ## Unreleased
 
 ### Added
+- **A leaked project signing key can be revoked at once.** Rotation was the
+  only control, and it keeps the old key verifying for a day, so tokens
+  forged with a leaked key (after an edge compromise, say) stayed valid
+  that long. `POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke`
+  (project admins), or **Revoke** under Authentication → Signing keys,
+  retires the key now: it leaves the JWKS and the edges with their next
+  feed read, and every token it signed is refused. Revoking the active key
+  makes a new one, which signs every user out.
 - **Connections grow with a dedicated instance's memory.** `max_connections`
   was 100 for every size; it is now 50 per GB, from 100 (2 GB or less) to 500
   (10 GB or more): 200 on a 4 GB instance, 400 on 8 GB. A dedicated project's

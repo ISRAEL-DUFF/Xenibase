@@ -332,7 +332,7 @@ cookie attributes, don't: the edge sets no cookies).
 | 3.7.1 | Re-authentication | Removing a factor needs aal2, and so do enrolling another, verifying a factor enrolled before the first was verified, and changing the password or email, once the user has a verified factor; projects can require aal2 for data and realtime (`mfa_required`) | `TestAuthPhoneOAuthMFA`, `TestAAL1CannotChangeWhatProvesTheUser` |
 | 6.2.1–6.2.5 | Approved algorithms | AES-256-GCM for stored secrets (OAuth and SMTP credentials, hook and captcha secrets) under the platform master key with key ids; ES256 signing keys per project; HMAC-SHA256 signed URLs | `TestRoundTrip`, `TestRotation`, `TestMasterKeyRotation`, `TestAuthPhoneOAuthMFA` |
 | 6.3.1 | Random values | `crypto/rand` for codes, tokens, salts and keys | code review |
-| 6.4.1, 6.4.2 | Key management | Signing keys rotate (the old one verifies until its tokens expire); the master key never leaves xenibase-server; edges get only each project's own signing key | `TestAuthCore` (rotation) |
+| 6.4.1, 6.4.2 | Key management | Signing keys rotate (the old one verifies until its tokens expire) and a leaked one can be revoked at once; the master key never leaves xenibase-server; edges get only each project's own signing key | `TestAuthCore` (rotation), `TestRevokeSigningKeyWithdrawsItAtOnce` |
 | 11.1.2–11.1.4 | Business limits | Request, MAU and SMS caps per plan, a daily SMS cap and country allow-list per project, spend caps | `TestPlanLimitsBackendServices`, `TestAuthPhoneOAuthMFA`, `TestSpendCapBackendServices` |
 
 ### Found and fixed
