@@ -243,3 +243,11 @@ FROM job_runs r JOIN scheduled_jobs j ON j.id = r.job_id JOIN projects p ON p.id
 JOIN organizations o ON o.id = p.org_id
 WHERE r.scheduled_for >= @from_ts AND r.scheduled_for < @to_ts AND r.status IN ('succeeded', 'failed', 'timed_out')
 GROUP BY 1, 2, 3, 4, 5;
+
+-- name: CountOrgWebhookAttempts :one
+-- The organisation's webhook delivery attempts in the last @seconds: what
+-- a server that takes over delivery counts as already spent of the rate.
+SELECT count(*) FROM webhook_deliveries d
+JOIN webhooks w ON w.id = d.webhook_id
+JOIN projects p ON p.id = w.project_id
+WHERE p.org_id = @org_id AND d.created_at > now() - make_interval(secs => @seconds::float8);

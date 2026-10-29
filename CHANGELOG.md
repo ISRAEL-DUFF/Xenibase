@@ -39,6 +39,12 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A new delivering server no longer starts with a full webhook rate.**
+  The per-organisation delivery rate was a token bucket in the delivering
+  server's memory, so a server that took over after a failover or a restart
+  gave every organisation a fresh minute's allowance on top of what had just
+  been sent. A new bucket now starts with the last minute's attempts from
+  the delivery log already spent.
 - **Scheduled jobs keep to their time across daylight saving.** A job's
   next run was found by stepping through wall-clock hours, which went wrong
   at both changes. When the clocks went back, a once-a-day job in the

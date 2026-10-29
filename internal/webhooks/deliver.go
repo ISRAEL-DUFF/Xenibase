@@ -372,7 +372,13 @@ func (s *Service) deliverWebhook(ctx context.Context, conn *pgx.Conn, p store.Pr
 			return nil // waiting for its retry
 		}
 		// Over the organisation's rate, events queue (V2 §10.3).
-		if !s.out.Take(p.OrgID, "webhook", limit, time.Minute) {
+		ok, err := s.out.TakeFrom(p.OrgID, "webhook", limit, time.Minute, func() (int64, error) {
+			return q.CountOrgWebhookAttempts(ctx, store.CountOrgWebhookAttemptsParams{OrgID: p.OrgID, Seconds: time.Minute.Seconds()})
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return errQueued
 		}
 		eventID, body, err := s.body(ctx, conn, p, w, r, pks)

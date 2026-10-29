@@ -98,6 +98,27 @@ func (q *Queries) CountOrgJobs(ctx context.Context, orgID uuid.UUID) (int32, err
 	return column_1, err
 }
 
+const countOrgWebhookAttempts = `-- name: CountOrgWebhookAttempts :one
+SELECT count(*) FROM webhook_deliveries d
+JOIN webhooks w ON w.id = d.webhook_id
+JOIN projects p ON p.id = w.project_id
+WHERE p.org_id = $1 AND d.created_at > now() - make_interval(secs => $2::float8)
+`
+
+type CountOrgWebhookAttemptsParams struct {
+	OrgID   uuid.UUID
+	Seconds float64
+}
+
+// The organisation's webhook delivery attempts in the last @seconds: what
+// a server that takes over delivery counts as already spent of the rate.
+func (q *Queries) CountOrgWebhookAttempts(ctx context.Context, arg CountOrgWebhookAttemptsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOrgWebhookAttempts, arg.OrgID, arg.Seconds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countOutbound = `-- name: CountOutbound :exec
 INSERT INTO outbound_counters (org_id, host, day, requests, failures) VALUES ($1, $2, $3::date, $4, $5)
 ON CONFLICT (org_id, host, day) DO UPDATE

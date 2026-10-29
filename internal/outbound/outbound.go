@@ -593,6 +593,32 @@ func (s *Service) Take(orgID uuid.UUID, kind string, perPeriod int64, period tim
 	return true
 }
 
+// TakeFrom is Take for a bucket that may already be part spent: when this
+// process has none for the organisation yet, used reports how many of the
+// period's tokens went before (by another server, or before a restart), so
+// a server that takes over the work doesn't start with a full allowance.
+func (s *Service) TakeFrom(orgID uuid.UUID, kind string, perPeriod int64, period time.Duration, used func() (int64, error)) (bool, error) {
+	if perPeriod <= 0 {
+		return true, nil
+	}
+	key := kind + ":" + orgID.String()
+	s.mu.Lock()
+	_, ok := s.buckets[key]
+	s.mu.Unlock()
+	if !ok {
+		n, err := used()
+		if err != nil {
+			return false, err
+		}
+		s.mu.Lock()
+		if _, ok := s.buckets[key]; !ok {
+			s.buckets[key] = &bucket{tokens: float64(max(perPeriod-n, 0)), at: s.cfg.Now()}
+		}
+		s.mu.Unlock()
+	}
+	return s.Take(orgID, kind, perPeriod, period), nil
+}
+
 // Sweep drops counters older than 30 days.
 func (s *Service) Sweep(ctx context.Context) error {
 	_, err := store.New(s.db).SweepOutboundCounters(ctx, Day(s.cfg.Now().AddDate(0, 0, -30)))

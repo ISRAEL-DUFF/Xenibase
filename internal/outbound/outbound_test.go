@@ -182,3 +182,28 @@ func TestTake(t *testing.T) {
 		t.Fatal("unlimited refused")
 	}
 }
+
+// TestTakeFromStartsPartSpent: a server that takes over delivery (or
+// restarts) counts what was sent in the period before it, rather than
+// starting each organisation with a full allowance.
+func TestTakeFromStartsPartSpent(t *testing.T) {
+	now := time.Now()
+	s := New(nil, Config{Now: func() time.Time { return now }}, nil)
+	org := uuid.New()
+	asked := 0
+	used := func() (int64, error) { asked++; return 58, nil }
+	for i := range 2 {
+		if ok, err := s.TakeFrom(org, "webhook", 60, time.Minute, used); err != nil || !ok {
+			t.Fatalf("token %d of the 2 left: %v %v", i+1, ok, err)
+		}
+	}
+	if ok, _ := s.TakeFrom(org, "webhook", 60, time.Minute, used); ok {
+		t.Fatal("a third token, past the 58 already sent")
+	}
+	if asked != 1 {
+		t.Fatalf("the earlier use was read %d times, want once per bucket", asked)
+	}
+	if _, err := s.TakeFrom(uuid.New(), "webhook", 60, time.Minute, func() (int64, error) { return 0, errors.New("down") }); err == nil {
+		t.Fatal("a failed count was taken as nothing spent")
+	}
+}
