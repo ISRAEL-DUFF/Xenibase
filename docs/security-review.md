@@ -198,7 +198,8 @@ a test that failed before.
   (`pooler_allowlist_off`).
 - **Anyone who reached the waker, or a paused project's hostname, could
   wake it** (low). The waker doesn't authenticate; it now accepts only
-  loopback, the poolers' addresses and `XENIBASE_WAKER_ALLOW`. The edge
+  loopback, its own machine's addresses, the poolers' addresses and
+  `XENIBASE_WAKER_ALLOW`. The edge
   wakes a paused project only for a request with one of its live API keys
   (`project_paused` otherwise).
 - **Allowlists cover the poolers only** (low, documented). Instances accept

@@ -67,7 +67,7 @@ on to the client; PgBouncer would hold the client on `57P03`. The poolers
 have already authenticated the client against the project's credentials,
 so the waker doesn't authenticate again. It must therefore only be
 reachable from the poolers, and it checks: it accepts connections only from
-loopback, its local poolers' addresses (`XENIBASE_POOLER_SESSION_ADDR` and
+loopback, the server machine's own addresses, its local poolers' addresses (`XENIBASE_POOLER_SESSION_ADDR` and
 `_POOLED_ADDR`, names resolved), the pooler hosts' private addresses, and
 any networks in `XENIBASE_WAKER_ALLOW`. Anything else is refused with
 `28000` before its startup message is read, and wakes nothing.

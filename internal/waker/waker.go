@@ -189,8 +189,10 @@ func remoteAddr(c net.Conn) netip.Addr {
 	return netip.Addr{}
 }
 
-// AllowList admits loopback, the addresses addrs returns (the poolers'),
-// cached for a few seconds, and nets (XENIBASE_WAKER_ALLOW).
+// AllowList admits loopback, this machine's own addresses (xenibase-server
+// probes the waker, and in the compose bundle reaches it at its own
+// network address), the addresses addrs returns (the poolers'), cached for
+// a few seconds, and nets (XENIBASE_WAKER_ALLOW).
 func AllowList(addrs func() []netip.Addr, nets []netip.Prefix) func(netip.Addr) bool {
 	var mu sync.Mutex
 	var cached map[netip.Addr]bool
@@ -205,20 +207,39 @@ func AllowList(addrs func() []netip.Addr, nets []netip.Prefix) func(netip.Addr) 
 				return true
 			}
 		}
-		if addrs == nil {
-			return false
-		}
 		mu.Lock()
 		defer mu.Unlock()
 		if cached == nil || time.Since(at) > 10*time.Second || !cached[a] && time.Since(at) > time.Second {
 			cached = map[netip.Addr]bool{}
-			for _, p := range addrs() {
-				cached[p.Unmap()] = true
+			for _, p := range localAddrs() {
+				cached[p] = true
+			}
+			if addrs != nil {
+				for _, p := range addrs() {
+					cached[p.Unmap()] = true
+				}
 			}
 			at = time.Now()
 		}
 		return cached[a]
 	}
+}
+
+// localAddrs are the addresses of this machine's network interfaces.
+func localAddrs() []netip.Addr {
+	ifs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	for _, a := range ifs {
+		if n, ok := a.(*net.IPNet); ok {
+			if ip, ok := netip.AddrFromSlice(n.IP); ok {
+				out = append(out, ip.Unmap())
+			}
+		}
+	}
+	return out
 }
 
 // Code is the SQLSTATE for st. PgBouncer treats 57P03 (cannot_connect_now)

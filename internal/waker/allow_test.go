@@ -69,3 +69,28 @@ func TestAllowList(t *testing.T) {
 		t.Errorf("the pooler addresses were listed %d times for one burst", calls)
 	}
 }
+
+// TestAllowListAdmitsThisMachine: xenibase-server's alert probe reaches the
+// waker from the server's own address, which in the compose bundle is a
+// network address, not loopback.
+func TestAllowListAdmitsThisMachine(t *testing.T) {
+	ifs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var own netip.Addr
+	for _, a := range ifs {
+		if n, ok := a.(*net.IPNet); ok {
+			if ip, ok := netip.AddrFromSlice(n.IP); ok && !ip.Unmap().IsLoopback() {
+				own = ip.Unmap()
+				break
+			}
+		}
+	}
+	if !own.IsValid() {
+		t.Skip("no non-loopback interface address")
+	}
+	if !waker.AllowList(nil, nil)(own) {
+		t.Errorf("%s, this machine's own address, was refused", own)
+	}
+}
