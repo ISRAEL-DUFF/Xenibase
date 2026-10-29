@@ -278,6 +278,12 @@ func (s *Service) Signup(ctx context.Context, p SignupParams) error {
 	if err := s.checkTermsVersion(ctx, p.TermsVersion); err != nil {
 		return err
 	}
+	// Hashed whether or not the address has an account, so the answer takes
+	// as long either way: both then send one email.
+	hash, err := HashPassword(p.Password)
+	if err != nil {
+		return err
+	}
 	q := store.New(s.db)
 	if existing, err := q.GetUserByEmail(ctx, email); err == nil {
 		return s.sendContent(ctx, existing.Email, "You already have a Xenibase account", pgmail.Content{
@@ -292,10 +298,6 @@ func (s *Service) Signup(ctx context.Context, p SignupParams) error {
 			Note: "If this wasn't you, you can ignore this email. Nothing has changed on your account.",
 		})
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	hash, err := HashPassword(p.Password)
-	if err != nil {
 		return err
 	}
 	var u store.User
@@ -515,6 +517,9 @@ func (s *Service) ChangePassword(ctx context.Context, sess Session, current, nex
 	u, err := q.GetUser(ctx, sess.UserID)
 	if err != nil {
 		return err
+	}
+	if u.LockedUntil != nil && u.LockedUntil.After(s.cfg.Now()) {
+		return lockedError{until: *u.LockedUntil}
 	}
 	ok, err := VerifyPassword(current, u.PasswordHash)
 	if err != nil {

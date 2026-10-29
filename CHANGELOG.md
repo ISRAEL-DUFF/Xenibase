@@ -39,6 +39,18 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The sign-in lockout no longer reveals accounts, grows, and tells the
+  owner.** Five wrong passwords for a registered address answered
+  `429 locked` while an unknown address only ever answered `401`, so five
+  requests told anyone whether an address had an account; the lock was a
+  fixed 15 minutes that reset the count, so someone with the password could
+  try about 480 TOTP codes a day; and the owner was never told. An address
+  without an enabled account is now counted and locked exactly as an
+  account is; each failure after the fifth locks for twice as long as the
+  last, up to a day (`429 locked` now carries `Retry-After`); and the owner
+  is emailed when a lock starts, at most once an hour. Signup in approval
+  and open mode now hashes the password and sends one email for an
+  existing address as for a new one, so it takes as long either way.
 - **Break-glass can no longer become permanent membership.** Under
   break-glass a platform admin acts as an org admin, and could invite their
   own address as admin and accept it, keeping the access after the session
@@ -659,6 +671,10 @@ bundle share one version (spec §11.5).
   the new `files_share_backups` alert.
 
 ### Upgrading
+- Migration 00087 adds `users.lockout_notified_at` and the
+  `login_address_failures` table. Sign-in locks now double with each
+  further failure up to a day instead of staying at 15 minutes, and their
+  owners are emailed.
 - Backend services' schema version 7 runs on every enabled project with its
   next reconcile (within seconds of the upgrade). It revokes the request
   roles' `EXECUTE` on functions an extension installed; the data API no

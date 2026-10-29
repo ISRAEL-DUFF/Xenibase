@@ -639,6 +639,13 @@ type LegalDocument struct {
 	PublishedAt time.Time
 }
 
+type LoginAddressFailure struct {
+	Email        string
+	FailedLogins int32
+	LockedUntil  *time.Time
+	UpdatedAt    time.Time
+}
+
 type MessageSend struct {
 	ID        int64
 	ProjectID uuid.UUID
@@ -1402,22 +1409,23 @@ type UsageRecord struct {
 }
 
 type User struct {
-	ID              uuid.UUID
-	Email           string
-	PasswordHash    string
-	TotpSecret      []byte
-	PlatformRole    string
-	CreatedAt       time.Time
-	DisabledAt      *time.Time
-	FailedLogins    int32
-	LockedUntil     *time.Time
-	TotpLastStep    int64
-	Name            *string
-	EmailVerifiedAt *time.Time
-	ApprovedAt      *time.Time
-	RecoveryCodes   []byte
-	LastActiveAt    *time.Time
-	SignupIp        *netip.Addr
+	ID                uuid.UUID
+	Email             string
+	PasswordHash      string
+	TotpSecret        []byte
+	PlatformRole      string
+	CreatedAt         time.Time
+	DisabledAt        *time.Time
+	FailedLogins      int32
+	LockedUntil       *time.Time
+	TotpLastStep      int64
+	Name              *string
+	EmailVerifiedAt   *time.Time
+	ApprovedAt        *time.Time
+	RecoveryCodes     []byte
+	LastActiveAt      *time.Time
+	SignupIp          *netip.Addr
+	LockoutNotifiedAt *time.Time
 }
 
 type VirtualAccount struct {

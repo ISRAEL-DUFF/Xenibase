@@ -22,6 +22,11 @@ platform admin can reset your two-factor after confirming who you are, and you
 sign in with your password until you turn it on again. Platform admins and
 support staff always have it on.
 
+Five wrong passwords or codes in a row lock signing in for 15 minutes, and
+each further wrong attempt after that for twice as long, up to a day; your
+right password works again once the lock ends. You are emailed when it
+locks: if it wasn't you, reset your password and turn on two-factor sign-in.
+
 **Account** lists your sessions (revoke any), lets you change your password
 and name, and shows new recovery codes (after confirming your password and
 code). A password reset by email signs you out everywhere.
