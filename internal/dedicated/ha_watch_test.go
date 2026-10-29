@@ -144,15 +144,14 @@ func (e *haEnv) server(t *testing.T) *dedicated.Service {
 	return dedicated.New(e.db, e.kr, e.ns, ps, secrets{}, dedicated.Config{}, quiet)
 }
 
-// setupHA is an HA instance of three members, each with a stub Patroni,
-// and a project on it; members[0] leads.
-func setupHA(t *testing.T) *haEnv {
+// setupServers is a metadata database with the services a server runs
+// (provision with a pooler manager that has no poolers).
+func setupServers(t *testing.T) *haEnv {
 	t.Helper()
-	ctx := context.Background()
 	db := storetest.New(t)
 	k, _ := crypto.GenerateKey()
 	kr, _ := crypto.NewKeyring(k)
-	ca, err := agentca.LoadOrCreate(ctx, db, kr)
+	ca, err := agentca.LoadOrCreate(context.Background(), db, kr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +162,16 @@ func setupHA(t *testing.T) *haEnv {
 	e := &haEnv{kr: kr, ns: ns}
 	e.env = &env{db: db}
 	e.svc = e.server(t)
+	return e
+}
+
+// setupHA is an HA instance of three members, each with a stub Patroni,
+// and a project on it; members[0] leads.
+func setupHA(t *testing.T) *haEnv {
+	t.Helper()
+	ctx := context.Background()
+	e := setupServers(t)
+	db := e.db
 	node := e.node(t, "node1", "healthy")
 	e.inst = e.instance(t, node, "dedicated", "1 hour")
 	q := store.New(db)

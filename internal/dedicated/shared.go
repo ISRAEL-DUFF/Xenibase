@@ -38,6 +38,7 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 		KindDeleteReplica:     {Handler: s.runDeleteReplica, MaxAttempts: 3},
 		KindDetachReplica:     {Handler: s.runDetachReplica, OnFail: s.failDetachReplica, MaxAttempts: 2, Timeout: 6 * time.Hour},
 		KindResize:            {Handler: s.runResize, OnFail: s.failResize, MaxAttempts: 2, Timeout: 2 * time.Hour},
+		KindMinorUpgrade:      {Handler: s.runMinorUpgrade, OnFail: s.failMinorUpgrade, MaxAttempts: 1, Timeout: 3 * time.Hour},
 	}
 }
 

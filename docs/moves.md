@@ -187,7 +187,13 @@ Sunday 02:00–06:00 UTC), Xenibase restarts the instances that are behind,
 each restart the poolers hold the projects' clients, so the restart (about
 a second or two) looks like a short pause rather than an outage. An
 instance whose projects are in the middle of something (a move, a restore,
-a queued operation) waits for the next sweep. The window can be disabled,
+a queued operation) waits for the next sweep. Each restart is a
+`minor_upgrade` operation: on a dedicated instance it is the project's
+operation (it shows in the project's activity, and nothing else can be
+queued on the project until it ends); on a shared cluster it belongs to no
+project, but its projects can't start other operations until it ends. With
+several xenibase-servers, one sweeps at a time, and a server that stops
+mid-restart hands the operation to another, which resumes the poolers. The window can be disabled,
 and **Upgrade now** restarts one instance at once.
 
 If the new release won't start on an instance (it fails to create, exits,

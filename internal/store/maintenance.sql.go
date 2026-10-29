@@ -12,6 +12,21 @@ import (
 	"github.com/google/uuid"
 )
 
+const failUnfinishedMinorUpgrade = `-- name: FailUnfinishedMinorUpgrade :exec
+UPDATE minor_upgrades SET finished_at = now(), error = $1::text WHERE id = $2 AND finished_at IS NULL
+`
+
+type FailUnfinishedMinorUpgradeParams struct {
+	Error string
+	ID    uuid.UUID
+}
+
+// tenant: system - the maintenance sweep records its own runs.
+func (q *Queries) FailUnfinishedMinorUpgrade(ctx context.Context, arg FailUnfinishedMinorUpgradeParams) error {
+	_, err := q.db.Exec(ctx, failUnfinishedMinorUpgrade, arg.Error, arg.ID)
+	return err
+}
+
 const finishMinorUpgrade = `-- name: FinishMinorUpgrade :exec
 UPDATE minor_upgrades SET finished_at = now(), pause_ms = $1, error = $2 WHERE id = $3
 `
@@ -81,6 +96,23 @@ SELECT EXISTS (
 // tenant: system - the maintenance sweep checks every project on the instance.
 func (q *Queries) InstanceBusy(ctx context.Context, instanceID uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, instanceBusy, instanceID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const instanceMinorUpgradeActive = `-- name: InstanceMinorUpgradeActive :one
+SELECT EXISTS (
+  SELECT 1 FROM operations
+  WHERE kind = 'minor_upgrade' AND status IN ('queued', 'running') AND params @> jsonb_build_object('instance_id', $1::uuid)
+)::bool
+`
+
+// InstanceMinorUpgradeActive reports a minor upgrade queued or running on
+// the instance: its projects take no other exclusive operation meanwhile.
+// tenant: system - the maintenance sweep and the exclusive-operation check of a project already resolved.
+func (q *Queries) InstanceMinorUpgradeActive(ctx context.Context, instanceID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, instanceMinorUpgradeActive, instanceID)
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -225,6 +257,48 @@ func (q *Queries) InstancesToCheckRelease(ctx context.Context, before time.Time)
 	return items, nil
 }
 
+const interruptedMinorUpgrades = `-- name: InterruptedMinorUpgrades :many
+SELECT m.id, m.instance_id, m.from_release, m.to_release, m.started_at, m.finished_at, m.pause_ms, m.error FROM minor_upgrades m
+WHERE m.finished_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM operations o
+    WHERE o.kind = 'minor_upgrade' AND o.status IN ('queued', 'running') AND o.params->>'run_id' = m.id::text)
+ORDER BY m.started_at
+`
+
+// InterruptedMinorUpgrades lists runs that never finished and that no
+// operation will finish: a server stopped part-way (before minor upgrades
+// were operations), or an operation's OnFail did not get to it.
+// tenant: system - the maintenance sweep records its own runs.
+func (q *Queries) InterruptedMinorUpgrades(ctx context.Context) ([]MinorUpgrade, error) {
+	rows, err := q.db.Query(ctx, interruptedMinorUpgrades)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MinorUpgrade
+	for rows.Next() {
+		var i MinorUpgrade
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstanceID,
+			&i.FromRelease,
+			&i.ToRelease,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.PauseMs,
+			&i.Error,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const latestMinorUpgrades = `-- name: LatestMinorUpgrades :many
 SELECT m.id, m.instance_id, m.from_release, m.to_release, m.started_at, m.finished_at, m.pause_ms, m.error, i.kind, n.name AS node_name
 FROM minor_upgrades m JOIN instances i ON i.id = m.instance_id JOIN nodes n ON n.id = i.node_id
@@ -346,6 +420,18 @@ func (q *Queries) MaintenanceProjects(ctx context.Context, instanceID uuid.UUID)
 		return nil, err
 	}
 	return items, nil
+}
+
+const minorUpgradeActive = `-- name: MinorUpgradeActive :one
+SELECT EXISTS (SELECT 1 FROM operations WHERE kind = 'minor_upgrade' AND status IN ('queued', 'running'))::bool
+`
+
+// tenant: system - the maintenance sweep upgrades one instance at a time.
+func (q *Queries) MinorUpgradeActive(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, minorUpgradeActive)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const setInstanceRelease = `-- name: SetInstanceRelease :exec

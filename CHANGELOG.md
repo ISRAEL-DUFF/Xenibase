@@ -19,6 +19,17 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **Minor upgrades took no lock, weren't operations, and weren't
+  crash-safe.** Two servers could restart the same instance twice, an
+  owner could queue `ha_disable` or a resize during an HA upgrade, and a
+  server stopped between pause and resume left PgBouncer paused. Each
+  minor upgrade is now a `minor_upgrade` operation, exclusive with the
+  project's other operations (a shared cluster's keeps its projects'
+  exclusive operations off until it ends); its OnFail resumes the poolers,
+  a crashed attempt is retried once and resumes them first, and the sweep
+  runs on one server at a time under an advisory lock and finishes any run
+  an older server left unfinished. **Upgrade now** queues the same
+  operation and waits for it.
 - **A failed minor upgrade left the instance down and then looked done.**
   The agent removed the old container before creating the new one, so a
   release that would not start left nothing running, the sweep retried the

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/israel-duff/xenibase/internal/provision"
 )
 
 // RollbackSharedCluster exposes rollbackSharedCluster to the tests.
@@ -47,3 +49,13 @@ func (s *Service) WatchOne(ctx context.Context, inst uuid.UUID) error { return s
 
 // LeadHA makes the watcher act as the lock holder without the lock.
 func (s *Service) LeadHA() { s.watch.lead(true) }
+
+// FailMinorUpgrade and RunMinorUpgrade expose the minor upgrade's OnFail
+// and handler.
+var (
+	FailMinorUpgrade = (*Service).failMinorUpgrade
+	RunMinorUpgrade  = (*Service).runMinorUpgrade
+)
+
+// Projects is the provision service the dedicated service uses.
+func (s *Service) Projects() *provision.Service { return s.projects }

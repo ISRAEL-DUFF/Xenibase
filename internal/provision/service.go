@@ -675,6 +675,13 @@ func (s *Service) withIdleProject(ctx context.Context, id uuid.UUID, allowed []s
 		if busy {
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
+		// A shared cluster's minor upgrade is no one project's operation,
+		// but restarts every project on it.
+		if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil {
+			return err
+		} else if busy {
+			return fmt.Errorf("%w: a Postgres minor upgrade is restarting the project's instance; try again in a few minutes", ErrConflict)
+		}
 		if err := f(tx, p); errors.Is(err, jobs.ErrProjectBusy) {
 			return fmt.Errorf("%w: %w", ErrConflict, err)
 		} else if err != nil {
@@ -706,6 +713,9 @@ func EnqueueIfIdleTx(ctx context.Context, tx pgx.Tx, ep jobs.EnqueueParams) (boo
 	}
 	// A new statement: it sees what committed while we waited for the lock.
 	if busy, err := q.ProjectHasActiveOperation(ctx, &p.ID); err != nil || busy {
+		return false, err
+	}
+	if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil || busy {
 		return false, err
 	}
 	if _, err := jobs.Enqueue(ctx, tx, ep); err != nil {
