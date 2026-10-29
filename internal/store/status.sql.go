@@ -328,10 +328,10 @@ func (q *Queries) TouchEdge(ctx context.Context, arg TouchEdgeParams) error {
 }
 
 const unissuedDrafts = `-- name: UnissuedDrafts :one
-SELECT count(*)::int FROM invoices WHERE status = 'draft' AND NOT held AND period_start = $1
+SELECT count(*)::int FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= $1
 `
 
-// tenant: system - drafts of a month that aren't held and haven't been issued.
+// tenant: system - drafts of a month or an earlier one that aren't held and haven't been issued.
 func (q *Queries) UnissuedDrafts(ctx context.Context, periodStart pgtype.Date) (int32, error) {
 	row := q.db.QueryRow(ctx, unissuedDrafts, periodStart)
 	var column_1 int32

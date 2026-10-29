@@ -869,6 +869,8 @@ type PaymentEvent struct {
 	ProcessedAt     *time.Time
 	Outcome         *string
 	Error           *string
+	Attempts        int32
+	ClaimedAt       time.Time
 }
 
 type PaymentIntent struct {

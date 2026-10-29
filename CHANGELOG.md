@@ -689,6 +689,60 @@ bundle share one version (spec §11.5).
   be deleted while it holds files. A region without one keeps working as
   before, with a warning in the server's log, a launch-check warning and
   the new `files_share_backups` alert.
+- **A wallet debit that failed is no longer booked as paid.** When a
+  transfer's answer was lost, Xenibase looked its key up at the wallet
+  provider and settled the invoice as soon as the provider called the
+  request finished, without reading how it finished: a transfer that ended
+  `failed` marked the invoice paid with no money moved, and only the
+  nightly balance reconciliation showed it. A debit is now booked only when
+  the provider says it completed. One that ended failed (or was declined,
+  cancelled, expired or reversed) is a declined attempt: nothing is posted
+  and dunning starts as for a wallet that is short. A finished request in
+  a status nobody has written down is neither booked nor retried: it stays
+  pending, with an error in the log, for a person to look at. See
+  `docs/iswallet.md`.
+- **A wallet is no longer debited twice for one invoice.** A debit attempt
+  read what the invoice owed before recording itself, and the one pending
+  debit allowed per invoice only kept out an attempt that overlapped while
+  the other was still pending. An attempt that was slow (reading the
+  wallet's balance, say) while another debited and settled the invoice
+  then recorded its own and debited again, and the second amount became
+  credit that could not be refunded to the wallet. The triggers can meet: a
+  deposit, **Pay from wallet** and the daily dunning on every server. The
+  amount is now read again under the invoice's lock in the transaction
+  that records the attempt, and only what is still owed is debited.
+- **A month's invoices that fail to issue are tried again.** The monthly
+  run marked a month done whatever happened, so a draft refused for a
+  stale exchange rate, a provider outage or a database error stayed a
+  draft until the admin issued it by hand, and nothing was collected
+  meanwhile; an organisation whose rating failed got no draft at all. A
+  month is now done only once every organisation's draft is made, and
+  every billing run (every 10 minutes) issues the drafts of past months
+  that aren't held, stopping at the first stale rate or outage rather than
+  asking the provider for each. Turning automatic issue on therefore
+  issues earlier months' unheld drafts too: hold any you mean to issue by
+  hand first. The status page's "Last month's invoices are late" now counts
+  earlier months as well. See `docs/billing.md`.
+- **A deposit whose processing failed is processed again.** A payment
+  event that failed (the provider's verify call timed out, the database
+  refused) was answered 500 so the provider would retry, but the event was
+  already stored, so the retry was answered as a duplicate; the hourly
+  re-query had one try of its own, then skipped it too. A deposit could
+  stay unbooked, with the books short of the wallet. A stored event that
+  failed, or whose processing was cut off, is now processed again when the
+  provider redelivers it, when a re-query lists it, and by every hourly
+  re-query for 30 days; a deposit is still booked only once. A deposit the
+  provider reports as still pending is retried rather than rejected, and
+  an event that couldn't be stored at all is answered 500 rather than 200.
+  Migration 00091 adds `attempts` and `claimed_at` to `payment_events`.
+- **Wallets are no longer debited under superseded debit terms.** The
+  version of the debit terms an owner agreed to is stored so that a change
+  of wording asks again, and the Billing page did ask, but automatic debits
+  only checked that some consent existed and went on under the old
+  wording. They now need a consent to the current version; with an older
+  one an organisation is treated as without consent until an owner agrees
+  again. **Pay from wallet** still works, and each invoice's email says the
+  invoice won't be debited and where to agree.
 
 ### Upgrading
 - Migration 00094 adds the node lifecycle `retiring`, with

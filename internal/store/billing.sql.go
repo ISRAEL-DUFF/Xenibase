@@ -343,6 +343,61 @@ func (q *Queries) DeletePriceBookDraft(ctx context.Context, version int32) (int6
 	return result.RowsAffected(), nil
 }
 
+const draftsDue = `-- name: DraftsDue :many
+SELECT id, org_id, number, period_start, period_end, status, held, hold_reason, subtotal_minor, vat_minor, total_minor, wht_expected_minor, vat_rate, bill_to, seller, due_at, issued_at, paid_at, pdf_object_key, price_book_version, created_at, paid_minor, wht_deducted_minor, wht_evidenced_at, usd_subtotal_minor, usd_vat_minor, usd_total_minor, fx FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= $1
+ORDER BY period_start, created_at
+`
+
+// tenant: system - unheld drafts of a month and every earlier one, for issuing.
+func (q *Queries) DraftsDue(ctx context.Context, through pgtype.Date) ([]Invoice, error) {
+	rows, err := q.db.Query(ctx, draftsDue, through)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Invoice
+	for rows.Next() {
+		var i Invoice
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrgID,
+			&i.Number,
+			&i.PeriodStart,
+			&i.PeriodEnd,
+			&i.Status,
+			&i.Held,
+			&i.HoldReason,
+			&i.SubtotalMinor,
+			&i.VatMinor,
+			&i.TotalMinor,
+			&i.WhtExpectedMinor,
+			&i.VatRate,
+			&i.BillTo,
+			&i.Seller,
+			&i.DueAt,
+			&i.IssuedAt,
+			&i.PaidAt,
+			&i.PdfObjectKey,
+			&i.PriceBookVersion,
+			&i.CreatedAt,
+			&i.PaidMinor,
+			&i.WhtDeductedMinor,
+			&i.WhtEvidencedAt,
+			&i.UsdSubtotalMinor,
+			&i.UsdVatMinor,
+			&i.UsdTotalMinor,
+			&i.Fx,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const draftsForPeriod = `-- name: DraftsForPeriod :many
 SELECT id, org_id, number, period_start, period_end, status, held, hold_reason, subtotal_minor, vat_minor, total_minor, wht_expected_minor, vat_rate, bill_to, seller, due_at, issued_at, paid_at, pdf_object_key, price_book_version, created_at, paid_minor, wht_deducted_minor, wht_evidenced_at, usd_subtotal_minor, usd_vat_minor, usd_total_minor, fx FROM invoices WHERE status = 'draft' AND period_start = $1 ORDER BY created_at
 `

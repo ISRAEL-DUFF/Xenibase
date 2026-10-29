@@ -682,7 +682,9 @@ func (s *Server) PaymentWebhook(w http.ResponseWriter, r *http.Request, provider
 	}
 	// Processing goes on if the provider hangs up.
 	out, err := s.billing.HandleEvent(context.WithoutCancel(r.Context()), p.Name(), ev)
-	if err != nil && out == billing.OutcomeFailed {
+	// A failure, or an event that couldn't even be stored, is answered so
+	// that the provider sends it again.
+	if err != nil && (out == billing.OutcomeFailed || out == "") {
 		s.log.Warn("payment webhook", "provider", provider, "event", ev.ID, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "the event will be retried")
 		return

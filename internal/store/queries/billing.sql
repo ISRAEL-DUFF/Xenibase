@@ -323,6 +323,11 @@ ORDER BY i.period_start DESC, o.name LIMIT @lim;
 -- tenant: system - a month's drafts, for issuing.
 SELECT * FROM invoices WHERE status = 'draft' AND period_start = @period_start ORDER BY created_at;
 
+-- name: DraftsDue :many
+-- tenant: system - unheld drafts of a month and every earlier one, for issuing.
+SELECT * FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= @through
+ORDER BY period_start, created_at;
+
 -- name: SetInvoiceHold :one
 -- tenant: system - the admin holds or releases a draft.
 UPDATE invoices SET held = @held, hold_reason = sqlc.narg(hold_reason)
