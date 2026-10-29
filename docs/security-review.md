@@ -251,6 +251,11 @@ before.
   one revokes its descendants, and an app's token can't create tokens
   (`TestRevokingATokenRevokesWhatItMade`, `TestTokenMadeByATokenGoesWithIt`,
   `TestOAuthFlowOverHTTP`).
+- **A read token could cut its user off** (low). Leaving an organisation
+  (`org.view`) and revoking a token took the `read` scope, so a leaked
+  read-only token could make its user leave or revoke their admin tokens.
+  Both now need `write`, except a token revoking itself
+  (`TestReadTokensChangeNothing`).
 - **Invitations were an unlimited mail relay with linked names** (medium).
   Organisation invitations are capped a day per organisation and per
   inviter, and user-chosen names in email are never links

@@ -268,6 +268,12 @@ func (s *Server) CreateToken(w http.ResponseWriter, r *http.Request) {
 // RevokeMyToken implements DELETE /api/v1/tokens/{token_id}.
 func (s *Server) RevokeMyToken(w http.ResponseWriter, r *http.Request, id gen.TokenID) {
 	sess, _ := sessionFrom(r.Context())
+	if sess.Token != nil && id != sess.Token.ID && !authz.HasScope(sess.Token.Scopes, authz.ScopeWrite) {
+		// A read token revokes only itself: it can't cut its user's other
+		// tokens off.
+		writeScopeError(w, authz.ScopeWrite)
+		return
+	}
 	if sess.Token != nil {
 		t, err := store.New(s.db).GetUserToken(r.Context(), store.GetUserTokenParams{ID: id, UserID: sess.UserID})
 		if err == nil && t.OrgID != sess.Token.OrgID {

@@ -54,6 +54,10 @@ admin set a lower maximum). It never does more than you can: when your
 role changes, it changes; when you leave the organisation, or it is
 suspended, the token stops working.
 
+Leaving an organisation, or revoking a token other than itself, needs a
+token with `write` (any token can revoke itself, as `xenibase logout`
+does): a read-only token changes nothing.
+
 Destructive actions with a token need the `admin` scope **and** a typed
 confirmation (`--confirm <name>` in the CLI, a `confirm` field in the
 API), in place of the browser's password-and-code step.

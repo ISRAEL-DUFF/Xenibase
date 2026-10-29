@@ -39,6 +39,14 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A read-scoped token can no longer cut its user off.** Leaving an
+  organisation (`POST /orgs/{org}/leave`) and revoking a token
+  (`DELETE /tokens/{token_id}`) took only the `read` scope, so a leaked
+  read-only CI token or a read-only connected app could make its user
+  leave, losing every token and database login there, or revoke their
+  admin tokens. Both now need `write` from a token (`403
+  insufficient_scope`); any token may still revoke itself, as
+  `xenibase logout` does.
 - **Disconnecting an app no longer leaves tokens it made for itself.** An
   OAuth app's token with `write` could create a token of its own, which
   carried no record of the app, so **Disconnect** and disabling the app left

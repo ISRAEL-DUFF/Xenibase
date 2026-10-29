@@ -311,9 +311,15 @@ func (s *Server) RemoveOrgMember(w http.ResponseWriter, r *http.Request, org gen
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// LeaveOrg implements POST /api/v1/orgs/{org}/leave.
+// LeaveOrg implements POST /api/v1/orgs/{org}/leave. The route is
+// org.view, so billing members can leave; a token also needs the write
+// scope, since leaving revokes every token and login its user has there.
 func (s *Server) LeaveOrg(w http.ResponseWriter, r *http.Request, org gen.OrgID) {
 	sess, _ := sessionFrom(r.Context())
+	if sess.Token != nil && !authz.HasScope(sess.Token.Scopes, authz.ScopeWrite) {
+		writeScopeError(w, authz.ScopeWrite)
+		return
+	}
 	if err := s.orgs.Leave(r.Context(), org, sess.UserID); err != nil {
 		s.orgError(w, "leave", err)
 		return
