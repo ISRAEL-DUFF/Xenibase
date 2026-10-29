@@ -131,8 +131,11 @@ func (s *Service) CheckReleases(ctx context.Context, before time.Time) error {
 		if !res.Running {
 			// A missing or stopped container runs no release: recording
 			// none would drop it from the instances behind, and a failed
-			// upgrade would look done.
-			errs = append(errs, fmt.Errorf("instance %s: the container is %s", inst.ID, res.State))
+			// upgrade would look done. Its recorded release stays. This is
+			// not an error of the check: a cluster the agent did not make
+			// has no container of its own, and a stopped instance is down
+			// on purpose (a failed upgrade raises its own alert).
+			s.log.Info("release not read: the container is not running", "instance", inst.ID, "state", res.State)
 			continue
 		}
 		if err := q.SetInstanceRelease(ctx, store.SetInstanceReleaseParams{
