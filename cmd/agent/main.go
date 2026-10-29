@@ -103,7 +103,7 @@ func flags(name string, args []string) (*opts, error) {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xenibase-agent register|run|decrypt|pooler-seed|keepalived-config|version [flags]")
+		return errors.New("usage: xenibase-agent register|run|decrypt|pooler-seed|pooler-ini|keepalived-config|version [flags]")
 	}
 	switch args[0] {
 	case "version", "-version", "--version":
@@ -114,6 +114,8 @@ func run(args []string) error {
 		return decrypt(args[1:])
 	case "pooler-seed":
 		return poolerSeed(args[1:])
+	case "pooler-ini":
+		return poolerINI(args[1:])
 	case "keepalived-config":
 		return keepalivedConfig(args[1:])
 	case "register":
@@ -296,6 +298,33 @@ func poolerSeed(args []string) error {
 		return errors.New("pooler-seed: --dir is required")
 	}
 	return agentsvc.SeedPoolerDir(*dir, 0o640)
+}
+
+// poolerINI renders a pooler host's pgbouncer.ini from the shipped one with
+// how PgBouncer connects to the backends: server_tls_sslmode
+// (XENIBASE_POOLER_SERVER_TLS_SSLMODE, default prefer) and the backends' CA
+// (XENIBASE_POOLER_SERVER_TLS_CA_FILE) for verify-ca and verify-full.
+func poolerINI(args []string) error {
+	fs := flag.NewFlagSet("pooler-ini", flag.ContinueOnError)
+	in := fs.String("in", "", "the shipped pgbouncer.ini")
+	out := fs.String("out", "", "where to write the rendered file")
+	mode := fs.String("server-tls-sslmode", env("XENIBASE_POOLER_SERVER_TLS_SSLMODE", "prefer"), "sslmode to the backends: "+strings.Join(agentsvc.ServerTLSModes, ", "))
+	ca := fs.String("server-tls-ca-file", env("XENIBASE_POOLER_SERVER_TLS_CA_FILE", ""), "CA that signed the backends' certificates (verify-ca, verify-full)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" || *out == "" {
+		return errors.New("pooler-ini: --in and --out are required")
+	}
+	b, err := os.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	ini, err := agentsvc.PoolerINI(b, *mode, *ca)
+	if err != nil {
+		return fmt.Errorf("pooler-ini: %w", err)
+	}
+	return os.WriteFile(*out, ini, 0o640)
 }
 
 // keepalivedConfig prints keepalived.conf for this pooler host.

@@ -78,6 +78,15 @@ and `TRUNCATE` (`TestAuditLogIsAppendOnly`). It is filterable at `/audit`.
 
 - Clients reach databases only through PgBouncer with TLS required
   (`client_tls_sslmode = require`); certificates from ACME or self-signed.
+- Behind the poolers: the edge connects to them with `sslmode=require` by
+  default and refuses anything that could fall back to plain text;
+  `verify-full` with `XENIBASE_EDGE_POOLER_ROOT_CERT` checks the pooler's
+  certificate. PgBouncer connects to the backends with
+  `server_tls_sslmode = prefer`, because Xenibase's instances and the waker
+  don't serve TLS yet; pooler hosts can set `require` or `verify-full` with a
+  CA (`XENIBASE_POOLER_SERVER_TLS_SSLMODE`, `_CA_FILE`) for backends that do.
+  Until instances get certificates, keep the poolers and their backends on
+  one private network.
 - Agents use mTLS with a private CA; the server pins each agent's
   certificate fingerprint and node ID; no work is sent to an agent of
   another major version (`nodes.Compatible`, spec §11.3).

@@ -76,6 +76,16 @@ xenibase-server, as in V2. Nothing changes until you add them.
    XENIBASE_AGENT_HETZNER_TOKEN=...
    ```
 
+   To have the PgBouncers check the backends' certificates, add
+   `XENIBASE_POOLER_SERVER_TLS_SSLMODE=verify-full` and
+   `XENIBASE_POOLER_SERVER_TLS_CA_FILE=/path/in/the/container/ca.pem` (mount
+   the file), or `require` to insist on TLS without checking. The default,
+   `prefer`, uses TLS when a backend offers it and plain text otherwise:
+   Xenibase's instances and the waker don't serve TLS yet, so `require` and
+   above are only for backends you have given certificates, and the waker
+   (paused Free projects) then can't be reached. `disable` and `allow` are
+   refused.
+
    Leave `XENIBASE_EDGE_VIP` unset on Hetzner. The floating IP is already on
    both interfaces; keepalived only decides which host claims it.
 
