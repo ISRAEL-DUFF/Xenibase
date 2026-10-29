@@ -429,6 +429,14 @@ func TestReadOnlyConsoleCannotBecomeOwner(t *testing.T) {
 	p := e.CreateProject("read-only console")
 	conn := e.MustConnect(p.Connection.SessionUrl)
 	ro := p.Project.DbName + "_ro"
+	read := e.CreateToken(map[string]any{"name": "reader", "org_id": e.OrgID, "scopes": []string{"read"}})
+	path := "/api/v1/projects/" + p.Project.Id.String() + "/sql"
+	// The read-only role is made with the console's logins, on the first
+	// session; the policy below names it.
+	yes := true
+	if code, raw := e.BearerDo(read, "POST", path, gen.SqlRequest{Query: "SELECT 1", QueryId: uuid.New(), ReadOnly: &yes}, nil); code != http.StatusOK {
+		t.Fatalf("first read-only session: status %d %s", code, raw)
+	}
 	for _, q := range []string{
 		`CREATE TABLE t (v text, visible bool)`,
 		`INSERT INTO t VALUES ('shown', true), ('rls-hidden', false)`,
@@ -443,8 +451,6 @@ func TestReadOnlyConsoleCannotBecomeOwner(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	read := e.CreateToken(map[string]any{"name": "reader", "org_id": e.OrgID, "scopes": []string{"read"}})
-	path := "/api/v1/projects/" + p.Project.Id.String() + "/sql"
 	owner := "'" + p.Project.OwnerRole + "'"
 	for _, q := range []string{
 		`SELECT set_config('role', ` + owner + `, true), query_to_xml('SELECT * FROM t', true, false, '')`,
