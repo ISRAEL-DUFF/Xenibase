@@ -827,7 +827,9 @@ worker.
   retention ends (30 days).
 - **Branches and restores** copy the database, so file rows come along but
   not the bytes: a branch's files show as missing until uploaded again.
-  Moving a project to another region doesn't move its files yet.
+  A project with files can't be moved to another region: its files stay
+  in its region's object store, so the move is refused until they are
+  deleted.
 
 ### The dashboard and the CLI
 

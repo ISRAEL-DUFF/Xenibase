@@ -372,6 +372,14 @@ bundle share one version (spec §11.5).
   it waited a day from each start, so servers deployed more often never
   ran it; the last run is now kept in the metadata database and one server
   runs it each day.
+- **A move to another region left every stored file behind.** The move
+  copied the database and switched the project's region, but its files
+  stayed in the old region's object store, so every file answered "the
+  object's data is missing" afterwards and the old bytes were never
+  removed or billed. A region move is now refused (409) while the project
+  has files or an upload in progress, when it is asked for and again once
+  writes are frozen for the cutover; delete the files first, or move within
+  the region (`docs/regions.md`).
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

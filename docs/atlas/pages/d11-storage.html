@@ -31,6 +31,9 @@
     "internal/backup/targets.go",
     "internal/store/queries/services.sql",
     "internal/store/queries/moves.sql",
+    "internal/store/queries/cdn_purges.sql",
+    "internal/store/queries/storage_meter.sql",
+    "internal/dedicated/move.go",
     "cmd/edge/main.go",
     "cmd/server/main.go",
     "test/integration/storage_test.go",
@@ -173,8 +176,8 @@
 <div class="callout risk"><span class="callout-label">Risk</span>
   <p><strong>Every edge holds the keys to the region's backups.</strong> The feed hands each edge the full <code>storage.Target</code>, access key and secret, of the bucket that also holds the region's encrypted backups, WAL-G archives and metadata backups; files and backups are kept apart only by the edge computing keys under <code>files/&lt;ref&gt;/</code>. The edge is the internet-facing process that parses uploads, forms and images, so code running in it, or a read of its memory, can delete every backup in the region, the copy meant to survive such an incident. A bucket of its own for files, or credentials scoped to <code>files/</code>, would keep a compromised edge away from the backups.</p>
 </div>
-<div class="callout risk"><span class="callout-label">Risk</span>
-  <p><strong>A region move leaves every file behind.</strong> Platform admins may move a non-residency project to another region's node (<code>checkMoveRegion</code>), and the move rewrites <code>projects.region</code> (<x-ref path="internal/store/queries/moves.sql" symbol="region = n.region"><code>moves.sql</code></x-ref>). The next feed points the edge at the new region's store, but nothing copies <code>files/&lt;ref&gt;/</code> across: every object then answers "the object's data is missing", and the old bytes are never removed or billed, since neither the reconciler nor the deleted-project clean-up looks outside the current region. Decisions V4-M33 #13 records file moves as not built, but the move neither refuses nor warns. Refusing a region move while <code>xb_storage.objects</code> has rows, or copying the prefix as a step of it, would make it safe.</p>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>A region move used to leave every file behind: platform admins could move a non-residency project to another region's node, the move rewrote <code>projects.region</code> (<code>moves.sql</code>), the next feed pointed the edge at the new region's store, and nothing copied <code>files/&lt;ref&gt;/</code>, so every object answered "the object's data is missing" while the old bytes stayed unbilled. Copying the prefix as a move step would have to copy every version and render across stores and keep up with uploads during the move, so the move refuses instead: <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) filesStay("><code>filesStay</code></x-ref>, called from <code>checkMoveRegion</code> when the move is asked for and again in <code>runMove</code> once writes are frozen for the cutover, answers <code>409</code> while <code>xb_storage.objects</code> or <code>xb_storage.uploads</code> has rows, naming the regions (<code>TestRegionMoveRefusesAProjectWithFiles</code>). A project with files must delete them, or be emptied and filled again after the move (<code>docs/regions.md</code>).</p>
 </div>
 
 <h2 id="storage--cdn">The CDN and purges</h2>
@@ -230,6 +233,7 @@
     <tr><td>A project's database is unreachable in the sweep</td><td>That project is skipped and reported</td></tr>
     <tr><td>A CDN purge fails</td><td>Kept in <code>cdn_purges</code> and retried by the sweep, from a minute to an hourly backoff, until the CDN takes it (<a href="#storage--cdn">above</a>)</td></tr>
     <tr><td>The edge cannot send a storage event</td><td>Tried three times, then logged; that change is not purged</td></tr>
+    <tr><td>A region move of a project with files</td><td><code>409</code> when asked for; files uploaded during the move fail it at the cutover, before the region changes</td></tr>
     <tr><td>Deleting a deleted project's prefix fails</td><td>Retried hourly, up to 50 attempts</td></tr>
   </tbody>
 </table></div>

@@ -80,7 +80,12 @@ can't offer HA.
   project's region changes and so does its hostname. **The old hostname
   keeps routing for 30 days**: the old region's poolers keep a forward to
   it, and Project Settings shows when it ends. Tell the customer to update
-  their connection strings within that time.
+  their connection strings within that time. **A project with stored files
+  can't move regions** (409): its files are in its region's object store
+  and a move doesn't copy them, so it is refused while the project has
+  files or an upload in progress, when asked and again at the cutover.
+  Delete the files first (or download and upload them again after the
+  move), or move it within its region.
 
 Each region's pooler hosts get their own configuration: their projects'
 routes and logins, plus those forwarded to them, with their own
