@@ -76,12 +76,105 @@ type Config struct {
 	Routes       []Route
 	Users        []User
 	Restrictions []Restriction
+	// AdminNetworks may reach the admin console (database pgbouncer);
+	// empty means DefaultAdminNetworks.
+	AdminNetworks []string
 }
+
+// AdminDatabase is PgBouncer's admin console.
+const AdminDatabase = "pgbouncer"
+
+// DefaultAdminNetworks are where xenibase-server and the pooler hosts'
+// agents reach the admin console from: loopback and the private ranges.
+// Clients come from the internet, and the console's password is the only
+// thing that would otherwise stand between them and RELOAD, PAUSE or KILL.
+var DefaultAdminNetworks = []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
 var (
 	identRe = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 	hostRe  = regexp.MustCompile(`^[A-Za-z0-9.\-:\[\]]{1,253}$`)
 )
+
+// ValidHost reports whether h may be a backend host in a route: a host
+// name or an IP address (in brackets for IPv6), nothing PgBouncer would
+// read as another setting. Node addresses are checked with it when they
+// are recorded, so a route can't be refused later.
+func ValidHost(h string) bool { return hostRe.MatchString(h) }
+
+// DropInvalid removes what Render would refuse, so one bad row in the
+// metadata DB leaves the rest of the platform's pooler configuration
+// working, and returns why each was dropped. It skips, never escapes: a
+// route with a bad name or host is left out (its project can't connect
+// until it is fixed); a bad user is left out (that login can't log in); a
+// bad allowlist takes its projects' routes out with it, so a project is
+// never opened up by a list that couldn't be written. Later duplicates of
+// a route or user are dropped too.
+func (c *Config) DropInvalid() []error {
+	var errs []error
+	closed := map[string]bool{}
+	var rs []Restriction
+	for _, r := range c.Restrictions {
+		if _, err := renderHBA([]Restriction{r}, DefaultAdminNetworks); err != nil {
+			errs = append(errs, err)
+			for _, d := range r.Databases {
+				closed[d] = true
+			}
+			continue
+		}
+		rs = append(rs, r)
+	}
+	c.Restrictions = rs
+	var routes []Route
+	seen := map[string]bool{}
+	for _, r := range c.Routes {
+		backend := r.BackendDB
+		if backend == "" {
+			backend = r.Database
+		}
+		var err error
+		switch {
+		case !identRe.MatchString(r.Database):
+			err = fmt.Errorf("pooler: invalid database name %q", r.Database)
+		case !identRe.MatchString(backend):
+			err = fmt.Errorf("pooler: invalid backend database %q for %q", backend, r.Database)
+		case !hostRe.MatchString(r.Host) || r.Port < 1 || r.Port > 65535:
+			err = fmt.Errorf("pooler: invalid backend address %q:%d for %q", r.Host, r.Port, r.Database)
+		case closed[r.Database]:
+			err = fmt.Errorf("pooler: route %q left out with its invalid allowlist", r.Database)
+		case seen[r.Database]:
+			err = fmt.Errorf("pooler: duplicate route for %q", r.Database)
+		}
+		for _, h := range r.MoreHosts {
+			if err == nil && !hostRe.MatchString(h) {
+				err = fmt.Errorf("pooler: invalid backend host %q for %q", h, r.Database)
+			}
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		seen[r.Database] = true
+		routes = append(routes, r)
+	}
+	c.Routes = routes
+	var users []User
+	seenUser := map[string]bool{}
+	for _, u := range c.Users {
+		switch {
+		case !identRe.MatchString(u.Name):
+			errs = append(errs, fmt.Errorf("pooler: invalid user name %q", u.Name))
+		case seenUser[u.Name]:
+			errs = append(errs, fmt.Errorf("pooler: duplicate user %q", u.Name))
+		case !strings.HasPrefix(u.Secret, "SCRAM-SHA-256$") || strings.ContainsAny(u.Secret, "\"\n\r "):
+			errs = append(errs, fmt.Errorf("pooler: user %q: secret must be a SCRAM-SHA-256 verifier", u.Name))
+		default:
+			seenUser[u.Name] = true
+			users = append(users, u)
+		}
+	}
+	c.Users = users
+	return errs
+}
 
 // Render returns the contents of databases.ini and userlist.txt. Entries
 // are sorted so unchanged inputs produce byte-identical files. Names and
@@ -149,21 +242,35 @@ func Render(cfg Config) (databases, userlist, hba []byte, err error) {
 		}
 		fmt.Fprintf(&ul, "%q %q\n", u.Name, u.Secret)
 	}
-	hba, err = renderHBA(cfg.Restrictions)
+	hba, err = renderHBA(cfg.Restrictions, cfg.AdminNetworks)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return db.Bytes(), ul.Bytes(), hba, nil
 }
 
-// renderHBA writes the restrictions first, in database order (the first
-// matching line wins), then the default: everyone, from anywhere, SCRAM.
-func renderHBA(rs []Restriction) ([]byte, error) {
+// renderHBA writes the admin console's networks first, then the
+// restrictions, in database order (the first matching line wins), then
+// the default: everyone, from anywhere, SCRAM.
+func renderHBA(rs []Restriction, admin []string) ([]byte, error) {
 	rs = append([]Restriction(nil), rs...)
 	sort.Slice(rs, func(i, j int) bool { return strings.Join(rs[i].Databases, ",") < strings.Join(rs[j].Databases, ",") })
 	var b bytes.Buffer
 	b.WriteString("# Generated by xenibase-server. Do not edit: changes are overwritten.\n")
 	anywhere := []string{"0.0.0.0/0", "::/0"}
+	if len(admin) == 0 {
+		admin = DefaultAdminNetworks
+	}
+	for _, c := range admin {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil || pfx.Masked() != pfx {
+			return nil, fmt.Errorf("pooler: invalid admin console network %q", c)
+		}
+		fmt.Fprintf(&b, "host %s all %s scram-sha-256\n", AdminDatabase, pfx)
+	}
+	for _, a := range anywhere {
+		fmt.Fprintf(&b, "host %s all %s reject\n", AdminDatabase, a)
+	}
 	for _, r := range rs {
 		if len(r.Databases) == 0 || len(r.CIDRs) == 0 {
 			continue

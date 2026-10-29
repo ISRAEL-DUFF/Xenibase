@@ -66,12 +66,17 @@ the message above. It uses SQLSTATE `08004`, because PgBouncer passes that
 on to the client; PgBouncer would hold the client on `57P03`. The poolers
 have already authenticated the client against the project's credentials,
 so the waker doesn't authenticate again. It must therefore only be
-reachable from the poolers.
+reachable from the poolers, and it checks: it accepts connections only from
+loopback, the server machine's own addresses, its local poolers' addresses (`XENIBASE_POOLER_SESSION_ADDR` and
+`_POOLED_ADDR`, names resolved), the pooler hosts' private addresses, and
+any networks in `XENIBASE_WAKER_ALLOW`. Anything else is refused with
+`28000` before its startup message is read, and wakes nothing.
 
 | Variable | |
 | --- | --- |
 | `XENIBASE_WAKER_ADDR` | The waker as the poolers reach it, `host:port`. The install bundle sets `172.31.250.11:6435` (xenibase-server on the Compose network). With standby pooler hosts (V3 §2.1), use the server's private address and open the port to the pooler hosts only. Empty turns pausing off. |
 | `XENIBASE_WAKER_LISTEN` | Where it listens (default `:6435`). |
+| `XENIBASE_WAKER_ALLOW` | Further networks the waker accepts connections from, comma-separated CIDRs, for poolers that reach it from an address xenibase-server doesn't know (behind NAT, say). |
 | `XENIBASE_FREE_PAUSE_AFTER` | Default `168h` (7 days). |
 | `XENIBASE_FREE_ARCHIVE_AFTER` | Default `2160h` (90 days). |
 | `XENIBASE_FREE_DELETE_AFTER` | Default `8760h` (a year). |

@@ -1,0 +1,28 @@
+<!--atlas
+{
+  "id": "backups",
+  "title": "Backups, restores and imports",
+  "part": "C",
+  "order": 1,
+  "status": "planned",
+  "summary": "Logical backups of shared projects, WAL-G for dedicated ones, the encrypted backup format, restore tests, and imports from other Postgres servers.",
+  "scope": [
+    "Scheduled and on-demand logical backups, retention and the weekly restore test",
+    "WAL-G base backups and point-in-time recovery on dedicated instances",
+    "The encrypted object format and OpenPGP compatibility",
+    "Restores: into a new project and in place",
+    "Imports and Supabase migrations, read-only against the source (<code>pgsource</code>), and verification by row counts and sequences",
+    "Metadata self-backups and disaster recovery"
+  ],
+  "sources": [
+    "internal/backup/",
+    "internal/walg/",
+    "internal/backupfmt/",
+    "internal/pgpstream/",
+    "internal/pgverify/",
+    "internal/pgsource/",
+    "internal/dedicated/pitr.go",
+    "docs/disaster-recovery.md"
+  ]
+}
+-->

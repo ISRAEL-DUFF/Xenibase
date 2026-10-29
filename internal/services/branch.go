@@ -98,7 +98,7 @@ func (s *Service) EnableBranch(ctx context.Context, branch store.Project, parent
 	if !copyFiles {
 		return nil
 	}
-	op, err := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindCopyBranchFiles, ProjectID: &branch.ID,
+	op, err := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindCopyBranchFiles, ProjectID: &branch.ID, Background: true,
 		Params: map[string]any{"parent": parentID}})
 	if err != nil {
 		return err

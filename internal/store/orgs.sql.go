@@ -825,7 +825,7 @@ func (q *Queries) ListOrgMembers(ctx context.Context, orgID uuid.UUID) ([]ListOr
 }
 
 const listOrgOperations = `-- name: ListOrgOperations :many
-SELECT o.id, o.kind, o.project_id, o.params, o.status, o.attempts, o.run_after, o.locked_by, o.locked_at, o.log, o.error, o.created_by, o.created_at, o.finished_at FROM operations o JOIN projects p ON p.id = o.project_id
+SELECT o.id, o.kind, o.project_id, o.params, o.status, o.attempts, o.run_after, o.locked_by, o.locked_at, o.log, o.error, o.created_by, o.created_at, o.finished_at, o.exclusive FROM operations o JOIN projects p ON p.id = o.project_id
 WHERE p.org_id = $1
   AND ($2::text IS NULL OR o.status = $2)
   AND ($3::text IS NULL OR o.kind = $3)
@@ -877,6 +877,7 @@ func (q *Queries) ListOrgOperations(ctx context.Context, arg ListOrgOperationsPa
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}
@@ -1082,7 +1083,7 @@ func (q *Queries) ListPlatformInvitations(ctx context.Context) ([]ListPlatformIn
 }
 
 const listPlatformOperations = `-- name: ListPlatformOperations :many
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations
 WHERE project_id IS NULL
   AND ($1::text IS NULL OR status = $1)
   AND ($2::text IS NULL OR kind = $2)
@@ -1121,6 +1122,7 @@ func (q *Queries) ListPlatformOperations(ctx context.Context, arg ListPlatformOp
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}
@@ -1287,6 +1289,7 @@ type ListUserOrgsRow struct {
 	ProjectCount       int32
 }
 
+// tenant: system - scoped by the user's own memberships (m.user_id).
 // The organisations a user belongs to, personal first.
 func (q *Queries) ListUserOrgs(ctx context.Context, userID uuid.UUID) ([]ListUserOrgsRow, error) {
 	rows, err := q.db.Query(ctx, listUserOrgs, userID)
@@ -1354,36 +1357,6 @@ func (q *Queries) MarkInvitationAccepted(ctx context.Context, arg MarkInvitation
 		return 0, err
 	}
 	return result.RowsAffected(), nil
-}
-
-const moveProjectDBUsers = `-- name: MoveProjectDBUsers :exec
-UPDATE project_db_users SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectDBUsersParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectDBUsers(ctx context.Context, arg MoveProjectDBUsersParams) error {
-	_, err := q.db.Exec(ctx, moveProjectDBUsers, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
-}
-
-const moveProjectMembers = `-- name: MoveProjectMembers :exec
-UPDATE project_members SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectMembersParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectMembers(ctx context.Context, arg MoveProjectMembersParams) error {
-	_, err := q.db.Exec(ctx, moveProjectMembers, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
 }
 
 const orgSlugTaken = `-- name: OrgSlugTaken :one
@@ -1583,7 +1556,8 @@ type SetProjectOrgParams struct {
 	OrgID    uuid.UUID
 }
 
-// Moves a project to another organisation (project transfer).
+// Moves a project to another organisation (project transfer); the child
+// tables that carry org_id follow by their keys (ON UPDATE CASCADE).
 func (q *Queries) SetProjectOrg(ctx context.Context, arg SetProjectOrgParams) error {
 	_, err := q.db.Exec(ctx, setProjectOrg, arg.NewOrgID, arg.ID, arg.OrgID)
 	return err

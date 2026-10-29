@@ -19,12 +19,103 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A read-only member could read as the project owner in the SQL console.**
+  Read-only sessions, read-scope tokens and the table browser's raw filter
+  now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
+  get the login on their first read-only session.
+- **Imports could connect to any address,** including the clusters and nodes
+  that trust Xenibase's own addresses, which bypassed IP allowlists. Sources
+  now pass the outbound rules (public addresses, or hosts the platform admin
+  allow-listed for the organisation; never loopback or a node), pinned to
+  the checked address for the agent's copy.
+- Tenants on a shared cluster could read each other's activity counters
+  (`pg_stat_database` and the `pg_stat_get_db_*`/`pg_stat_get_backend_*`
+  functions). They are revoked; **migration 00066 queues `apply_settings`
+  for every active shared project** to apply this to existing databases.
+- Narrowing an IP allowlist now drops the project's pooled clients from
+  addresses no longer on it; PgBouncer's admin console is limited to private
+  networks (`XENIBASE_POOLER_ADMIN_ALLOW`); a pooler host whose PgBouncer is
+  not on `auth_type = hba` is marked not ready; the waker admits only the
+  poolers (`XENIBASE_WAKER_ALLOW`), and the edge wakes a paused project only
+  for a request with one of its keys; one invalid route or node address is
+  skipped and alerted (`pooler_config_skipped`) instead of blocking every
+  region's pooler sync.
+- **Master-key rotation re-encrypts everything sealed.** It skipped
+  per-project backup keys, Patroni secrets, webhook secrets and headers,
+  scheduled jobs, projects' auth SMTP settings and queued messages, device
+  sign-in tokens and the etcd CA key, and still reported success. If you
+  rotated before, run the rotation again with the old key in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (`docs/operations.md`, "Secrets").
+- **xenibase-server renews its certificate for agents.** It was issued at
+  start for 30 days and never renewed, so a server that ran longer lost
+  every agent. It is now reissued with 7 days left, and the new
+  `agent_client_cert` alert fires if under 3 days remain.
+- **The agent bootstrap token registers the local node once.**
+  `XENIBASE_AGENT_BOOTSTRAP_TOKEN` could claim any node without an agent by
+  name, including one just added and a removed one. It now registers only
+  the bundle's local node (`XENIBASE_SHARED_NODE_NAME`), never a removed
+  node, and only once; afterwards use a token from Nodes → Re-register.
+- **Each edge can have its own credential, bound to a region.** One
+  platform-wide `XENIBASE_EDGE_SECRET` authenticated every edge, and the edge
+  chose its region, so any edge (and every edge node's cloud-init) could
+  read every region's projects. `xenibase-server -issue-edge-credential
+  <name> -edge-region <region>` issues a credential the server binds to its
+  region; edge nodes Xenibase creates get one. The platform-wide secret now
+  serves only regions without their own API domain
+  (`XENIBASE_EDGE_SECRET_ALL_REGIONS=true` restores the old scope,
+  deprecated). See `docs/upgrade.md` before upgrading an install with a
+  region API domain.
+- **A region's pooler hostname gets its own certificate.** Pooler hosts of a
+  region with its own hostname were sent the home region's certificate,
+  which doesn't name theirs. xenibase-server now keeps one per region, in the
+  `XENIBASE_POOLER_TLS` mode, in the region's directory. In `files` mode
+  the certificate must name every region's hostname (`docs/regions.md`).
+- **No Hetzner token on pooler hosts.** The agent on each internet-facing
+  pooler host held a full-access Hetzner token to assign the floating IP.
+  xenibase-server's arbiter now moves it to keepalived's MASTER and the
+  agent only reports its state; `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`
+  keeps agent-side assignment (faster failover while the control plane is
+  down). See `docs/upgrade.md`.
+- **Password rotations no longer keep SCRAM verifiers.** A rotation kept the
+  owner's new and previous verifiers in its parameters forever (a credential
+  switch the new owner's), and the API returned them to anyone who could
+  view the project. They now travel with the operation's secrets, removed
+  when it ends; migration 00062 removes those already stored.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
+- An audit row the metadata database refused was only logged. It is now
+  retried until written (in order, with the request's time), and `/metrics`
+  counts failures, the backlog and rows given up on, which are logged in full
+  (`docs/operations.md`, "The audit log").
+- The audit log's append-only triggers were said to hold "even against
+  xenibase-server itself"; the server owns the table and could disable them.
+  The migration's comment and `docs/security-review.md` now say what they
+  guarantee.
+- The tenant lint's table list missed every backend services table and more,
+  and any mention of `org_id` passed. It now reads the tables from the
+  migrations and requires a real `org_id` predicate.
+- Transferring a project left its reaped sessions, editor preferences and
+  dedicated requests under the old organisation. Every child that carries the
+  project's `org_id` now follows it by a foreign key.
+- Reaped statements (with the tenant's statement text) and finished
+  operations' parameters and step logs were kept forever. Reaped statements
+  now go after 30 days and with their project, and operations keep a summary
+  after 90 days (`docs/operations.md`, "What is kept").
+- A server already running when a newer release migrated the database kept
+  taking operations. It now stops, and answers `/readyz` with 503, within 30
+  seconds. `docs/migrations.md` sets the expand-then-contract rule.
+- Each call to a node's agent opened a new TLS connection; calls now reuse one
+  per node.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
+- Migrations 00068 and 00069 move children an earlier transfer left behind to
+  their project's organisation and add the keys; 00070 builds two indexes
+  concurrently for the retention sweep (`docs/upgrade.md`, "Upgrading from
+  4.2.4").
+- Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
+  verifiers from finished password rotations and credential switches.
 
 ## v4.2.4
 

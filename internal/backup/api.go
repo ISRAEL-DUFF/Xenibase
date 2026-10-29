@@ -188,7 +188,7 @@ func (s *Service) TestRestoreNow(ctx context.Context, projectID *uuid.UUID, by *
 			return store.Operation{}, err
 		}
 	}
-	return jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindRestoreTest, ProjectID: projectID, CreatedBy: by})
+	return jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindRestoreTest, ProjectID: projectID, CreatedBy: by, Background: true})
 }
 
 // Overview summarises backup health.

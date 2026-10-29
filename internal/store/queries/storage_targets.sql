@@ -82,6 +82,7 @@ FROM backups b JOIN projects p ON p.id = b.project_id JOIN storage_targets t ON 
 WHERE p.org_id = @org_id AND t.org_id IS NULL AND b.status IN ('succeeded', 'copied') AND b.deleted_at IS NULL;
 
 -- name: SetInstanceWALG :exec
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 UPDATE instances SET walg_prefix = @walg_prefix, walg_target_id = @walg_target_id, walg_key_id = sqlc.narg(walg_key_id)
 WHERE id = @id;
 
@@ -110,6 +111,7 @@ UPDATE backup_keys SET retired_at = now() WHERE id = @id AND retired_at IS NULL;
 SELECT * FROM projects WHERE id = @id FOR UPDATE;
 
 -- name: InstanceArchivingTo :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT EXISTS (SELECT 1 FROM instances WHERE walg_prefix = @walg_prefix AND walg_target_id = @walg_target_id AND status <> 'deleted')::bool;
 
 -- name: DedicatedArchiveDrift :many

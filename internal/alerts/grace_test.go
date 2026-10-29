@@ -10,6 +10,20 @@ import (
 	"github.com/israel-duff/xenibase/internal/pooler"
 )
 
+// The agent client certificate alert fires only when renewal has left it
+// with less than three days.
+func TestClientCertCondition(t *testing.T) {
+	exp := time.Now().Add(20 * 24 * time.Hour)
+	s := New(nil, nil, Config{ClientCertExpiry: func() time.Time { return exp }}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if c := s.clientCertConditions(); len(c) != 0 {
+		t.Fatalf("fired with 20 days left: %+v", c)
+	}
+	exp = time.Now().Add(2 * 24 * time.Hour)
+	if c := s.clientCertConditions(); len(c) != 1 || c[0].kind != KindAgentClientCert {
+		t.Fatalf("with two days left: %+v", c)
+	}
+}
+
 // A pooler counts as down only after failing for the grace period.
 func TestPoolerGrace(t *testing.T) {
 	ghost, err := pooler.NewAdmin("ghost", "127.0.0.1:1", "xenibase", "x", "disable")

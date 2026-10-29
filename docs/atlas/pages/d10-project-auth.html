@@ -1,0 +1,25 @@
+<!--atlas
+{
+  "id": "project-auth",
+  "title": "Project auth",
+  "part": "D",
+  "order": 2,
+  "status": "planned",
+  "summary": "Sign-in for a project's own users: the xb_auth data, ES256 tokens, phone codes by SMS and WhatsApp, OAuth providers, MFA and hooks.",
+  "scope": [
+    "Users, sessions and rotating refresh tokens",
+    "ES256 signing keys and JWKs",
+    "One-time codes by SMS and WhatsApp, caps and costs",
+    "OAuth providers, MFA, captcha and auth hooks"
+  ],
+  "sources": [
+    "internal/projauth/",
+    "internal/jwtes/",
+    "internal/messaging/",
+    "internal/edge/auth.go",
+    "internal/edge/mfa.go",
+    "internal/edge/oauth.go",
+    "internal/services/authhook.go"
+  ]
+}
+-->

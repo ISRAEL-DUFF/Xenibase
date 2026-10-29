@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -66,7 +67,9 @@ type Handler func(ctx context.Context, op store.Operation, log *StepLogger) erro
 type Kind struct {
 	Handler Handler
 	// MaxAttempts is the number of attempts before the operation fails.
-	// Zero means DefaultMaxAttempts.
+	// Zero means DefaultMaxAttempts. An operation whose worker crashed on
+	// the last attempt gets one more run, since the handler may have
+	// finished before the crash; a second crash fails it unrun.
 	MaxAttempts int
 	// Timeout bounds a single attempt. Zero means DefaultTimeout.
 	Timeout time.Duration
@@ -112,9 +115,22 @@ type EnqueueParams struct {
 	ProjectID *uuid.UUID
 	Params    any // marshalled to JSON; nil means {}
 	CreatedBy *uuid.UUID
+	// Background marks an operation that may be queued beside the
+	// project's one exclusive operation: one queued by that operation
+	// itself (a new branch's file copy, a failed create's cleanup), a retry
+	// of a single step, or a restore test. It still makes the project busy
+	// for the exclusive actions that check (withIdleProject).
+	Background bool
 }
 
+// ErrProjectBusy means the project already has an exclusive operation
+// queued or running.
+var ErrProjectBusy = errors.New("another operation is in progress on this project")
+
 // Enqueue inserts a queued operation. The table trigger wakes idle workers.
+// A second exclusive operation on a project is refused with ErrProjectBusy;
+// callers check first under the project's row lock (provision's
+// withIdleProject), and this is the schema's guarantee behind it.
 func Enqueue(ctx context.Context, db store.DBTX, p EnqueueParams) (store.Operation, error) {
 	params := json.RawMessage(`{}`)
 	if p.Params != nil {
@@ -124,12 +140,18 @@ func Enqueue(ctx context.Context, db store.DBTX, p EnqueueParams) (store.Operati
 		}
 		params = b
 	}
-	return store.New(db).EnqueueOperation(ctx, store.EnqueueOperationParams{
+	op, err := store.New(db).EnqueueOperation(ctx, store.EnqueueOperationParams{
 		Kind:      p.Kind,
 		ProjectID: p.ProjectID,
 		Params:    params,
 		CreatedBy: p.CreatedBy,
+		Exclusive: !p.Background,
 	})
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "operations_one_exclusive_per_project" {
+		return op, ErrProjectBusy
+	}
+	return op, err
 }
 
 // Get returns an operation by ID, or ErrNotFound.

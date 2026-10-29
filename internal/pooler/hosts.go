@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +46,48 @@ type poolerHostEntry struct {
 	pooled    *Admin
 	reachable bool
 	status    agentapi.PoolerStatus
+	// The last check that both PgBouncers apply hba.conf: when, and why
+	// not ("" when they do).
+	hbaCheckedAt time.Time
+	hbaProblem   string
+}
+
+// hbaCheckEvery spaces the arbiter's auth_type checks of a host.
+const hbaCheckEvery = time.Minute
+
+// enforcement says why e's PgBouncers do not apply hba.conf, or "" when
+// they do (or can't be asked: the console being down is reported on its
+// own). The answer is kept for hbaCheckEvery.
+func (h *hostSet) enforcement(ctx context.Context, e *poolerHostEntry) string {
+	h.mu.Lock()
+	if !e.hbaCheckedAt.IsZero() && time.Since(e.hbaCheckedAt) < hbaCheckEvery {
+		why := e.hbaProblem
+		h.mu.Unlock()
+		return why
+	}
+	session, pooled := e.session, e.pooled
+	h.mu.Unlock()
+	var why []string
+	asked := false
+	for _, a := range []*Admin{session, pooled} {
+		if a == nil {
+			continue
+		}
+		w, err := a.EnforcesHBA(ctx)
+		if err != nil {
+			continue
+		}
+		asked = true
+		if w != "" {
+			why = append(why, w)
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if asked {
+		e.hbaCheckedAt, e.hbaProblem = time.Now(), strings.Join(why, "; ")
+	}
+	return e.hbaProblem
 }
 
 type hostSet struct {
@@ -254,6 +298,42 @@ func (m *Manager) pushHosts(ctx context.Context) error {
 }
 
 // event records a pooler event; failures to record are only logged.
+// PoolerAddrs are the addresses the poolers connect from, as far as
+// xenibase-server knows them: its local poolers' hosts and every pooler
+// host's private address, names resolved. The waker admits only these.
+func (m *Manager) PoolerAddrs(ctx context.Context) []netip.Addr {
+	var hosts []string
+	for _, a := range m.admins {
+		hosts = append(hosts, a.cfg.Host)
+	}
+	if hs := m.hostSet(); hs != nil {
+		if entries, err := hs.refresh(ctx); err == nil {
+			for _, e := range entries {
+				hosts = append(hosts, e.node.PrivateAddr)
+			}
+		} else {
+			m.log.Warn("pooler addresses: list the pooler hosts", "err", err)
+		}
+	}
+	var out []netip.Addr
+	for _, h := range hosts {
+		if a, err := netip.ParseAddr(h); err == nil {
+			out = append(out, a.Unmap())
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		as, err := net.DefaultResolver.LookupNetIP(rctx, "ip", h)
+		cancel()
+		for _, a := range as {
+			out = append(out, a.Unmap())
+		}
+		if err != nil {
+			m.log.Debug("pooler addresses: resolve", "host", h, "err", err)
+		}
+	}
+	return out
+}
+
 func (m *Manager) event(ctx context.Context, node *uuid.UUID, kind string, detail map[string]any) {
 	d, _ := json.Marshal(detail)
 	var id *uuid.UUID

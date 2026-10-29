@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/nodes"
+	"github.com/israel-duff/xenibase/internal/outbound"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/storage"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -71,6 +73,10 @@ type Config struct {
 	// MetadataPG is the metadata DB as the agent reaches it, for
 	// self-backups (spec §11.6). Zero disables them.
 	MetadataPG agentapi.PGConn
+	// SourceBlock and SourceInternal are outbound.Config's Blocked and
+	// Internal for import sources: extra ranges refused unless
+	// allow-listed, and the platform's own networks, always refused.
+	SourceBlock, SourceInternal []netip.Prefix
 }
 
 func (c *Config) setDefaults() {
@@ -97,12 +103,17 @@ type Service struct {
 	// Dedicated runs base backups and point-in-time recovery; nil without
 	// the dedicated tier.
 	Dedicated *dedicated.Service
+	// CheckSource checks an import source's address for an organisation
+	// (outbound.Service.CheckSource, by default with SourceBlock and
+	// SourceInternal).
+	CheckSource func(ctx context.Context, org uuid.UUID, host string, port int) (netip.Addr, error)
 }
 
 // NewService returns a Service and hooks final backups into deletes.
 func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps *provision.Service, cfg Config, log *slog.Logger) *Service {
 	cfg.setDefaults()
-	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log, ephemeral: NewEphemeral()}
+	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log, ephemeral: NewEphemeral(),
+		CheckSource: outbound.New(db, outbound.Config{Blocked: cfg.SourceBlock, Internal: cfg.SourceInternal}, log).CheckSource}
 	ps.FinalBackup = s.finalBackup
 	return s
 }
@@ -488,7 +499,9 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 				// Daily base backup; WAL is archived continuously (spec §6.4).
 				kind, params = KindBaseBackup, map[string]any{"scheduled": true}
 			}
-			if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &id, Params: params}); err != nil {
+			// The list was read without locks: queue only on a project
+			// still idle under its row lock, as a request would.
+			if _, err := provision.EnqueueIfIdleTx(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &id, Params: params}); err != nil {
 				return err
 			}
 		}
@@ -502,7 +515,7 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 			}
 			for _, p := range drift {
 				id := p.ID
-				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindStorageSwitch, ProjectID: &id, Params: map[string]any{}}); err != nil {
+				if _, err := provision.EnqueueIfIdleTx(ctx, tx, jobs.EnqueueParams{Kind: KindStorageSwitch, ProjectID: &id, Params: map[string]any{}}); err != nil {
 					return err
 				}
 			}
@@ -522,7 +535,7 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 				// Alternate between primary and copy targets (V3 §2.5).
 				// The first test (no last operation) reads a copy if any.
 				next := RestoreTestParams{FromCopy: !restoreTestParams(last).FromCopy}
-				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next}); err != nil {
+				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next, Background: true}); err != nil {
 					return err
 				}
 			}

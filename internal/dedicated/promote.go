@@ -299,7 +299,7 @@ func (s *Service) freeze(ctx context.Context, p store.Project, log *jobs.StepLog
 	var n int
 	// The console's role too: it can SET ROLE to the owner while NOLOGIN.
 	if err := admin.QueryRow(ctx, `SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE datname = $1 AND usename = ANY($2)`,
-		p.DbName, append([]string{p.OwnerRole, provision.ConsoleRole(p.DbName)}, logins...)).Scan(&n); err != nil {
+		p.DbName, append([]string{p.OwnerRole, provision.ConsoleRole(p.DbName), provision.ConsoleReadOnlyRole(p.DbName)}, logins...)).Scan(&n); err != nil {
 		return fmt.Errorf("terminate sessions: %w", err)
 	}
 	msg := "writes frozen: poolers paused"

@@ -98,6 +98,12 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Choosing the node is placement, the platform's: a tenant could
+	// otherwise put instances next to anyone's.
+	if req.NodeId != nil && !acc.Actor.PlatformAdmin {
+		writeError(w, http.StatusForbidden, "forbidden", "only platform admins choose the node; leave node_id out")
+		return
+	}
 	a := auditFrom(r.Context())
 	a.set("name", req.Name)
 	cp := provision.CreateParams{OrgID: acc.OrgID, CreatorRole: creatorRole(acc),
@@ -437,6 +443,15 @@ func (s *Server) SetProjectNetwork(w http.ResponseWriter, r *http.Request, id ge
 		if err := pm.Sync(r.Context()); err != nil {
 			s.internalError(w, "project network: pooler sync", err)
 			return
+		}
+		// HBA rules apply at login: drop clients already connected from
+		// addresses the list no longer admits.
+		n, err := pm.DropDisallowed(r.Context(), p, p.AllowedCidrs)
+		if err != nil {
+			s.log.Warn("project network: drop disallowed clients", "project_id", p.ID, "err", err)
+		}
+		if n > 0 {
+			a.set("dropped_connections", n)
 		}
 	}
 	writeJSON(w, http.StatusOK, s.networkOut(r, p.AllowedCidrs))

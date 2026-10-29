@@ -41,10 +41,19 @@ What happens:
    replaces them, which compose doesn't notice). Connected clients
    reconnect (a second or two).
 4. The bundled agent restarts with the new version. Running operations are
-   resumed by the new server: every step is idempotent.
+   resumed by the new server: every step is idempotent. The old server
+   hands back the attempt it was running when it stops, so a restart does
+   not use up an attempt (an operation on its last attempt runs again
+   rather than failing). Only a server that crashes or is killed before it
+   could hand back costs the operation an attempt; one killed on the last
+   attempt gets one more run, which finds finished work done, before the
+   operation gives up. An operation of a kind the new server no longer
+   runs fails after a day, saying so.
 5. Migrations may queue one-off `apply_settings` operations (for example,
    00018 gives older shared projects their `temp_file_limit`); they finish
-   in the background and show on Operations.
+   in the background and show on Operations. From 00063 a project has at
+   most one exclusive operation queued or running, so a migration that
+   queues one must skip projects that already have one.
 
 Check afterwards: `docker compose exec xenibase-server
 xenibase-server -version` shows the new version, Nodes shows every agent
@@ -331,6 +340,55 @@ below say what each version changed.
   xenibase-server. Before, setting them in `.env` had no effect.
 - Upgrade xenibase-edge with xenibase-server: the cache, render workers and
   heartbeats need this release on both.
+
+## Upgrading from 4.2.4
+
+- **Old and new servers side by side**: a xenibase-server that finds the
+  metadata database migrated by a newer release while it runs (checked
+  every 30 seconds) logs `schema check: no longer taking operations`, stops
+  claiming operations and answers `/readyz` with 503 until it is replaced.
+  With more than one control-plane server, put `/readyz` in the load
+  balancer's health check, and upgrade them one after another.
+
+- **Projects' children keep their organisation** (migrations 00068 and
+  00069): the tables that carry a project's `org_id` (members, their
+  logins, saved queries, reaped sessions, editor preferences, dedicated
+  requests) get a foreign key to `projects (id, org_id)` that follows a
+  transfer. Rows an earlier transfer left under the old organisation are
+  moved to the project's first. 00068 adds the keys without scanning;
+  00069 checks the existing rows without blocking writes. Both are quick at
+  the sizes these tables have. A 4.2.4 server still running during the
+  upgrade can't transfer a project (the transfer fails and changes nothing)
+  until it is replaced.
+- **Retention** (migration 00070, two indexes built concurrently): reaped
+  statements are removed after 30 days and with their project, and finished
+  operations lose their parameters and step logs after 90 days, keeping the
+  row as a summary ([what is kept](operations.md#what-is-kept)). On an
+  install with years of operations the sweep prunes 500 every 5 minutes
+  until it has caught up; the metadata backup taken before the upgrade
+  keeps the full history.
+- **Edge credentials** (migration 00061): the platform-wide
+  `XENIBASE_EDGE_SECRET` now serves only the regions without their own API
+  domain. **Before upgrading**, give every edge of a region with its own API
+  domain its own credential: after the upgrade, run
+  `xenibase-server -issue-edge-credential <edge name> -edge-region <region>`
+  for each and put the printed value in that edge's `XENIBASE_EDGE_SECRET`
+  ([Running xenibase-edge](backend-services.md#running-xenibase-edge)).
+  Until you do, such an edge gets `403` for its region's feed and serves
+  nothing; to keep the old behaviour while you switch, set
+  `XENIBASE_EDGE_SECRET_ALL_REGIONS=true` on xenibase-server (deprecated).
+  Edge nodes created before the upgrade carry the platform-wide secret in
+  their cloud-init: issue them credentials too, and if any of them served
+  a region with its own domain, rotate `XENIBASE_EDGE_SECRET` afterwards.
+- **Pooler hosts no longer assign the floating IP.** xenibase-server's
+  arbiter now moves it to the host keepalived makes MASTER, so make sure
+  xenibase-server has `XENIBASE_FLOATING_IP_ID` and a Hetzner token
+  ([edge poolers](edge-poolers.md)) before upgrading the pooler hosts. Then
+  remove `XENIBASE_AGENT_HETZNER_TOKEN` and `XENIBASE_AGENT_FLOATING_IP_ID`
+  from each host's `.env` (an agent that still has them logs a warning and
+  ignores them) and revoke that token in Hetzner if nothing else uses it. To
+  keep agent-side assignment, which also fails over while xenibase-server is
+  down, set `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true` instead.
 
 ## Rolling back
 

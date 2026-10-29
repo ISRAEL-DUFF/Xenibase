@@ -974,7 +974,10 @@ connection time (`realtime_connection_minutes`) are metered.
   by up to 10 seconds; see docs/read-replicas.md.
 
 A paused Free project answers `503 project_resuming` with `Retry-After` and
-is woken, as a database connection would wake it. A suspended
+is woken, as a database connection would wake it, when the request carries
+one of its live API keys. Without one (a public file, an OAuth callback, or
+anyone who only knows the hostname) it answers `503 project_paused` and
+stays asleep. A suspended
 organisation's projects answer `403 project_suspended`.
 
 ## Usage and logs
@@ -1045,14 +1048,37 @@ Run one xenibase-edge per region, on the region's nodes. It keeps no state.
 | Setting | |
 | --- | --- |
 | `XENIBASE_API_DOMAIN` (server) | The API domain: projects are at `<ref>.<domain>`. |
-| `XENIBASE_EDGE_SECRET` (server and edges) | At least 32 characters, the same everywhere. Without it xenibase-server serves no edge. |
+| `XENIBASE_EDGE_SECRET` (server) | At least 32 characters. Without it xenibase-server serves no edge. It is the platform-wide secret, and serves only the regions without their own API domain. |
+| `XENIBASE_EDGE_SECRET` (edges) | The edge's own credential (see below), or for an edge of the platform's API domain, the server's value. |
+| `XENIBASE_EDGE_SECRET_ALL_REGIONS` (server) | Deprecated: `true` lets the platform-wide secret serve every region again, as before edges had their own credentials. |
 | `XENIBASE_EDGE_CONTROL_URL` | xenibase-server's URL as the edge reaches it. |
 | `XENIBASE_EDGE_DOMAIN` | The API domain it serves: `XENIBASE_API_DOMAIN`, or for an edge in a region with its own API domain, that domain ([Regions](regions.md#a-regions-api-domain)). |
-| `XENIBASE_EDGE_REGION` | The region it serves (empty for all). An edge for a region's own API domain sets it to that region. |
+| `XENIBASE_EDGE_REGION` | The region it serves (empty for all it may see). An edge for a region's own API domain sets it to that region. |
+
+**Edge credentials.** The server decides which regions an edge sees from
+how it signs, not from `XENIBASE_EDGE_REGION`. An edge in a region with its
+own API domain needs a credential of its own, bound to that region:
+
+```sh
+docker compose exec xenibase-server xenibase-server -issue-edge-credential edge-lagos-1 -edge-region ng-lagos
+```
+
+prints `xbedge_<id>_<secret>`; put it in the edge's `XENIBASE_EDGE_SECRET`.
+Running it again for the same name prints the same credential;
+`-revoke-edge-credential edge-lagos-1` revokes it. An edge with a credential
+gets only its region's projects (asking for another region is refused), and
+can wake, send auth messages and hooks, raise storage events and report
+usage only for them. A compromised regional edge therefore exposes one
+region. Edge nodes Xenibase creates get their own credential in their
+cloud-init. The platform-wide secret still serves the edges of the
+platform's API domain (the bundle's own edge among them), for the regions
+whose projects use that domain.
 | `XENIBASE_EDGE_TLS_CERT`, `XENIBASE_EDGE_TLS_KEY` | A wildcard certificate for `*.<domain>`. |
 | `XENIBASE_EDGE_LISTEN` | Default `:8443`. |
 | `XENIBASE_EDGE_POOLER_ADDR` | Optional: the transaction pooler as the edge reaches it. |
 | `XENIBASE_EDGE_SESSION_ADDR` | Optional: the session-mode pooler as the edge reaches it (realtime's `LISTEN` connections). |
+| `XENIBASE_EDGE_POOLER_SSLMODE` | TLS to the poolers: `require` (default: encrypted, certificate not checked), `verify-ca` or `verify-full` (checked; use it when the edge crosses a network you don't control, such as a regional edge reaching the home region's poolers). `prefer` and below are refused: the service logins' sessions would fall back to plain text. |
+| `XENIBASE_EDGE_POOLER_ROOT_CERT` | Optional: a PEM file of the CA that signed the poolers' certificate, for `verify-ca`/`verify-full` with a self-signed or private certificate. A certificate from a public CA (`XENIBASE_POOLER_TLS=acme`) verifies against the system's roots without it. |
 | `XENIBASE_EDGE_TRUSTED_PROXIES` | Optional: CIDRs allowed to set `X-Forwarded-For`. |
 | `XENIBASE_EDGE_CACHE_MB` | Optional: the anonymous-read cache's size per edge process (default 64). |
 | `XENIBASE_EDGE_RENDER_MEMORY_MB` | Optional: each image render worker's memory limit (default 512, at least 64). |

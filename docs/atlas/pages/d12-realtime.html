@@ -1,0 +1,24 @@
+<!--atlas
+{
+  "id": "realtime",
+  "title": "Realtime",
+  "part": "D",
+  "order": 4,
+  "status": "planned",
+  "summary": "Row changes and broadcasts to clients: the edge's realtime hub, its protocol, persisted topics, and the session-mode connection it listens on.",
+  "scope": [
+    "Which tables send changes, and how the edge learns of them",
+    "The hub, channels and the wire protocol",
+    "Broadcasts and persisted topics",
+    "Limits and metering"
+  ],
+  "sources": [
+    "internal/edge/realtime.go",
+    "internal/edge/rthub.go",
+    "internal/edge/rtproto.go",
+    "internal/edge/rtbroadcast.go",
+    "internal/services/realtime.go",
+    "test/load/realtime_test.go"
+  ]
+}
+-->

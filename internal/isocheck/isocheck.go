@@ -188,7 +188,19 @@ func Roles(ctx context.Context, admin *pgx.Conn, tenants []Tenant) ([]Finding, e
 		for _, role := range extra {
 			logins[role] = role != provision.ReadOnlyRole(t.DB)
 		}
-		for _, role := range append([]string{t.Role, provision.ConsoleRole(t.DB)}, extra...) {
+		// The read-only console login may become the read-only role and
+		// nothing else: membership of the owner would let a read-only
+		// session switch to it and read past RLS.
+		var roOwner bool
+		if err := admin.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles c, pg_roles o
+			WHERE c.rolname = $1 AND o.rolname = $2 AND pg_has_role(c.oid, o.oid, 'MEMBER'))`,
+			provision.ConsoleReadOnlyRole(t.DB), t.Role).Scan(&roOwner); err != nil {
+			return nil, err
+		}
+		if roOwner {
+			out = append(out, Finding{"console logins", fmt.Sprintf("%s can become the owner %s", provision.ConsoleReadOnlyRole(t.DB), t.Role)})
+		}
+		for _, role := range append([]string{t.Role, provision.ConsoleRole(t.DB), provision.ConsoleReadOnlyRole(t.DB)}, extra...) {
 			var exists, super, createdb, createrole, repl, bypass, canLogin bool
 			var connLimit int
 			err := admin.QueryRow(ctx, `SELECT true, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolcanlogin, rolconnlimit
@@ -271,7 +283,22 @@ func Database(ctx context.Context, conn *pgx.Conn) ([]Finding, error) {
 	if create {
 		out = append(out, Finding{"schema public", "PUBLIC may CREATE in " + db})
 	}
-	rows, err := conn.Query(ctx, `SELECT extname FROM pg_extension WHERE extname = ANY($1)
+	// Other sessions' and databases' activity (V2 §10.2).
+	rows, err := conn.Query(ctx, `SELECT v FROM unnest(ARRAY['pg_catalog.pg_stat_activity', 'pg_catalog.pg_stat_database', 'pg_catalog.pg_stat_database_conflicts']) v
+		WHERE has_table_privilege('public', v, 'SELECT')
+		UNION ALL SELECT f FROM (`+provision.ActivityFunctions+`) fns(f)
+		WHERE has_function_privilege('public', 'pg_catalog.' || f, 'EXECUTE')`)
+	if err != nil {
+		return nil, err
+	}
+	readable, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	if len(readable) > 0 {
+		out = append(out, Finding{"activity privacy", fmt.Sprintf("PUBLIC may read other sessions' or databases' activity in %s: %s", db, strings.Join(readable, ", "))})
+	}
+	rows, err = conn.Query(ctx, `SELECT extname FROM pg_extension WHERE extname = ANY($1)
 		UNION SELECT lanname FROM pg_language WHERE NOT lanpltrusted AND lanname NOT IN ('internal', 'c')`, EscapeProne)
 	if err != nil {
 		return nil, err
@@ -366,6 +393,21 @@ func Probes(ctx context.Context, ps *provision.Service, a, b store.Project, aPas
 		fail("read other sessions through pg_stat_get_activity")
 	} else if !isRefusal(err) {
 		return nil, err
+	}
+	// Nor B's database's activity, or its backends' database and role.
+	for _, at := range []struct{ what, sql string }{
+		{"read pg_stat_database", `SELECT count(*) FROM pg_stat_database`},
+		{"read pg_stat_database_conflicts", `SELECT count(*) FROM pg_stat_database_conflicts`},
+		{"read other databases' commits", `SELECT pg_stat_get_db_xact_commit(oid) FROM pg_database LIMIT 1`},
+		{"read other backends' databases", `SELECT pg_stat_get_backend_dbid(1)`},
+		{"read other backends' roles", `SELECT pg_stat_get_backend_userid(1)`},
+	} {
+		var n any
+		if err := ca.QueryRow(ctx, at.sql).Scan(&n); err == nil {
+			fail(at.what)
+		} else if !isRefusal(err) {
+			return nil, fmt.Errorf("%s: unexpected error: %w", at.what, err)
+		}
 	}
 	// Quota bypass attempts (V2 §10.4).
 	for _, at := range []struct{ what, sql string }{

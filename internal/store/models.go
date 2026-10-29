@@ -358,6 +358,17 @@ type EdgeCpuSample struct {
 	CpuPercent float32
 }
 
+type EdgeCredential struct {
+	ID         uuid.UUID
+	Name       string
+	Region     string
+	SecretEnc  []byte
+	CreatedBy  *uuid.UUID
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	RevokedAt  *time.Time
+}
+
 type EdgeReport struct {
 	BatchID    string
 	Edge       string
@@ -754,6 +765,7 @@ type Operation struct {
 	CreatedBy  *uuid.UUID
 	CreatedAt  time.Time
 	FinishedAt *time.Time
+	Exclusive  bool
 }
 
 type OrgMember struct {

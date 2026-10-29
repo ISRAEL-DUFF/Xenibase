@@ -20,6 +20,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Pooler host not ready | critical | An edge pooler host can't serve or is stale ([standby edge pooler](edge-poolers.md)) |
   | Pooler split brain | critical | Both edge pooler hosts say keepalived made them MASTER |
   | Isolation check | critical | The nightly tenant-isolation check found a problem |
+  | Agent client certificate | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
 
 - **Operations** shows every long action with its step log.
 - **Metrics** (per project and per node) charts size, connections, TPS,
@@ -136,6 +137,46 @@ platform (Platform audit).
 
 Projects created before V2 are in the platform admin's personal
 organisation, unchanged: same URLs, passwords, and backups.
+
+## The audit log
+
+Every mutating API request, and the downloads of backups and backup keys,
+writes an audit row when the handler returns. The row is written after the
+change, not in the same transaction, so what is guaranteed is this:
+
+- If the metadata database refuses the insert (a failover, a full disk), the
+  row is kept in xenibase-server's memory and retried every 5 seconds, in
+  order, with the time of the request, until it is written.
+- Up to 10,000 rows wait. Past that the oldest is given up on, and a row
+  given up on (also any still waiting when the server stops) is logged at
+  error level as `audit row not written` with the whole row as JSON, so it
+  can be put back by hand.
+- `/metrics` counts it: `xenibase_audit_write_failures_total`,
+  `xenibase_audit_pending`, `xenibase_audit_retried_total` and
+  `xenibase_audit_dropped_total`. These are the process's own and are served
+  while the database is down. Alert on `xenibase_audit_dropped_total > 0`,
+  and on `xenibase_audit_pending > 0` for more than a few minutes.
+- A crash of xenibase-server (or the machine) loses the rows still waiting.
+
+## What is kept
+
+How long the metadata database keeps what it records:
+
+| Data | Kept |
+| --- | --- |
+| Metrics | 1-minute points 24 hours, hourly points 30 days |
+| Query insights (statistics, slow queries, query texts) | 30 days |
+| Reaped statements (with the statement's text) | 30 days, and removed within 5 minutes of the project's deletion |
+| Data API request logs, edge reports | 7 days |
+| Webhook deliveries | 7 days; dead letters 30 |
+| Scheduled job runs | 30 days, at most 1,000 per job |
+| Operations | A finished operation's parameters and step log for 90 days; then the row stays as a summary (kind, project, status, error, who and when) |
+| Audit log | For good (append-only) |
+| Projects and organisations | For good, marked deleted |
+
+The tenancy sweep (every 5 minutes) removes reaped statements and prunes up
+to 500 operations at a time (about 144,000 a day), so the backlog an
+upgraded install starts with clears gradually.
 
 ## Quotas, storage locks and usage
 
@@ -306,6 +347,18 @@ token, so the token rules above apply to it; users disconnect an app under
 - Add nodes on the Nodes page; new shared projects go to the least loaded
   shared cluster, dedicated instances to the least loaded dedicated node.
 
+## Pooler configuration
+
+xenibase-server writes the poolers' routes, logins and `hba.conf` from the
+metadata database on every change. An entry PgBouncer can't be given safely
+(a node address with an underscore, a malformed name) is left out rather
+than escaped, with an error in the log and the `pooler_config_skipped`
+alert naming it; everything else is still written. That project (or login)
+can't connect through the poolers until the row is fixed. A project whose
+allowlist couldn't be written loses its routes too, so it is never opened
+to everyone by mistake. Node addresses are checked when a node is added:
+a host name of letters, digits, dots and dashes, or an IP address.
+
 ## Outbound traffic
 
 Webhooks and HTTP jobs are the only way tenants make Xenibase send requests
@@ -331,6 +384,18 @@ Only one xenibase-server delivers webhooks and runs the scheduler at a time
 (advisory locks), so more servers can be added later without double
 deliveries.
 
+Imports and Supabase migrations connect to a database the tenant names, from
+xenibase-server and an agent, whose addresses every cluster trusts. Their
+source goes through the same rules, and stricter ones: the host must resolve
+to public addresses (or be allow-listed for the organisation, as above), and
+loopback, link-local, the nodes' and instances' own addresses,
+`XENIBASE_OUTBOUND_BLOCK` and, with machines Xenibase creates,
+`XENIBASE_CLOUD_PRIVATE_CIDR` are refused even when allow-listed. The server
+and the agent's copy connect to the address that was checked, so the name
+can't be rebound in between, and a connection string may name only one host
+and port (no `host=` parameter). A preflight passes if any of the caller's
+organisations allows the host.
+
 ## Secrets
 
 - `.env` holds `XENIBASE_MASTER_KEY`; keep a copy off the server.
@@ -350,6 +415,13 @@ deliveries.
   The rotation re-encrypts everything in one transaction and checks the new
   key alone opens it all; on any error nothing changes. Operators sign in
   again afterwards. Back up the new `.env`.
+- Releases before this one skipped part of what is sealed (per-project
+  backup keys, Patroni secrets, webhook secrets and headers, scheduled jobs,
+  projects' auth SMTP settings and queued messages, device sign-in tokens,
+  the etcd CA key) and still reported success. If you rotated with one of
+  them, those values still need the old key: keep it in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (or put it back) and run the rotation again
+  with this release before you drop it.
 - The backup key never changes (old backups need it); keep it offline.
 - `XENIBASE_CONSOLE_DISABLED=true` turns the SQL console and table browser
   off for every project.

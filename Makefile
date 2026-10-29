@@ -29,7 +29,7 @@ DEV_ENV := deploy/dev/server.env
 # Loads $(DEV_ENV); XENIBASE_* variables already set by the caller win.
 LOAD_DEV_ENV := saved="$$(export -p | grep ' XENIBASE_' || true)"; set -a; . ./$(DEV_ENV); set +a; eval "$$saved"
 
-.PHONY: all dev run-dev dev-up dev-down dev-key pooler-seed test-db test-integration test-move test-agent-bin pg-image pooler-host-images status-image edge-image test-acme test-e2e test-docs test-deploy test-acmedns test-upgrade test-load test-payments-sandbox e2e-images generate check-generated build build-ui build-go test test-go test-web test-sdk docs-site lint release-check release clean clean-ui
+.PHONY: all dev run-dev dev-up dev-down dev-key pooler-seed test-db test-integration test-move test-agent-bin pg-image pooler-host-images status-image edge-image test-acme test-e2e test-docs test-deploy test-acmedns test-upgrade test-load test-payments-sandbox e2e-images generate check-generated build build-ui build-go test test-go test-web test-sdk docs-site atlas atlas-stale lint release-check release clean clean-ui
 
 all: build
 
@@ -293,6 +293,14 @@ test-sdk:
 	cd sdk/go && go vet ./... && go test -race ./...
 	@if command -v dart >/dev/null; then cd sdk/dart && dart pub get && dart analyze && dart test test/unit_test.dart; \
 	else echo "dart not installed: skipping the Dart SDK"; fi
+
+# The engineering atlas (docs/atlas/README.md): build it, and list the pages
+# whose code has changed since they were last checked.
+atlas:
+	node docs/atlas/atlas.mjs build
+
+atlas-stale:
+	node docs/atlas/atlas.mjs stale
 
 lint:
 	golangci-lint run ./...

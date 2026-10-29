@@ -9,11 +9,15 @@
 #   XENIBASE_EDGE_PEER_IP=10.0.0.12     the other pooler host's
 #   XENIBASE_EDGE_INTERFACE=enp7s0      the private network's interface
 #   XENIBASE_EDGE_VRRP_PASSWORD=...     the same on both, at most 8 characters
-#   XENIBASE_AGENT_FLOATING_IP_ID=...   the Hetzner floating IP
-#   XENIBASE_AGENT_HETZNER_TOKEN=...    a Hetzner Cloud API token
+#
+# No Hetzner token here: xenibase-server moves the floating IP to the host
+# keepalived makes MASTER. (XENIBASE_AGENT_ASSIGN_FLOATING_IP=true with
+# XENIBASE_AGENT_FLOATING_IP_ID and XENIBASE_AGENT_HETZNER_TOKEN lets the agent
+# assign it too, so failover works without xenibase-server, at the cost of a
+# token that opens the whole Hetzner project on this internet-facing host.)
 #
 # Configure the floating IP on the public interface of both hosts (Hetzner's
-# "persistent" setup); the agent routes it to the host keepalived makes
+# "persistent" setup); xenibase-server routes it to the host keepalived makes
 # MASTER.
 #
 #   make pooler-host-images      (in a Xenibase checkout, then copy the images)

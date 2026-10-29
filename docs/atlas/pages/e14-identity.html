@@ -1,0 +1,29 @@
+<!--atlas
+{
+  "id": "identity",
+  "title": "Identity, organisations and access",
+  "part": "E",
+  "order": 1,
+  "status": "planned",
+  "summary": "Operator and user accounts, organisations and roles, the authorization model, API tokens and device login, TOTP, OAuth apps and platform email.",
+  "scope": [
+    "Accounts: signup modes, verification, passwords (argon2id), sessions, TOTP and recovery codes",
+    "Organisations, members, invitations and project transfers",
+    "<code>authz.Can</code>: visibility, roles, token scopes and restricted tokens, break-glass",
+    "API tokens and the CLI's device login",
+    "Third-party OAuth apps",
+    "Platform email"
+  ],
+  "sources": [
+    "internal/auth/",
+    "internal/authz/",
+    "internal/orgs/",
+    "internal/totp/",
+    "internal/tokens/",
+    "internal/argonpw/",
+    "internal/mail/",
+    "internal/api/oauth.go",
+    "docs/oauth-apps.md"
+  ]
+}
+-->

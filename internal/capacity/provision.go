@@ -12,6 +12,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/cloud"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/store"
 )
 
@@ -88,6 +89,13 @@ func (s *Service) runProvision(ctx context.Context, op store.Operation, log *job
 				}
 				e := *s.cfg.Edge
 				e.Region = p.Region
+				if s.cfg.EdgeCredential != nil {
+					// Its own credential, for its region only, instead of
+					// the platform-wide secret.
+					if e.Secret, err = s.cfg.EdgeCredential(ctx, node.Name, p.Region); err != nil {
+						return err
+					}
+				}
 				if s.cfg.RegionAPIDomain != nil {
 					if d := s.cfg.RegionAPIDomain(p.Region); d != "" {
 						e.Domain = d
@@ -152,6 +160,9 @@ func (s *Service) runProvision(ctx context.Context, op store.Operation, log *job
 			return ctx.Err()
 		case <-time.After(s.cfg.Poll):
 		}
+	}
+	if node.AgentHost != nil && node.PrivateAddr == "pending" && !pooler.ValidHost(*node.AgentHost) {
+		return jobs.Permanent(fmt.Errorf("the agent advertised %q, which the poolers can't route to", *node.AgentHost))
 	}
 	if node.AgentHost != nil && node.PrivateAddr == "pending" {
 		// The provider gave no private address: the agent advertises its

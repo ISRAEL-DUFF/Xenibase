@@ -1,0 +1,83 @@
+<figure class="diagram seq" aria-labelledby="cap-{{uid}}">
+<svg viewBox="0 0 520 600" role="img" aria-labelledby="t-{{uid}}">
+  <title id="t-{{uid}}">The life of a project as a sequence: sign-up, the create request, an operation worker building the database, the pooler sync and smoke test, then a client connecting through PgBouncer or the edge</title>
+  <defs>
+    <marker id="rh-{{uid}}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+
+  <text class="d-lane" x="40" y="22" text-anchor="middle">Client</text>
+  <text class="d-lane" x="150" y="22" text-anchor="middle">server</text>
+  <text class="d-lane" x="260" y="22" text-anchor="middle">metadata</text>
+  <text class="d-lane" x="370" y="22" text-anchor="middle">pooler</text>
+  <text class="d-lane" x="480" y="22" text-anchor="middle">cluster</text>
+  <path class="d-life" d="M40 34V590M150 34V590M260 34V590M370 34V590M480 34V590"/>
+
+  <g data-stage="s1">
+    <path class="d-line" d="M40 58H148" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="94" y="51" text-anchor="middle">POST /auth/signup</text>
+    <rect class="d-tx" x="253" y="62" width="14" height="26" rx="2"/>
+    <path class="d-line" d="M150 75H251" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="204" y="70" text-anchor="middle">user + org + terms</text>
+    <path class="d-line dash" d="M148 98H42" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="94" y="93" text-anchor="middle">verify by email</text>
+  </g>
+
+  <g data-stage="s2">
+    <path class="d-line" d="M40 126H148" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="94" y="119" text-anchor="middle">POST /projects</text>
+    <rect class="d-tx" x="253" y="130" width="14" height="30" rx="2"/>
+    <path class="d-line" d="M150 143H251" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="204" y="138" text-anchor="middle">project + operation</text>
+    <path class="d-line dash" d="M148 172H42" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="94" y="167" text-anchor="middle">202 password, once</text>
+  </g>
+
+  <g data-stage="s3">
+    <path class="d-line dash" d="M258 200H152" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="204" y="194" text-anchor="middle">NOTIFY</text>
+    <path class="d-line" d="M150 222H251" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="204" y="216" text-anchor="middle">claim · heartbeat</text>
+  </g>
+
+  <g data-stage="s4">
+    <path class="d-line" d="M150 252H478" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="315" y="246" text-anchor="middle">CREATE ROLE · CREATE DATABASE · REVOKE</text>
+    <rect class="d-tx" x="473" y="258" width="14" height="22" rx="2"/>
+  </g>
+
+  <g data-stage="s5">
+    <path class="d-line" d="M150 304H368" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="260" y="298" text-anchor="middle">write files · RELOAD</text>
+  </g>
+
+  <g data-stage="s6">
+    <path class="d-line" d="M150 334H368" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="260" y="328" text-anchor="middle">smoke test as owner</text>
+    <path class="d-line" d="M370 346H478" marker-end="url(#rh-{{uid}})"/>
+    <path class="d-line" d="M150 370H251" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="204" y="364" text-anchor="middle">active · scrub</text>
+  </g>
+
+  <g data-stage="s7">
+    <path class="d-line" d="M40 410H368" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="204" y="404" text-anchor="middle">TLS · SCRAM · dbname=p_…</text>
+    <rect class="d-box" x="318" y="418" width="104" height="24" rx="4"/>
+    <text class="d-msg" x="370" y="434" text-anchor="middle">hba · route</text>
+    <path class="d-line" d="M370 456H478" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="425" y="450" text-anchor="middle">passthrough</text>
+    <path class="d-line dash" d="M478 476H42" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="260" y="471" text-anchor="middle">queries</text>
+  </g>
+
+  <g data-stage="s8">
+    <path class="d-line" d="M40 516H148" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="94" y="509" text-anchor="middle">HTTPS &lt;ref&gt; (edge)</text>
+    <rect class="d-box" x="100" y="522" width="100" height="24" rx="4"/>
+    <text class="d-msg" x="150" y="538" text-anchor="middle">key · token</text>
+    <path class="d-line" d="M150 562H368" marker-end="url(#rh-{{uid}})"/>
+    <text class="d-msg" x="260" y="556" text-anchor="middle">one transaction as a role</text>
+    <path class="d-line" d="M370 576H478" marker-end="url(#rh-{{uid}})"/>
+  </g>
+</svg>
+<figcaption class="d-caption" id="cap-{{uid}}">The <em>server</em> lane is xenibase-server: its API handler and, from stage 3, one of its operation workers. In stage 8 it stands for xenibase-edge, which runs separately.</figcaption>
+</figure>

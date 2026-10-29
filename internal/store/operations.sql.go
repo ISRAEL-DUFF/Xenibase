@@ -15,18 +15,24 @@ import (
 
 const appendOperationLog = `-- name: AppendOperationLog :execrows
 UPDATE operations SET log = log || jsonb_build_array($1::jsonb)
-WHERE id = $2 AND locked_by = $3::text AND status = 'running'
+WHERE id = $2 AND locked_by = $3::text AND attempts = $4::int AND status = 'running'
 `
 
 type AppendOperationLogParams struct {
-	Entry  json.RawMessage
-	ID     uuid.UUID
-	Worker string
+	Entry   json.RawMessage
+	ID      uuid.UUID
+	Worker  string
+	Attempt int32
 }
 
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) AppendOperationLog(ctx context.Context, arg AppendOperationLogParams) (int64, error) {
-	result, err := q.db.Exec(ctx, appendOperationLog, arg.Entry, arg.ID, arg.Worker)
+	result, err := q.db.Exec(ctx, appendOperationLog,
+		arg.Entry,
+		arg.ID,
+		arg.Worker,
+		arg.Attempt,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -43,7 +49,7 @@ WHERE id = (
   FOR UPDATE SKIP LOCKED
   LIMIT 1
 )
-RETURNING id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at
+RETURNING id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive
 `
 
 type ClaimOperationParams struct {
@@ -73,14 +79,15 @@ func (q *Queries) ClaimOperation(ctx context.Context, arg ClaimOperationParams) 
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.FinishedAt,
+		&i.Exclusive,
 	)
 	return i, err
 }
 
 const enqueueOperation = `-- name: EnqueueOperation :one
-INSERT INTO operations (kind, project_id, params, created_by)
-VALUES ($1, $2, $3, $4)
-RETURNING id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at
+INSERT INTO operations (kind, project_id, params, created_by, exclusive)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive
 `
 
 type EnqueueOperationParams struct {
@@ -88,15 +95,19 @@ type EnqueueOperationParams struct {
 	ProjectID *uuid.UUID
 	Params    json.RawMessage
 	CreatedBy *uuid.UUID
+	Exclusive bool
 }
 
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
+// A project has one exclusive operation queued or running at a time
+// (operations_one_exclusive_per_project); a background one may run beside it.
 func (q *Queries) EnqueueOperation(ctx context.Context, arg EnqueueOperationParams) (Operation, error) {
 	row := q.db.QueryRow(ctx, enqueueOperation,
 		arg.Kind,
 		arg.ProjectID,
 		arg.Params,
 		arg.CreatedBy,
+		arg.Exclusive,
 	)
 	var i Operation
 	err := row.Scan(
@@ -114,6 +125,7 @@ func (q *Queries) EnqueueOperation(ctx context.Context, arg EnqueueOperationPara
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.FinishedAt,
+		&i.Exclusive,
 	)
 	return i, err
 }
@@ -121,26 +133,79 @@ func (q *Queries) EnqueueOperation(ctx context.Context, arg EnqueueOperationPara
 const failOperation = `-- name: FailOperation :execrows
 UPDATE operations
 SET status = 'failed', error = $1::text, params = params - 'secrets', finished_at = now(), locked_by = NULL, locked_at = NULL
-WHERE id = $2 AND locked_by = $3::text AND status = 'running'
+WHERE id = $2 AND locked_by = $3::text AND attempts = $4::int AND status = 'running'
 `
 
 type FailOperationParams struct {
-	Error  string
-	ID     uuid.UUID
-	Worker string
+	Error   string
+	ID      uuid.UUID
+	Worker  string
+	Attempt int32
 }
 
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) FailOperation(ctx context.Context, arg FailOperationParams) (int64, error) {
-	result, err := q.db.Exec(ctx, failOperation, arg.Error, arg.ID, arg.Worker)
+	result, err := q.db.Exec(ctx, failOperation,
+		arg.Error,
+		arg.ID,
+		arg.Worker,
+		arg.Attempt,
+	)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
 }
 
+const failUnservedOperations = `-- name: FailUnservedOperations :many
+UPDATE operations
+SET status = 'failed', params = params - 'secrets', finished_at = now(),
+    error = 'no worker runs operations of kind ' || kind || '; gave up after waiting ' || (now() - run_after)::text,
+    log = log || jsonb_build_array(jsonb_build_object(
+      'ts', now(), 'step', 'queue', 'level', 'error',
+      'msg', 'no worker runs operations of kind ' || kind || '; failed after waiting since ' || run_after::text))
+WHERE status = 'queued' AND NOT (kind = ANY($1::text[]))
+  AND run_after < now() - make_interval(secs => $2::float8)
+RETURNING id, kind
+`
+
+type FailUnservedOperationsParams struct {
+	Kinds        []string
+	AfterSeconds float64
+}
+
+type FailUnservedOperationsRow struct {
+	ID   uuid.UUID
+	Kind string
+}
+
+// FailUnservedOperations fails operations of a kind this worker doesn't
+// run that have waited, runnable, for longer than @after_seconds: no
+// worker runs that kind (an older or newer server's, or a typo), and a
+// pending exclusive one would block its project for good.
+// tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
+func (q *Queries) FailUnservedOperations(ctx context.Context, arg FailUnservedOperationsParams) ([]FailUnservedOperationsRow, error) {
+	rows, err := q.db.Query(ctx, failUnservedOperations, arg.Kinds, arg.AfterSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FailUnservedOperationsRow
+	for rows.Next() {
+		var i FailUnservedOperationsRow
+		if err := rows.Scan(&i.ID, &i.Kind); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getOperation = `-- name: GetOperation :one
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations WHERE id = $1
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations WHERE id = $1
 `
 
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
@@ -162,23 +227,27 @@ func (q *Queries) GetOperation(ctx context.Context, id uuid.UUID) (Operation, er
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.FinishedAt,
+		&i.Exclusive,
 	)
 	return i, err
 }
 
 const heartbeatOperation = `-- name: HeartbeatOperation :execrows
 UPDATE operations SET locked_at = now()
-WHERE id = $1 AND locked_by = $2::text AND status = 'running'
+WHERE id = $1 AND locked_by = $2::text AND attempts = $3::int AND status = 'running'
 `
 
 type HeartbeatOperationParams struct {
-	ID     uuid.UUID
-	Worker string
+	ID      uuid.UUID
+	Worker  string
+	Attempt int32
 }
 
+// The writes below are fenced by worker and attempt: an attempt whose lease
+// was reclaimed (even one re-claimed by the same worker) writes nothing.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) HeartbeatOperation(ctx context.Context, arg HeartbeatOperationParams) (int64, error) {
-	result, err := q.db.Exec(ctx, heartbeatOperation, arg.ID, arg.Worker)
+	result, err := q.db.Exec(ctx, heartbeatOperation, arg.ID, arg.Worker, arg.Attempt)
 	if err != nil {
 		return 0, err
 	}
@@ -186,7 +255,7 @@ func (q *Queries) HeartbeatOperation(ctx context.Context, arg HeartbeatOperation
 }
 
 const listOperations = `-- name: ListOperations :many
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations
 WHERE ($1::text IS NULL OR status = $1)
   AND ($2::text IS NULL OR kind = $2)
   AND ($3::uuid IS NULL OR project_id = $3)
@@ -231,6 +300,7 @@ func (q *Queries) ListOperations(ctx context.Context, arg ListOperationsParams) 
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}
@@ -249,6 +319,9 @@ SELECT EXISTS (
 )
 `
 
+// ProjectHasActiveOperation reports any operation queued or running on
+// the project, background ones included: a new exclusive one waits for
+// them too.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) ProjectHasActiveOperation(ctx context.Context, projectID *uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, projectHasActiveOperation, projectID)
@@ -263,15 +336,16 @@ SET status = 'queued', locked_by = NULL, locked_at = NULL,
     log = log || jsonb_build_array(jsonb_build_object(
       'ts', now(), 'step', 'queue', 'level', 'warn',
       'msg', 'worker ' || locked_by || ' stopped heartbeating; requeued'))
-WHERE status = 'running' AND locked_at < $1::timestamptz
+WHERE status = 'running' AND locked_at < now() - make_interval(secs => $1::float8)
 RETURNING id
 `
 
 // ReclaimStaleOperations requeues running operations whose worker stopped
-// heartbeating (crashed or partitioned), so they resume elsewhere.
+// heartbeating (crashed or partitioned), so they resume elsewhere. The
+// cutoff is on the database's clock, the one locked_at was written with.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
-func (q *Queries) ReclaimStaleOperations(ctx context.Context, staleBefore time.Time) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, reclaimStaleOperations, staleBefore)
+func (q *Queries) ReclaimStaleOperations(ctx context.Context, leaseSeconds float64) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, reclaimStaleOperations, leaseSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -290,10 +364,40 @@ func (q *Queries) ReclaimStaleOperations(ctx context.Context, staleBefore time.T
 	return items, nil
 }
 
+const requeueInterruptedOperation = `-- name: RequeueInterruptedOperation :execrows
+UPDATE operations
+SET status = 'queued', attempts = GREATEST(attempts - 1, 0), error = $1::text, run_after = now(), locked_by = NULL, locked_at = NULL
+WHERE id = $2 AND locked_by = $3::text AND attempts = $4::int AND status = 'running'
+`
+
+type RequeueInterruptedOperationParams struct {
+	Error   string
+	ID      uuid.UUID
+	Worker  string
+	Attempt int32
+}
+
+// RequeueInterruptedOperation hands back an attempt that a clean shutdown
+// cut short, and gives the attempt back: only crashes count toward the
+// limit.
+// tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
+func (q *Queries) RequeueInterruptedOperation(ctx context.Context, arg RequeueInterruptedOperationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueInterruptedOperation,
+		arg.Error,
+		arg.ID,
+		arg.Worker,
+		arg.Attempt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const retryOperation = `-- name: RetryOperation :execrows
 UPDATE operations
 SET status = 'queued', error = $1::text, run_after = $2, locked_by = NULL, locked_at = NULL
-WHERE id = $3 AND locked_by = $4::text AND status = 'running'
+WHERE id = $3 AND locked_by = $4::text AND attempts = $5::int AND status = 'running'
 `
 
 type RetryOperationParams struct {
@@ -301,6 +405,7 @@ type RetryOperationParams struct {
 	RunAfter time.Time
 	ID       uuid.UUID
 	Worker   string
+	Attempt  int32
 }
 
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
@@ -310,6 +415,7 @@ func (q *Queries) RetryOperation(ctx context.Context, arg RetryOperationParams) 
 		arg.RunAfter,
 		arg.ID,
 		arg.Worker,
+		arg.Attempt,
 	)
 	if err != nil {
 		return 0, err
@@ -320,12 +426,13 @@ func (q *Queries) RetryOperation(ctx context.Context, arg RetryOperationParams) 
 const succeedOperation = `-- name: SucceedOperation :execrows
 UPDATE operations
 SET status = 'succeeded', error = NULL, params = params - 'secrets', finished_at = now(), locked_by = NULL, locked_at = NULL
-WHERE id = $1 AND locked_by = $2::text AND status = 'running'
+WHERE id = $1 AND locked_by = $2::text AND attempts = $3::int AND status = 'running'
 `
 
 type SucceedOperationParams struct {
-	ID     uuid.UUID
-	Worker string
+	ID      uuid.UUID
+	Worker  string
+	Attempt int32
 }
 
 // params.secrets carries encrypted, short-lived handoff data (for example
@@ -333,7 +440,7 @@ type SucceedOperationParams struct {
 // finishes either way.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) SucceedOperation(ctx context.Context, arg SucceedOperationParams) (int64, error) {
-	result, err := q.db.Exec(ctx, succeedOperation, arg.ID, arg.Worker)
+	result, err := q.db.Exec(ctx, succeedOperation, arg.ID, arg.Worker, arg.Attempt)
 	if err != nil {
 		return 0, err
 	}

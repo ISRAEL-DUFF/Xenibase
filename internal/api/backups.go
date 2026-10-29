@@ -489,7 +489,22 @@ func (s *Server) ImportPreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
-	pf, err := s.backups.Preflight(ctx, req.SourceUrl)
+	// The source must pass an organisation's outbound rules: the token's,
+	// or any the user belongs to (a preflight names none).
+	var orgs []uuid.UUID
+	if sess, ok := sessionFrom(r.Context()); ok {
+		if sess.Token != nil {
+			orgs = []uuid.UUID{sess.Token.OrgID}
+		} else if rows, err := store.New(s.db).ListUserOrgs(ctx, sess.UserID); err == nil {
+			for _, o := range rows {
+				orgs = append(orgs, o.ID)
+			}
+		} else {
+			s.internalError(w, "import preflight", err)
+			return
+		}
+	}
+	pf, err := s.backups.Preflight(ctx, orgs, req.SourceUrl)
 	if err != nil {
 		s.backupError(w, "import preflight", err)
 		return

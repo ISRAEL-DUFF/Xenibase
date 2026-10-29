@@ -18,13 +18,13 @@ to report it.
 | --- | --- | --- |
 | `CONNECT` on each database revoked from `PUBLIC` | `ensureDatabase`: `REVOKE ALL … FROM PUBLIC`, `GRANT CONNECT, TEMPORARY` to the owner only; `postgres` and `template1` revoked at cluster registration | `isocheck.Roles` (every project) and `Cluster` (maintenance databases); `TestTenantIsolation` "cannot connect to B's database", "public has no access"; live probe: tenant A connects to B, `postgres`, `template1` |
 | `CREATE` on `public` revoked from `PUBLIC` | `hardenDatabase` | `isocheck.Database` on every project database; isolation suite |
-| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner and `<db>_console`); "role has no dangerous attributes" |
-| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner (`WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role); "not a member of predefined roles"; live probe |
+| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console` and `<db>_console_ro`); "role has no dangerous attributes" |
+| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
 | Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions; the extension API allows only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
 | etcd (HA, V3 §2.2) | TLS for clients and peers with client certificates required, from a separate etcd CA whose key is sealed with the master key; each HA instance's Patroni has its own client certificate. Patroni's REST API listens on the private network: reads are open, changes (switchover, configuration) need the instance's REST password. The SLA probe login can only connect and run `SELECT 1` (no grants beyond CONNECT). | `TestEtcdCluster` (no client certificate is refused) |
 | `pg_hba.conf` accepts only the pooler and control-plane addresses, `scram-sha-256`, `hostssl` where applicable | Bundle: `deploy/compose/shared-pg-hba.conf` names the fixed addresses of xenibase-server, the agent, and both poolers; agent-run clusters and instances: `xenibase-hba.sh` writes `XENIBASE_AGENT_DB_ALLOW` (default: private ranges) at initdb. V3 moves: the moves' own logins (`xenibase_move_<id>`, random password, dropped after the move) may also connect from `XENIBASE_AGENT_MOVE_ALLOW` (default: private ranges; bundle: its Docker network), added by the agent on every start; the bundle's shared cluster allows them from its Docker network | `isocheck.Cluster`: every network rule must be SCRAM (or `reject`/`cert`), name explicit addresses (no `all`, `samenet`, `0.0.0.0/0`), and use `hostssl` outside private ranges; `TestHBAFinding`; `TestClusterConfiguration` |
 | `log_statement` off; only `log_min_duration_statement` set | `log_statement=none`, `log_min_duration_statement=5s` in the bundle and agent-run clusters | `isocheck.Cluster` (`log_statement`, `log_duration`, `log_min_duration_statement` not 0) |
-| Isolation suite: A cannot connect to B, list B's tables, read B's data through any predefined role, create objects in B, or read server files | — | `test/isolation` (CI) and `isocheck.Probes` (live, two throwaway tenants created with the real create steps): connections, `SET ROLE`, `GRANT`, `ALTER ROLE`, `DROP DATABASE`, `pg_terminate_backend`, `pg_read_file`, `pg_ls_dir`, `COPY … PROGRAM`, `COPY FROM` file, `lo_import`, C functions, superuser-only settings, `pg_stat_activity` query text |
+| Isolation suite: A cannot connect to B, list B's tables, read B's data through any predefined role, create objects in B, or read server files | — | `test/isolation` (CI) and `isocheck.Probes` (live, two throwaway tenants created with the real create steps): connections, `SET ROLE`, `GRANT`, `ALTER ROLE`, `DROP DATABASE`, `pg_terminate_backend`, `pg_read_file`, `pg_ls_dir`, `COPY … PROGRAM`, `COPY FROM` file, `lo_import`, C functions, superuser-only settings, `pg_stat_activity` query text, `pg_stat_database`, `pg_stat_get_db_*` and `pg_stat_get_backend_*`; `isocheck.Database` flags any of them readable by `PUBLIC` |
 
 The SQL console adds an escape route the spec did not list (`RESET ROLE`
 on an admin session). It signs in as a per-project login that inherits
@@ -73,11 +73,35 @@ Every mutating API call writes a row with operator, action, target, IP, user
 agent, time, and outcome (`guard` in `internal/api/security.go`). The table
 is append-only in the database itself: triggers refuse `UPDATE`, `DELETE`,
 and `TRUNCATE` (`TestAuditLogIsAppendOnly`). It is filterable at `/audit`.
+A row the database refuses is retried rather than dropped
+([operations](operations.md#the-audit-log)).
+
+What the triggers do not do: stop a compromised xenibase-server. The server
+connects as the role that ran the migrations and owns every table (in the
+Compose bundle, the metadata database's superuser), so it can
+`ALTER TABLE audit_log DISABLE TRIGGER` or drop the table. They stop a bug,
+a mistaken statement in the SQL shell, or SQL injection through the
+server's queries from changing history, not someone who controls the
+server or its database credentials. Making the log hold against that needs
+the migrations run by a separate owner and the server connecting as a role
+with only `SELECT, INSERT` on `audit_log`; that is not done (it changes every
+install's database roles and the upgrade path). Until then, for a log the
+server cannot rewrite, ship the server's logs or a logical replica of
+`audit_log` somewhere it cannot reach.
 
 ## Transport and network
 
 - Clients reach databases only through PgBouncer with TLS required
   (`client_tls_sslmode = require`); certificates from ACME or self-signed.
+- Behind the poolers: the edge connects to them with `sslmode=require` by
+  default and refuses anything that could fall back to plain text;
+  `verify-full` with `XENIBASE_EDGE_POOLER_ROOT_CERT` checks the pooler's
+  certificate. PgBouncer connects to the backends with
+  `server_tls_sslmode = prefer`, because Xenibase's instances and the waker
+  don't serve TLS yet; pooler hosts can set `require` or `verify-full` with a
+  CA (`XENIBASE_POOLER_SERVER_TLS_SSLMODE`, `_CA_FILE`) for backends that do.
+  Until instances get certificates, keep the poolers and their backends on
+  one private network.
 - Agents use mTLS with a private CA; the server pins each agent's
   certificate fingerprint and node ID; no work is sent to an agent of
   another major version (`nodes.Compatible`, spec §11.3).
@@ -100,7 +124,7 @@ review found and fixed.
 | Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it | `TestSuspensionAndBreakGlass` |
 | Webhook trigger function (V2 §9.1) | `xenibase.webhook_enqueue()` is `SECURITY DEFINER` with `search_path = pg_catalog, pg_temp`, in a superuser-owned schema with all access revoked from `PUBLIC` (so tenants can't call it or attach it to triggers); a `xenibase` schema anything else owns is dropped first; the worker delivers an outbox row only for one of its own project's webhooks | `TestWebhookDelivery`, `TestWebhooksAcrossCopies` |
 | Personal roles across tier moves (V2 §3.5) | Member logins and the read-only role recreated with the same verifiers on promotion, demotion, restore and import | `TestMemberLoginsSurviveRestoreAndPromotion`, `TestDemotionLiveWriter` |
-| Running tenant SQL | The console, table editor, schema editor and SQL jobs sign in as the project's console login (`NOINHERIT`, may only `SET ROLE` to the project's roles), never an admin login | `TestSQLConsole`, `TestJobSQLCannotEscalate` |
+| Running tenant SQL | The console, table editor, schema editor and SQL jobs sign in as the project's console login (`NOINHERIT`, may only `SET ROLE` to the project's roles), never an admin login. Read-only sessions (a `read_only` member, a read-scope token, the table browser's raw filter) sign in as `<db>_console_ro`, which may become only `<db>_ro` | `TestSQLConsole`, `TestJobSQLCannotEscalate`, `TestReadOnlySessionCannotBecomeOwner`, `TestReadOnlyConsoleCannotBecomeOwner` |
 | Copying a tenant's database | A restore runs the dump's functions (CHECK constraints, generated columns). Branches, restores, imports and the restore test restore as the console login with `--role` the owner; promotion and demotion through a short-lived login that inherits the project's roles but is no superuser (extensions created first, Xenibase's webhook schema copied on its own) | `TestCopiesDoNotRunAsSuperuser` |
 
 ### Found and fixed
@@ -126,6 +150,71 @@ Have someone outside the project review tenant isolation, or pay for a short
 penetration test of it (V2 §14 M16): other people's data now depends on it,
 and this review found two critical bugs. Start with the copy paths and
 anything that runs tenant SQL.
+
+## Atlas review: isolation, the console, the network and the poolers (4.2.4)
+
+The Atlas (`docs/atlas/`) traced these through the code; each is fixed with
+a test that failed before.
+
+### Found and fixed
+
+- **A read-only member could read as the owner** (medium-high). Read-only
+  console sessions signed in as `<db>_console`, which may `SET ROLE` to the
+  owner, so `SELECT set_config('role', '<owner>', true), query_to_xml(…)`
+  read rows RLS hides from `<db>_ro`, and tables never granted to it. The
+  same went for read-scope tokens and the table browser's raw filter.
+  Read-only sessions now sign in as `<db>_console_ro`, granted only
+  `<db>_ro` (`WITH INHERIT FALSE, SET TRUE`), created on first use like the
+  console login; `isocheck.Roles` flags it if it can become the owner.
+- **An import's source address wasn't checked** (medium-high). The server
+  and the agent's `/v1/copy` connected to any host, from addresses the
+  clusters trust, so an import of `postgres://<owner>:<password>@shared-pg/…`
+  got past that project's IP allowlist, and the path probed the private
+  network. Import and Supabase migration sources now pass
+  `outbound.CheckSource` (public only unless allow-listed; loopback, the
+  nodes' and instances' addresses and the platform's networks never), and
+  the server and agent connect to the checked address (`hostaddr`).
+- **Shared-cluster tenants could watch each other's activity** (low-medium).
+  Only `pg_stat_activity` and `pg_stat_get_activity` were hidden;
+  `pg_stat_database(_conflicts)` and the `pg_stat_get_db_*` and
+  `pg_stat_get_backend_*` functions (every database's commits and backends,
+  every backend's database and role) stayed readable. They are revoked from
+  `PUBLIC` in each shared project database; migration 00066 queues
+  `apply_settings`, which now applies it, for existing projects.
+- **Narrowing an IP allowlist left existing connections open** (low-medium).
+  PgBouncer checks HBA rules at login only. Saving a list now drops the
+  project's clients from addresses it no longer admits (`SHOW CLIENTS`,
+  `KILL_CLIENT`), except Xenibase's own logins.
+- **The PgBouncer admin console was open to the internet** (low). The
+  generated `hba.conf` ended with `host all all 0.0.0.0/0`, which admitted
+  database `pgbouncer` too, behind only its password. It now takes logins
+  only from loopback and the private ranges (`XENIBASE_POOLER_ADMIN_ALLOW`
+  to change them) and rejects them from everywhere else.
+- **Nothing checked that allowlists were enforced** (low). A PgBouncer on the
+  pre-4.2.4 `pgbouncer.ini` (`auth_type = scram-sha-256`) ignores
+  `hba.conf` but reported ready. The arbiter now reads `auth_type` from
+  `SHOW CONFIG` on each pooler host (every minute) and counts a host that
+  isn't on `hba` as not ready; the alerts check local poolers the same way
+  (`pooler_allowlist_off`).
+- **Anyone who reached the waker, or a paused project's hostname, could
+  wake it** (low). The waker doesn't authenticate; it now accepts only
+  loopback, its own machine's addresses, the poolers' addresses and
+  `XENIBASE_WAKER_ALLOW`. The edge
+  wakes a paused project only for a request with one of its live API keys
+  (`project_paused` otherwise).
+- **Allowlists cover the poolers only** (low, documented). Instances accept
+  SCRAM logins from `XENIBASE_AGENT_DB_ALLOW`, which defaults to every
+  private range for an agent installed by hand (the bundle and machines
+  Xenibase creates set narrower ones). The agent can't tell which private
+  addresses are the platform's, so it now warns at start when the default
+  is in use, and `docs/network-access.md` says what to set.
+- **One bad route stopped pooler changes everywhere** (low). `Render`
+  refused the whole configuration over one invalid row, and `CreateNode`
+  accepted addresses (`pg_shared`) it refuses. Node addresses are now
+  checked with the renderer's pattern when they are recorded, and a pooler
+  sync leaves an invalid route, login or allowlist out (an allowlist with
+  its project's routes, so nothing opens up) and raises
+  `pooler_config_skipped`, instead of failing every region.
 
 ## V3 review of payments and billing (M27)
 
@@ -286,6 +375,8 @@ vulnerabilities in both; the Go toolchain is 1.25.13.
 - Operators with shell access to a node can read container environments
   (instance admin passwords, S3 credentials, the WAL-G key), as they can
   read the data itself.
+- The audit log is append-only against the server's queries, not against
+  the server: it owns the table and could disable the triggers (§7.5).
 
 Sign-off: every §7.1 item is enforced at create and verified automatically
 in CI and weekly on live clusters; §7.2–7.5 items are implemented and

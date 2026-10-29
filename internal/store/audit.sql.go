@@ -16,9 +16,10 @@ import (
 
 const insertAudit = `-- name: InsertAudit :exec
 INSERT INTO audit_log (user_id, action, target_type, target_id, detail, ip, user_agent, outcome,
-                       actor_kind, token_id, org_id, project_id, break_glass)
+                       actor_kind, token_id, org_id, project_id, break_glass, created_at)
 VALUES ($1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11, $12, $13)
+        $7, $8, $9, $10, $11, $12, $13,
+        COALESCE($14::timestamptz, now()))
 `
 
 type InsertAuditParams struct {
@@ -35,8 +36,11 @@ type InsertAuditParams struct {
 	OrgID      *uuid.UUID
 	ProjectID  *uuid.UUID
 	BreakGlass bool
+	CreatedAt  *time.Time
 }
 
+// created_at is set when a row is retried after a failed write, so it
+// keeps the time of the request; NULL means now.
 func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error {
 	_, err := q.db.Exec(ctx, insertAudit,
 		arg.UserID,
@@ -52,6 +56,7 @@ func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error 
 		arg.OrgID,
 		arg.ProjectID,
 		arg.BreakGlass,
+		arg.CreatedAt,
 	)
 	return err
 }

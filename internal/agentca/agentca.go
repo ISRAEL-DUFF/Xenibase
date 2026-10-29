@@ -194,9 +194,18 @@ func (ca *CA) SignAgent(csrPEM []byte, nodeID string, hosts []string) (certPEM [
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), Fingerprint(der), nil
 }
 
-// ServerClientCert issues xenibase-server's client certificate, valid for 30
-// days; the server issues a fresh one at every start.
+// ServerClientCertValidity is how long xenibase-server's client certificate
+// is valid. The server renews it well before then (nodes.Service).
+const ServerClientCertValidity = 30 * 24 * time.Hour
+
+// ServerClientCert issues xenibase-server's client certificate, valid for
+// ServerClientCertValidity from now.
 func (ca *CA) ServerClientCert() (tls.Certificate, error) {
+	return ca.ServerClientCertAt(time.Now())
+}
+
+// ServerClientCertAt is ServerClientCert issued as at now.
+func (ca *CA) ServerClientCertAt(now time.Time) (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -204,8 +213,8 @@ func (ca *CA) ServerClientCert() (tls.Certificate, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
 		Subject:      pkix.Name{CommonName: ServerCN, Organization: []string{"Xenibase"}},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().AddDate(0, 0, 30),
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(ServerClientCertValidity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}

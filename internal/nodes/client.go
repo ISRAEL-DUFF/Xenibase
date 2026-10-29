@@ -13,7 +13,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/agentca"
@@ -49,11 +52,28 @@ func (s *Service) dial(n store.Node) (*Agent, error) {
 		host = *n.AgentHost
 	}
 	pin := *n.AgentCertFp
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{s.clientCert},
-		RootCAs:      s.ca.Pool(),
-		ServerName:   host,
-		MinVersion:   tls.VersionTLS13,
+	addr := net.JoinHostPort(host, strconv.Itoa(int(n.AgentPort)))
+	return &Agent{
+		Node: n,
+		base: "https://" + addr,
+		http: s.agents.client(n.ID, addr+" "+pin, func() *http.Client {
+			return &http.Client{Transport: &http.Transport{
+				TLSClientConfig: s.agentTLS(n, host, pin), ResponseHeaderTimeout: 0, IdleConnTimeout: time.Minute,
+			}}
+		}),
+	}, nil
+}
+
+// agentTLS is the TLS configuration for one node's agent: the agent CA, and
+// the node's pinned certificate. The server's client certificate is read at
+// each handshake, not when the configuration is built, so the cached
+// transports present a renewed one.
+func (s *Service) agentTLS(n store.Node, host, pin string) *tls.Config {
+	return &tls.Config{
+		GetClientCertificate: s.certs.getClientCertificate,
+		RootCAs:              s.ca.Pool(),
+		ServerName:           host,
+		MinVersion:           tls.VersionTLS13,
 		VerifyPeerCertificate: func(raw [][]byte, chains [][]*x509.Certificate) error {
 			if len(raw) == 0 || agentca.Fingerprint(raw[0]) != pin {
 				return errors.New("agent certificate does not match the pinned fingerprint")
@@ -64,11 +84,37 @@ func (s *Service) dial(n store.Node) (*Agent, error) {
 			return nil
 		},
 	}
-	return &Agent{
-		Node: n,
-		base: "https://" + net.JoinHostPort(host, strconv.Itoa(int(n.AgentPort))),
-		http: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg, ResponseHeaderTimeout: 0, IdleConnTimeout: time.Minute}},
-	}, nil
+}
+
+// agentClients keeps one HTTP client per node, so calls reuse connections
+// instead of a TLS handshake each. A client is replaced, and its idle
+// connections closed, when the node's address or pinned fingerprint
+// changes (re-registration).
+type agentClients struct {
+	mu sync.Mutex
+	m  map[uuid.UUID]agentClient
+}
+
+type agentClient struct {
+	key  string // address and pinned fingerprint
+	http *http.Client
+}
+
+func (c *agentClients) client(node uuid.UUID, key string, build func() *http.Client) *http.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old, ok := c.m[node]; ok {
+		if old.key == key {
+			return old.http
+		}
+		old.http.CloseIdleConnections()
+	}
+	if c.m == nil {
+		c.m = map[uuid.UUID]agentClient{}
+	}
+	h := build()
+	c.m[node] = agentClient{key: key, http: h}
+	return h
 }
 
 func (a *Agent) do(ctx context.Context, method, path string, in, out any) error {

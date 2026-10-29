@@ -22,6 +22,14 @@ type Pooler struct {
 
 	mu      sync.Mutex
 	queries []string
+	conns   int
+}
+
+// Connections is how many connections the server accepted.
+func (p *Pooler) Connections() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conns
 }
 
 // Queries are the simple queries the server was sent, in order.
@@ -47,6 +55,9 @@ func Start(t *testing.T, refuse ...string) *Pooler {
 			if err != nil {
 				return
 			}
+			p.mu.Lock()
+			p.conns++
+			p.mu.Unlock()
 			go p.serve(c, refuse)
 		}
 	}()

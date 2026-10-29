@@ -88,7 +88,7 @@ ID=$(curl -s -X POST localhost:8080/api/v1/dev/operations \
 curl -N localhost:8080/api/v1/operations/$ID/stream
 ```
 
-Migrations run automatically on start. The dev server prints the first-run
+Migrations run automatically on start (writing one: [docs/migrations.md](docs/migrations.md)). The dev server prints the first-run
 setup code in its log; `XENIBASE_SETUP_CODE` fixes it instead.
 
 ## Operator authentication
@@ -275,7 +275,7 @@ with `NOTIFY`, which wakes idle workers and drives the SSE stream at
 | `XENIBASE_DATA_DIR` | `/var/lib/xenibase` | ACME account and certificate storage |
 | `XENIBASE_ACME_EMAIL` / `_CA` / `_CA_ROOTS` | Let's Encrypt | ACME account email, directory URL, extra trusted roots |
 | `XENIBASE_POOLER_TLS_CERT` / `_KEY` | | Certificate files for mode `files` |
-| `XENIBASE_AGENT_BOOTSTRAP_TOKEN` | | Lets the bundled agent register the local node without an operator (24+ characters) |
+| `XENIBASE_AGENT_BOOTSTRAP_TOKEN` | | Lets the bundled agent register the local node (`XENIBASE_SHARED_NODE_NAME`) without an operator, once (24+ characters) |
 | `XENIBASE_BACKUP_HOUR` | `2` | UTC hour the nightly backup window opens |
 | `XENIBASE_BACKUP_JITTER` | `2h` | How widely projects are spread over the window |
 | `XENIBASE_METADATA_BACKUP_URL` | `XENIBASE_DATABASE_URL` | The metadata DB as the agent reaches it, for self-backups; `off` disables them |

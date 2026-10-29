@@ -1,0 +1,33 @@
+<!--atlas
+{
+  "id": "ha",
+  "title": "Dedicated instances, HA and moves",
+  "part": "C",
+  "order": 3,
+  "status": "planned",
+  "summary": "The dedicated tier: instances on nodes, Patroni and etcd for HA, failure domains, regions, read replicas, moves between nodes, resizes and promotion from shared.",
+  "scope": [
+    "Dedicated instances: profiles, placement, resize, the maintenance window",
+    "HA: the etcd cluster, Patroni, the HA watcher, failover and the SLA probes",
+    "Failure domains and regions",
+    "Read replicas, the <code>_ro</code> route, detaching, and per-replica standby settings (<code>hot_standby_feedback</code>, standby delays; migration 00059)",
+    "<code>max_connections</code> sized from memory and kept through restores and resizes",
+    "Moves between nodes and regions, with logical replication",
+    "Promotion from shared to dedicated and demotion back"
+  ],
+  "sources": [
+    "internal/dedicated/",
+    "internal/ha/",
+    "internal/faildomain/",
+    "internal/regions/",
+    "internal/logical/",
+    "internal/dedicated/replica_settings.go",
+    "internal/store/migrations/00059_replica_settings.sql",
+    "docs/ha.md",
+    "docs/read-replicas.md",
+    "docs/moves.md",
+    "docs/regions.md",
+    "docs/failure-domains.md"
+  ]
+}
+-->

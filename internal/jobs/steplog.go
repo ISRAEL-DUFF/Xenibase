@@ -18,12 +18,19 @@ import (
 var ErrLeaseLost = errors.New("operation lease lost")
 
 // StepLogger appends entries to an operation's step log. Writes only
-// succeed while this worker still holds the operation.
+// succeed while this attempt still holds the operation.
 type StepLogger struct {
-	q      *store.Queries
-	id     uuid.UUID
-	worker string
-	slog   *slog.Logger
+	q       *store.Queries
+	id      uuid.UUID
+	worker  string
+	attempt int32
+	slog    *slog.Logger
+}
+
+// NewStepLogger returns the step logger of op's current attempt as worker,
+// for running a handler outside a Runner (tests, tools).
+func NewStepLogger(db store.DBTX, op store.Operation, worker string, log *slog.Logger) *StepLogger {
+	return &StepLogger{q: store.New(db), id: op.ID, worker: worker, attempt: op.Attempts, slog: log}
 }
 
 // Info appends an info entry.
@@ -49,7 +56,7 @@ func (l *StepLogger) write(ctx context.Context, level, step, msg string) error {
 	if err != nil {
 		return err
 	}
-	n, err := l.q.AppendOperationLog(ctx, store.AppendOperationLogParams{ID: l.id, Worker: l.worker, Entry: entry})
+	n, err := l.q.AppendOperationLog(ctx, store.AppendOperationLogParams{ID: l.id, Worker: l.worker, Attempt: l.attempt, Entry: entry})
 	if err != nil {
 		return fmt.Errorf("append operation log: %w", err)
 	}

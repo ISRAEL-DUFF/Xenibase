@@ -41,7 +41,7 @@ const scramPrefix = "SCRAM-SHA-256$"
 // platformRoles are the project's own roles: never the owner's to manage,
 // never synced from the instance.
 func platformRoles(p store.Project) []string {
-	out := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName),
+	out := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName), provision.ConsoleReadOnlyRole(p.DbName),
 		provision.RestoreLogin(p.DbName), store.ProbeRole(p.DbName)}
 	out = append(out, store.ServiceRoles(p.DbName)...)
 	if p.LegacyOwnerRole != nil {
@@ -59,7 +59,10 @@ func platformRole(p store.Project, name string) bool {
 
 // SetManageRoles turns role management on or off for a dedicated project:
 // the owner role gets or loses CREATEROLE. Roles the owner created stay
-// either way, and their logins keep working.
+// either way, and their logins keep working. It holds the project's row
+// lock and refuses while an operation is pending (one may run ensureRole
+// with the old setting), and alters the role before it commits the flag,
+// so the two agree whichever fails.
 func (s *Service) SetManageRoles(ctx context.Context, p store.Project, on bool) (store.Project, error) {
 	if p.Tier != provision.TierDedicated {
 		return p, fmt.Errorf("%w: role management is for dedicated projects; %s is on the shared tier", provision.ErrConflict, p.Name)
@@ -79,12 +82,30 @@ func (s *Service) SetManageRoles(ctx context.Context, p store.Project, on bool) 
 	if on && major < MinManageRolesMajor {
 		return p, fmt.Errorf("%w: role management needs Postgres %d or later; upgrade the project first", provision.ErrConflict, MinManageRolesMajor)
 	}
-	out, err := store.New(s.db).SetProjectManageRoles(ctx, store.SetProjectManageRolesParams{ID: p.ID, ManageRoles: on})
+	out, before, altered := p, p, false
+	err = s.projects.WithIdleProject(ctx, p.ID, []string{provision.StatusActive}, func(tx pgx.Tx, cur store.Project) error {
+		if cur.Tier != provision.TierDedicated || cur.InstanceID != p.InstanceID {
+			return fmt.Errorf("%w: the project changed; try again", provision.ErrConflict)
+		}
+		before = cur
+		next := cur
+		next.ManageRoles = on
+		if _, err := admin.Exec(ctx, "ALTER ROLE "+provision.Ident(cur.OwnerRole)+" "+provision.OwnerCreateRole(next)); err != nil {
+			return fmt.Errorf("set the owner's CREATEROLE: %w", err)
+		}
+		altered = true
+		var err error
+		out, err = store.New(tx).SetProjectManageRoles(ctx, store.SetProjectManageRolesParams{ID: p.ID, ManageRoles: on})
+		return err
+	})
 	if err != nil {
+		if altered {
+			// The flag did not change: put the role back as it says.
+			if _, rerr := admin.Exec(context.WithoutCancel(ctx), "ALTER ROLE "+provision.Ident(before.OwnerRole)+" "+provision.OwnerCreateRole(before)); rerr != nil {
+				s.log.Warn("restore the owner's CREATEROLE after a failed switch", "project", p.ID, "err", rerr)
+			}
+		}
 		return p, err
-	}
-	if _, err := admin.Exec(ctx, "ALTER ROLE "+provision.Ident(p.OwnerRole)+" "+provision.OwnerCreateRole(out)); err != nil {
-		return out, err
 	}
 	if _, err := s.SyncOwnedRoles(ctx, out); err != nil {
 		return out, err

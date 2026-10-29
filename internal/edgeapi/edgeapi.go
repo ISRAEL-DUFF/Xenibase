@@ -1,16 +1,18 @@
 // Package edgeapi is the contract between xenibase-server and xenibase-edge
 // (V4 §2.1): the configuration feed the edge keeps its per-project cache
 // from, and the reports it sends back (usage, request logs, keys in use,
-// projects to wake). Every request is signed with the shared edge secret
-// (the Xenibase-Signature scheme over the method, path and body), so only an
-// edge can read project configuration, which includes the edge login's
-// password.
+// projects to wake). Every request is signed with the edge's credential or
+// the platform-wide edge secret (the Xenibase-Signature scheme over the
+// method, path and body), so only an edge can read project configuration,
+// which includes the edge login's password.
 package edgeapi
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -412,6 +414,39 @@ func Signed(method, requestURI string, body []byte) []byte {
 	return append(b, body...)
 }
 
+// CredentialPrefix starts an edge's own credential, "xbedge_<id>_<secret>",
+// which xenibase-server binds to one region (XENIBASE_EDGE_SECRET may hold
+// either it or the platform-wide edge secret).
+const CredentialPrefix = "xbedge_"
+
+// HeaderCredential carries the id of the credential a request is signed
+// with; a request without it is signed with the platform-wide secret.
+const HeaderCredential = "Xenibase-Edge-Credential"
+
+// NewCredential returns a new credential with id.
+func NewCredential(id uuid.UUID) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return CredentialPrefix + id.String() + "_" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// CredentialID is the id in an edge's own credential; false for the
+// platform-wide secret.
+func CredentialID(secret string) (uuid.UUID, bool) {
+	rest, ok := strings.CutPrefix(secret, CredentialPrefix)
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	id, _, ok := strings.Cut(rest, "_")
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	u, err := uuid.Parse(id)
+	return u, err == nil
+}
+
 // Verify checks a request's signature (the server's side).
 func Verify(secret string, r *http.Request, body []byte, now time.Time) error {
 	return signature.Verify(secret, r.Header.Get(signature.Header), Signed(r.Method, r.URL.RequestURI(), body), now, Tolerance)
@@ -430,6 +465,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if id, ok := CredentialID(c.Secret); ok {
+		req.Header.Set(HeaderCredential, id.String())
+	}
 	req.Header.Set(signature.Header, signature.Sign(c.Secret, time.Now(), Signed(method, req.URL.RequestURI(), body)))
 	res, err := c.http().Do(req)
 	if err != nil {

@@ -372,12 +372,10 @@ func (s *Server) writeAudit(r *http.Request, action string, status int, info *au
 	if ua != "" {
 		params.UserAgent = &ua
 	}
-	// The audit row must outlive a client that hung up.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	defer cancel()
-	if err := store.New(s.db).InsertAudit(ctx, params); err != nil {
-		s.log.Error("write audit log", "action", action, "err", err)
-	}
+	// After the response, outside the handler's transaction: a row the
+	// database refuses is retried, counted and, if given up on, logged in
+	// full (internal/auditlog).
+	s.audit.Write(r.Context(), params)
 }
 
 // ---- Middleware --------------------------------------------------------------

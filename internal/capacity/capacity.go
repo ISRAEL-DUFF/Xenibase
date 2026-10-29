@@ -63,6 +63,9 @@ type Config struct {
 	// RegionAPIDomain is a region's own API domain, if it has one, which
 	// an edge node there serves instead of Edge.Domain.
 	RegionAPIDomain func(region string) string
+	// EdgeCredential issues the credential an edge node's xenibase-edge
+	// uses, bound to its region (edgecred.Issue); nil gives it Edge.Secret.
+	EdgeCredential func(ctx context.Context, name, region string) (string, error)
 	// JoinTimeout bounds the wait for a new server's agent (20 minutes).
 	JoinTimeout time.Duration
 	// Poll is how often the provisioning flow checks for the agent (5 s).

@@ -1,0 +1,65 @@
+<!--atlas
+{
+  "id": "about",
+  "title": "How the atlas is maintained",
+  "part": "Z",
+  "order": 1,
+  "summary": "Where the atlas's pages live, how the build reads the code, how to tell which pages the code has moved under, and how to update and publish it."
+}
+-->
+<h2>What it is made of</h2>
+<p>The atlas lives in <x-ref path="docs/atlas/"><code>docs/atlas</code></x-ref> next to the code it describes, so a change to one can come with a change to the other in the same pull request.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Path</th><th>What it is</th></tr></thead>
+  <tbody>
+    <tr><td><code>pages/*.html</code></td><td>One file per page: a JSON header, then the page's HTML. The file name only sets the reading order on disk. The header's <code>part</code> and <code>order</code> set the order in the atlas.</td></tr>
+    <tr><td><code>partials/*.html</code></td><td>Diagrams used on more than one page or too long to keep inline. <code>{{uid}}</code> in a partial is replaced each time it is included, so marker ids never clash.</td></tr>
+    <tr><td><code>src/</code></td><td>The shell, the stylesheet and the page script that every page shares.</td></tr>
+    <tr><td><code>atlas.json</code></td><td>The title, the repository URL that code links point to, the parts, where the packages live (<code>"packages": {"root": "internal"}</code>), and what each <code>x-stat</code> counts.</td></tr>
+    <tr><td><code>atlas.mjs</code></td><td>The build. Node 22 and git, no packages.</td></tr>
+    <tr><td><code>site/index.html</code></td><td>The built atlas: one self-contained file. Open it from disk or serve it anywhere. It is committed, so reading it never needs a build.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>A page's header</h2>
+<p>Every page starts with a comment holding JSON:</p>
+<x-code path="docs/atlas/pages/a2-life-of-a-project.html" start="&lt;!--atlas" end="--&gt;" lang="json" max="20"/>
+<ul>
+  <li><code>verified</code> is the commit the page was last checked against, line by line. Set it only after reading the code at that commit.</li>
+  <li><code>sources</code> are the files and directories the page describes. A commit that touches any of them after <code>verified</code> marks the page as moved.</li>
+  <li><code>status: "planned"</code> with a <code>scope</code> list renders a placeholder that says what the page will cover.</li>
+</ul>
+
+<h2>Elements that read the code</h2>
+<p>The build replaces these elements before writing the page. Anything that names code is resolved against the working tree, and links are pinned to the commit that was built.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Element</th><th>Becomes</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;x-ref path="…" symbol="…"&gt;text&lt;/x-ref&gt;</code></td><td>A link to the first line in the file containing <code>symbol</code>. Without <code>symbol</code>, a link to the file. A path ending in <code>/</code> links to the directory.</td></tr>
+    <tr><td><code>&lt;x-code path="…" start="…" [end="…" | lines="n"] [doc] [max="n"] [caption="…"]/&gt;</code></td><td>An excerpt with highlighting and line numbers. It starts at the first line containing <code>start</code> and runs to the line containing <code>end</code>, or for <code>n</code> lines, or by default to the brace that closes the block. <code>doc</code> includes the comment above it.</td></tr>
+    <tr><td><code>&lt;x-packages names="a,b"/&gt;</code>, <code>&lt;x-packages rest/&gt;</code></td><td>Package cards with size and doc comment, read from the code. A bare name is looked up under the package root in <code>atlas.json</code> (<code>internal/</code>); a name with a slash is a path. <code>rest</code> lists every package under the root that no other <code>x-packages</code> mentions, and the build reports it.</td></tr>
+    <tr><td><code>&lt;x-stat name="…"/&gt;</code></td><td>A number counted from the repository, as <code>atlas.json</code>'s <code>stats</code> defines it: <code>go-lines-nontest</code>, <code>packages</code>, <code>migrations</code>, <code>migrations-latest</code>, <code>api-operations</code> and others. Each definition names one of the kinds in <x-ref path="docs/atlas/atlas.mjs" symbol="const statKinds = {"><code>statKinds</code></x-ref> (lines of tracked files, packages, files in a directory, the latest of them, pattern matches in a file, a captured value, the schema left by replaying migrations).</td></tr>
+    <tr><td><code>&lt;x-page id="page[--section]"&gt;text&lt;/x-page&gt;</code></td><td>A link to another page or section, with the page's title when there is no text.</td></tr>
+    <tr><td><code>&lt;x-include name="file.html"/&gt;</code></td><td>A partial.</td></tr>
+  </tbody>
+</table></div>
+<p>Attribute values are matched literally. Write <code>&amp;quot;</code> for a quote inside one, as in <code>start="if is(&amp;quot;worker&amp;quot;) {"</code>.</p>
+<p>The page script also understands a few classes: <code>callout drift</code> for spec and code that disagree, <code>callout risk</code>, <code>callout note</code>, <code>evt</code> for an event name, <code>stepper</code> with <code>stage</code> items whose <code>data-lit</code> lights the diagram groups marked <code>data-stage</code>, and <code>data-go="page"</code> on any diagram group to make it open that page.</p>
+
+<h2>Keeping it current</h2>
+<p>Run these from the repository root:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>make atlas</code></td><td>Builds <code>docs/atlas/site/index.html</code> and <code>docs/atlas/dist/artifact.html</code>, and prints every reference that no longer resolves.</td></tr>
+    <tr><td><code>make atlas-stale</code></td><td>Lists each written page and how many commits have touched its sources since it was checked, with the files.</td></tr>
+    <tr><td><code>node docs/atlas/atlas.mjs check</code></td><td>Builds in memory and fails if any reference is broken. Use it before committing.</td></tr>
+  </tbody>
+</table></div>
+<p>To bring a page up to date: run <code>make atlas-stale</code>, read the diff of the listed files since the page's <code>verified</code> commit, change what the page says, set <code>verified</code> to the commit you checked, then rebuild. Code excerpts and line links update themselves. Prose, tables and diagrams are what need a person.</p>
+<div class="callout note"><span class="callout-label">What the checks cannot see</span>
+  <p>An excerpt anchored on a symbol keeps working when the code around it changes. A broken anchor is reported, but a change in meaning is not. And a later migration that changes what an earlier one created is not noticed while the excerpt points at the earlier one. That is why each page also lists its sources and turns amber when they change.</p>
+</div>
+
+<h2>Publishing</h2>
+<p><code>site/index.html</code> is the atlas. Commit it with the change that updated a page. <code>dist/artifact.html</code> is the same atlas without the document wrapper, for hosts that add their own, such as a claude.ai artifact. It is not committed. CI's <code>atlas</code> job runs <code>node docs/atlas/atlas.mjs check</code> on every push, and on a pull request fails when pages, partials, the build or <code>atlas.json</code> changed without a rebuilt <code>site/index.html</code>.</p>

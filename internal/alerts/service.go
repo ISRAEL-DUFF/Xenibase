@@ -37,7 +37,13 @@ const (
 	// Standby edge pooler (V3 §2.1).
 	KindPoolerHostNotReady = "pooler_host_not_ready"
 	KindPoolerSplitBrain   = "pooler_split_brain"
-	KindIsolationCheck     = "isolation_check_failed"
+	// A pooler ignores hba.conf (auth_type is not hba): IP allowlists are
+	// stored but not enforced.
+	KindPoolerAllowlistOff = "pooler_allowlist_off"
+	// The last pooler sync left a row out as invalid (a bad node address,
+	// say): those projects can't connect through the poolers.
+	KindPoolerSkipped  = "pooler_config_skipped"
+	KindIsolationCheck = "isolation_check_failed"
 	// Capacity automation (V3 §5.2): a proposal waits for approval, or a
 	// provisioning failed in the last day.
 	// HA members, etcd members or pooler hosts share a failure domain (V3.1 §2.4).
@@ -53,6 +59,10 @@ const (
 	nodeDiskThreshold      = 0.85
 	nodeUnreachableAfter   = 2 * time.Minute
 	projectSizeFreshWithin = 30 * time.Minute
+	clientCertWarnWithin   = 3 * 24 * time.Hour
+	// xenibase-server's client certificate for agents is close to expiry:
+	// renewing it keeps failing.
+	KindAgentClientCert = "agent_client_cert"
 )
 
 // Config configures the service.
@@ -69,6 +79,11 @@ type Config struct {
 	// WakerAddr returns the waker's address as the poolers reach it ("" when
 	// there is none); checked for "waker down" with the poolers' grace.
 	WakerAddr func() string
+	// PoolerSkipped returns what the last pooler sync left out as invalid.
+	PoolerSkipped func() []string
+	// ClientCertExpiry returns when xenibase-server's agent client
+	// certificate expires (renewing it first when due); nil skips the check.
+	ClientCertExpiry func() time.Time
 }
 
 // Service evaluates conditions and delivers notifications.
@@ -312,6 +327,8 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 
 	out = append(out, s.poolerConditions(ctx)...)
 	out = append(out, s.wakerConditions(ctx)...)
+	out = append(out, skippedConditions(s.cfg.PoolerSkipped)...)
+	out = append(out, s.clientCertConditions()...)
 	hostConds, err := s.poolerHostConditions(ctx)
 	if err != nil {
 		errs = append(errs, err)
@@ -356,8 +373,34 @@ func (s *Service) poolerConditions(ctx context.Context) []condition {
 			out = append(out, condition{KindPoolerDown, SeverityCritical, "pooler", a.Name, a.Name + " pooler (" + a.Addr() + ")",
 				fmt.Sprintf("The %s pooler at %s is down: %v", a.Name, a.Addr(), err), map[string]any{"address": a.Addr()}})
 		}
+		if err == nil {
+			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			why, err := a.EnforcesHBA(pctx)
+			cancel()
+			if err == nil && why != "" {
+				out = append(out, condition{KindPoolerAllowlistOff, SeverityCritical, "pooler", a.Name, a.Name + " pooler (" + a.Addr() + ")",
+					why, map[string]any{"address": a.Addr()}})
+			}
+		}
 	}
 	return out
+}
+
+// skippedConditions reports rows the last pooler sync left out as invalid:
+// the rest of the configuration was applied, but those routes or logins
+// don't work until the row is fixed.
+func skippedConditions(skipped func() []string) []condition {
+	if skipped == nil {
+		return nil
+	}
+	list := skipped()
+	if len(list) == 0 {
+		return nil
+	}
+	return []condition{{KindPoolerSkipped, SeverityCritical, "pooler", "config", "pooler configuration",
+		fmt.Sprintf("The pooler configuration left out %d invalid entr%s, so those projects or logins can't connect through the poolers: %s. Fix the row (often a node's private address) and the next sync includes it.",
+			len(list), map[bool]string{true: "y", false: "ies"}[len(list) == 1], strings.Join(list, "; ")),
+		map[string]any{"skipped": list}}}
 }
 
 // wakerConditions reports a waker that hasn't accepted connections for the
@@ -397,6 +440,23 @@ func (s *Service) wakerConditions(ctx context.Context) []condition {
 		map[string]any{"address": addr}}}
 }
 
+// clientCertConditions reports xenibase-server's agent client certificate
+// when less than clientCertWarnWithin is left: it is renewed with a week
+// left, so renewing has been failing. Once it expires no agent accepts the
+// server.
+func (s *Service) clientCertConditions() []condition {
+	if s.cfg.ClientCertExpiry == nil {
+		return nil
+	}
+	exp := s.cfg.ClientCertExpiry()
+	if time.Until(exp) > clientCertWarnWithin {
+		return nil
+	}
+	return []condition{{KindAgentClientCert, SeverityCritical, "control_plane", "agent_client_cert", "agent client certificate",
+		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until it restarts.", exp.UTC().Format(time.RFC3339)),
+		map[string]any{"expires_at": exp.UTC().Format(time.RFC3339)}}}
+}
+
 // poolerHostConditions reports pooler hosts (V3 §2.1) that answer but
 // can't serve (a PgBouncer down, or a stale configuration) for the grace
 // period, and split brain: more than one host keepalived MASTER. An
@@ -425,7 +485,7 @@ func (s *Service) poolerHostConditions(ctx context.Context) ([]condition, error)
 		}
 		if notReady && time.Since(since) >= s.cfg.PoolerGrace {
 			out = append(out, condition{KindPoolerHostNotReady, SeverityCritical, "node", h.ID.String(), h.Name,
-				fmt.Sprintf("Pooler host %s can't serve: a PgBouncer is down or its configuration is stale, so it can't take the floating IP", h.Name),
+				fmt.Sprintf("Pooler host %s can't serve: a PgBouncer is down, its configuration is stale, or it ignores hba.conf (IP allowlists not enforced), so it can't take the floating IP. Admin → Nodes shows which.", h.Name),
 				map[string]any{"generation": h.PoolerGeneration, "vrrp_state": h.PoolerVrrpState}})
 		}
 		if checked && h.Status == "healthy" && h.PoolerVrrpState != nil && *h.PoolerVrrpState == "MASTER" {

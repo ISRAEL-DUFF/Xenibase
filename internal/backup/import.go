@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -75,12 +76,33 @@ type RoleReference struct {
 	Roles  []string `json:"roles"`
 }
 
-func connectSource(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGConn, error) {
-	pg, err := agentapi.ParseURL(raw)
-	if err != nil {
-		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, err)
+// SourceGuard is the address check for a source chosen on behalf of
+// orgs: the source must pass outbound.CheckSource for one of them (an
+// import's own organisation; for a preflight, any the caller belongs to).
+func (s *Service) SourceGuard(orgs ...uuid.UUID) pgsource.Guard {
+	if len(orgs) == 0 {
+		orgs = []uuid.UUID{uuid.Nil}
 	}
-	cfg, err := pgx.ParseConfig(strings.TrimSpace(raw))
+	return func(ctx context.Context, host string, port int) (netip.Addr, error) {
+		if s.CheckSource == nil {
+			return netip.Addr{}, errors.New("no address check is configured for import sources")
+		}
+		var err error
+		for _, org := range orgs {
+			var a netip.Addr
+			if a, err = s.CheckSource(ctx, org, host, port); err == nil {
+				return a, nil
+			}
+		}
+		return netip.Addr{}, err
+	}
+}
+
+// connectSource connects to an import's source, read-only, after guard
+// has checked its address, and pinned to that address. The PGConn it
+// returns carries the address too, for the agent's copy.
+func connectSource(ctx context.Context, raw string, guard pgsource.Guard) (*pgx.Conn, agentapi.PGConn, error) {
+	cfg, pg, err := pgsource.Config(ctx, raw, guard)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, pg.Password))
 	}
@@ -106,8 +128,10 @@ func redactErr(err error, password string) error {
 }
 
 // Preflight inspects a source database without changing it.
-func (s *Service) Preflight(ctx context.Context, sourceURL string) (Preflight, error) {
-	conn, pg, err := connectSource(ctx, sourceURL)
+// orgs are the organisations the caller belongs to, for the platform
+// admin's outbound allow-lists.
+func (s *Service) Preflight(ctx context.Context, orgs []uuid.UUID, sourceURL string) (Preflight, error) {
+	conn, pg, err := connectSource(ctx, sourceURL, s.SourceGuard(orgs...))
 	if err != nil {
 		return Preflight{}, err
 	}
@@ -267,7 +291,7 @@ func (s *Service) Import(ctx context.Context, p ImportParams) (provision.Created
 	if _, err := s.nodes.Any(ctx); err != nil {
 		return provision.Created{}, fmt.Errorf("%w: no agent is available to copy the data: %w", ErrConflict, err)
 	}
-	conn, pg, err := connectSource(ctx, p.SourceURL)
+	conn, pg, err := connectSource(ctx, p.SourceURL, s.SourceGuard(p.OrgID))
 	if err != nil {
 		return provision.Created{}, err
 	}
@@ -323,13 +347,15 @@ func (s *Service) runImport(ctx context.Context, op store.Operation, log *jobs.S
 		return jobs.Permanent(errors.New("the source connection string is no longer in memory (xenibase-server restarted?); start the import again"))
 	}
 	defer s.ephemeral.Delete(params.SourceRef)
-	source, err := agentapi.ParseURL(sourceURL)
-	if err != nil {
-		return jobs.Permanent(err)
-	}
 	p, err := s.projects.ProjectFor(ctx, op)
 	if err != nil {
 		return err
+	}
+	// Checked again, now, and pinned: the agent copies from the address
+	// that passed, not whatever the name resolves to by then.
+	_, source, err := pgsource.Config(ctx, sourceURL, s.SourceGuard(p.OrgID))
+	if err != nil {
+		return jobs.Permanent(fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, source.Password)))
 	}
 	password, err := s.projects.Password(op)
 	if err != nil {
@@ -387,7 +413,7 @@ func (s *Service) runImport(ctx context.Context, op store.Operation, log *jobs.S
 		}
 	}
 
-	if err := s.verifyImport(ctx, sourceURL, p, params.Schemas, log); err != nil {
+	if err := s.verifyImport(ctx, sourceURL, s.SourceGuard(p.OrgID), p, params.Schemas, log); err != nil {
 		return err
 	}
 	if err := s.projects.ResetWebhooks(ctx, p, log); err != nil {
@@ -531,8 +557,8 @@ func relevantWarnings(lines, precreated []string) []string {
 // verifyImport compares per-table row counts and sequence values between
 // source and target (spec §6.8 step 5). Differences are reported; tables
 // missing on the target fail the import.
-func (s *Service) verifyImport(ctx context.Context, sourceURL string, p store.Project, schemas []string, log *jobs.StepLogger) error {
-	src, srcPG, err := connectSource(ctx, sourceURL)
+func (s *Service) verifyImport(ctx context.Context, sourceURL string, guard pgsource.Guard, p store.Project, schemas []string, log *jobs.StepLogger) error {
+	src, srcPG, err := connectSource(ctx, sourceURL, guard)
 	if err != nil {
 		return err
 	}

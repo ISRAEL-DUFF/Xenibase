@@ -1,0 +1,29 @@
+<!--atlas
+{
+  "id": "security",
+  "title": "Security and tenant isolation",
+  "part": "E",
+  "order": 2,
+  "status": "planned",
+  "summary": "The shared tier's isolation checklist and its checks, secrets under the master key and their rotation, outbound requests, signatures, quotas and the isolation tests.",
+  "scope": [
+    "Envelope encryption under the master key, and rotation",
+    "The isolation checklist checked against live clusters",
+    "Per-project IP allowlists at the poolers, and what they do not cover",
+    "Outbound requests only to public addresses; the signature scheme",
+    "Quotas, rate limits, storage locks, the statement reaper and suspension",
+    "The isolation test suite and the security review"
+  ],
+  "sources": [
+    "internal/crypto/",
+    "internal/rotate/",
+    "internal/isocheck/",
+    "internal/outbound/",
+    "internal/signature/",
+    "internal/tenancy/",
+    "test/isolation/",
+    "docs/security-review.md",
+    "docs/network-access.md"
+  ]
+}
+-->

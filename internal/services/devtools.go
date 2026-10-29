@@ -244,7 +244,7 @@ func (s *Service) projectConfig(ctx context.Context, projectID uuid.UUID) (edgea
 	if len(rows) != 1 || rows[0].ProjectID != projectID {
 		return edgeapi.Project{}, errors.New("the project's configuration changed; try again")
 	}
-	page, err := s.page(ctx, "", svc.ChangedSeq-1, rows)
+	page, err := s.page(ctx, func(string) bool { return true }, svc.ChangedSeq-1, rows)
 	if err != nil {
 		return edgeapi.Project{}, err
 	}
