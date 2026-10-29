@@ -70,9 +70,19 @@ state directory keeps its identity, so it needs no new registration.
 
 ## PostgreSQL minor versions
 
-Rebuild the images (`./install.sh` does it; on remote nodes `make
-pg-image`, or pull them). Each instance then shows "18.x available" on its
-node's page, and Xenibase restarts the instances that are behind, one at a
+Each major's image is built from a pinned minor release:
+`PG17_RELEASE` and `PG18_RELEASE` in `deploy/images/postgres/Dockerfile`
+(17.11 and 18.6 in this release; a new Xenibase release raises them, or
+pass `--build-arg PG18_RELEASE=18.7`). Rebuild the images (`./install.sh`
+does it; on remote nodes `make pg-image`, or pull them). Each is tagged
+twice: `xenibase-postgres:18-walg3.0.9`, which instances use, and
+`xenibase-postgres:18.6-walg3.0.9`, which keeps the previous release on
+the node after you rebuild onto a newer one. To go back after a bad minor
+release, point the major tag at it again (`docker tag
+xenibase-postgres:18.6-walg3.0.9 xenibase-postgres:18-walg3.0.9`) on each
+node; instances move back at their next restart. Every node built from the
+same checkout runs the same release. Each instance then shows "18.x
+available" on its node's page, and Xenibase restarts the instances that are behind, one at a
 time, in the weekly maintenance window (Admin → Nodes; default Sunday
 02:00–06:00 UTC). The poolers hold clients for each restart. **Upgrade now**
 on the same panel does one immediately. See [moves and Postgres

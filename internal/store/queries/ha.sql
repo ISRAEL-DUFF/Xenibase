@@ -181,3 +181,7 @@ SELECT * FROM nodes WHERE role = 'pooler' AND status <> 'removed' AND region = @
 -- tenant: system - the newest platform operation of a kind for a region.
 SELECT * FROM operations WHERE kind = @kind AND project_id IS NULL AND params->>'region' = @region::text
 ORDER BY created_at DESC LIMIT 1;
+
+-- name: SetInstanceSwitchover :exec
+-- tenant: system - a switchover of an instance the caller already resolved.
+UPDATE instances SET switchover_started_at = sqlc.narg(started_at) WHERE id = @id;

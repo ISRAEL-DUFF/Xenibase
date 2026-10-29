@@ -259,7 +259,8 @@ func run() error {
 		}
 		bg.Add(1)
 		go func() { defer bg.Done(); etcdSvc.Run(bgCtx, 30*time.Second) }()
-		// Follow each HA instance's leader (V3 §2.2 "Routing").
+		// Follow each HA instance's leader (V3 §2.2 "Routing"), on one
+		// server at a time (an advisory lock; the others wait for it).
 		bg.Add(1)
 		go func() { defer bg.Done(); backups.Dedicated.RunHAWatcher(bgCtx, time.Second) }()
 		// The standby edge pooler (V3 §2.1): push the configuration to the
@@ -1012,8 +1013,8 @@ func connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		pcfg.ConnConfig.RuntimeParams["application_name"] = "xenibase-server"
 	}
 	// pgx's default (4 on a small box) is too few: the webhook and job
-	// schedulers each keep a connection for their lock, and a burst of
-	// requests and workers then queue behind each other.
+	// schedulers and the HA watcher each keep a connection for their lock,
+	// and a burst of requests and workers then queue behind each other.
 	if !strings.Contains(url, "pool_max_conns") {
 		pcfg.MaxConns = max(pcfg.MaxConns, defaultMaxConns)
 	}

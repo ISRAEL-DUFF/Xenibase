@@ -109,12 +109,21 @@ asynchronous, and Patroni won't promote a standby more than 1 MB behind.
 Patroni promotes the standby when the primary's leader lease (20 s)
 expires. xenibase-server checks every HA project's members every second:
 
-- when the primary's Patroni API stops answering, the poolers **pause** the
-  project's clients, so they wait rather than fail;
+- when the members that answer agree there is no running leader (Patroni
+  has dropped the primary's lease and is electing another), the poolers
+  **pause** the project's clients, so they wait rather than fail. A primary
+  that only xenibase-server can't reach, while the standby still lists it,
+  is left alone, and so is a project none of whose members answer the
+  server;
 - when Patroni has promoted the standby, the pooler route points at it and
   the poolers **resume**;
 - the old primary, when its node comes back, rejoins as the standby (with
   `pg_rewind`).
+
+With several xenibase-servers on one metadata database, one of them at a
+time does this, under a Postgres advisory lock; the others take over within
+seconds of its connection ending. A server that loses the lock resumes the
+poolers it paused.
 
 Each change is a **failover event** with how long writes were out. The
 project's HA card (and `xenibase ha status <p>`) shows each member's role,

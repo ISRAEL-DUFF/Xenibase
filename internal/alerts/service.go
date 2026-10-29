@@ -63,6 +63,9 @@ const (
 	// xenibase-server's client certificate for agents is close to expiry:
 	// renewing it keeps failing.
 	KindAgentClientCert = "agent_client_cert"
+	// A Postgres minor upgrade of an instance failed (V3 §2.4): the sweep
+	// leaves the instance on its release until a newer one or Run now.
+	KindMinorUpgradeFailed = "minor_upgrade_failed"
 )
 
 // KindProjectStuck: a move, promotion, demotion or major upgrade failed and
@@ -252,6 +255,17 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 			out = append(out, condition{KindIsolationCheck, SeverityCritical, "instance", o.InstanceID, "shared cluster on " + node,
 				"Tenant isolation check failed on " + node + ": " + msg, detail})
 		}
+	}
+
+	minors, err := q.FailedMinorUpgrades(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, m := range minors {
+		what := m.Kind + " instance on " + m.NodeName
+		out = append(out, condition{KindMinorUpgradeFailed, SeverityCritical, "instance", m.InstanceID.String(), what,
+			fmt.Sprintf("Minor upgrade of the %s from %s to %s failed: %s", what, m.FromRelease, m.ToRelease, m.Error),
+			map[string]any{"minor_upgrade_id": m.ID, "to_release": m.ToRelease, "error": m.Error}})
 	}
 
 	overdue, err := q.OverdueBackups(ctx, backupOverdueAfter.Seconds())

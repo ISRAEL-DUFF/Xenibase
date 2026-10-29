@@ -32,8 +32,15 @@ const (
 	ForPreviewProject
 	// ForUpgrade is a major upgrade's target: supported majors only.
 	ForUpgrade
-	// ForCluster is a new shared cluster: any major not retired.
+	// ForCluster is a new shared cluster: any installed major, a preview
+	// for the projects trying it and a retired one for the projects still
+	// on it.
 	ForCluster
+	// ForDerived is a project made from an existing one on its major (a
+	// point-in-time restore, a branch, a detached replica): any installed
+	// major, whatever its status, so a project on a retired or preview
+	// major keeps its safety net.
+	ForDerived
 )
 
 // PGVersion is one major's place in its life.
@@ -135,6 +142,9 @@ func (s *Service) CheckVersion(ctx context.Context, v int, use VersionUse) (int,
 		if x.Major == v {
 			status, retires = x.Status, x.RetiresAt
 		}
+	}
+	if use == ForDerived {
+		return v, nil // the source's data is on this major already
 	}
 	switch status {
 	case VersionRetired:

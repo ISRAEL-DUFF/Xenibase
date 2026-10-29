@@ -25,6 +25,7 @@ const kindLabel: Record<string, string> = {
   capacity_proposal: "Capacity proposal",
   capacity_failed: "Provisioning failed",
   agent_client_cert: "Agent client certificate",
+  minor_upgrade_failed: "Minor upgrade failed",
 };
 
 function TargetLink({ a }: { a: AlertItem }) {

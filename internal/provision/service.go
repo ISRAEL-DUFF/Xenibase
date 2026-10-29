@@ -263,9 +263,12 @@ type CreateParams struct {
 	// WAL from a server that allowed more connections).
 	MinMaxConnections int
 	// PgVersion is the Postgres major (0: the default, the newest
-	// supported). Preview allows a major in preview (V4.1 §6.1).
+	// supported). Preview allows a major in preview (V4.1 §6.1); Derived,
+	// for a project made from another's data (a restore, a branch, a
+	// detached replica), allows any installed major.
 	PgVersion int
 	Preview   bool
+	Derived   bool
 	// Region is where the project runs (empty: the home region, or NodeID's
 	// region); DataResidency keeps its data in that region's country, which
 	// the region must offer (V3 §6.3). A branch takes its parent's.
@@ -406,7 +409,10 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		tier = TierShared
 	}
 	use := ForProject
-	if p.Preview {
+	switch {
+	case p.Derived:
+		use = ForDerived
+	case p.Preview:
 		use = ForPreviewProject
 	}
 	if p.PgVersion, err = s.CheckVersion(ctx, p.PgVersion, use); err != nil {
@@ -697,6 +703,13 @@ func (s *Service) withIdleProject(ctx context.Context, id uuid.UUID, allowed []s
 		if busy {
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
+		// A shared cluster's minor upgrade is no one project's operation,
+		// but restarts every project on it.
+		if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil {
+			return err
+		} else if busy {
+			return fmt.Errorf("%w: a Postgres minor upgrade is restarting the project's instance; try again in a few minutes", ErrConflict)
+		}
 		if err := f(tx, p); errors.Is(err, jobs.ErrProjectBusy) {
 			return fmt.Errorf("%w: %w", ErrConflict, err)
 		} else if err != nil {
@@ -728,6 +741,9 @@ func EnqueueIfIdleTx(ctx context.Context, tx pgx.Tx, ep jobs.EnqueueParams) (boo
 	}
 	// A new statement: it sees what committed while we waited for the lock.
 	if busy, err := q.ProjectHasActiveOperation(ctx, &p.ID); err != nil || busy {
+		return false, err
+	}
+	if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil || busy {
 		return false, err
 	}
 	if _, err := jobs.Enqueue(ctx, tx, ep); err != nil {

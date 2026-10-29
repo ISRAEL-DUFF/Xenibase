@@ -70,6 +70,61 @@ bundle share one version (spec §11.5).
   its clients, and a second failure left an active branch whose API keys
   never worked. They are now turned on before the branch is published, and
   a retry that finds the branch active only queues its file copy.
+- **A Postgres version notice whose email failed was never resent:** its
+  record was written before the send. It is now kept only when the mail
+  goes, still once across servers, so the next hourly check sends it
+  again; the deprecation notice is retried too, until the first reminder.
+- **The instance image did not pin the Postgres minor release:** it was
+  built from the moving `postgres:<major>` tag, so nodes ran whatever
+  release they last pulled, and a rebuild left the previous release
+  untagged. Each major is now built from a pinned release (17.11 and 18.6,
+  `PG17_RELEASE`/`PG18_RELEASE` in `deploy/images/postgres/Dockerfile`)
+  and tagged with it as well (`xenibase-postgres:18.6-walg3.0.9`); the
+  `{major}` tag the agent uses is unchanged. `make pg-image` and
+  `install.sh` build through `deploy/images/postgres/build.sh`. See
+  `docs/upgrade.md` ("PostgreSQL minor versions").
+- **A point-in-time recovery to before a major upgrade could not start:**
+  it used the project's new major on data from the old one. The restore now
+  starts on the major of the instance that took the base backup, so an
+  owner whose app breaks on the new major can go back to before the
+  upgrade (writes made since are not in it). See `docs/moves.md` ("Major
+  upgrades").
+- **A project on a retired or preview Postgres major could not be restored
+  to a point in time, branched, or have a replica detached:** each made its
+  new project as a new project would, which those majors refuse. They now
+  take any major the server has an image for, so a retired project keeps
+  its safety net.
+- **Minor upgrades took no lock, weren't operations, and weren't
+  crash-safe.** Two servers could restart the same instance twice, an
+  owner could queue `ha_disable` or a resize during an HA upgrade, and a
+  server stopped between pause and resume left PgBouncer paused. Each
+  minor upgrade is now a `minor_upgrade` operation, exclusive with the
+  project's other operations (a shared cluster's keeps its projects'
+  exclusive operations off until it ends); its OnFail resumes the poolers,
+  a crashed attempt is retried once and resumes them first, and the sweep
+  runs on one server at a time under an advisory lock and finishes any run
+  an older server left unfinished. **Upgrade now** queues the same
+  operation and waits for it.
+- **A failed minor upgrade left the instance down and then looked done.**
+  The agent removed the old container before creating the new one, so a
+  release that would not start left nothing running, the sweep retried the
+  same instance every 5 minutes, and the next release check read the
+  missing or crash-looping container as upgraded. The agent now keeps the
+  old container, stopped, until the new one is ready and starts it again
+  otherwise; a release is reported only for a running container. The
+  failure is recorded, a **Minor upgrade failed** alert fires, and the
+  sweep moves on to other instances, trying that one again only for a
+  newer release or **Upgrade now**. See `docs/moves.md` ("Minor upgrades
+  and the maintenance window").
+- **The HA watcher paused healthy projects when xenibase-server lost sight
+  of their primary,** and ran on every server without a lock. It now pauses
+  the poolers only when the members that answer agree there is no running
+  leader, and leaves them alone when none answers. One server at a time
+  watches, under a Postgres advisory lock; a server that loses it resumes
+  the poolers it paused, and the next one resumes any left paused. A
+  switchover marks its instance (**migration 00073**) so the watcher on
+  another server leaves it alone instead of recording a failover. See
+  `docs/ha.md` ("Failover").
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

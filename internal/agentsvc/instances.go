@@ -118,18 +118,45 @@ func (in *instances) Create(ctx context.Context, spec agentapi.InstanceSpec) (ag
 		return agentapi.Instance{}, fmt.Errorf("bad instance kind %q", spec.Kind)
 	}
 	defer in.lock(spec.ID)()
-	name, vol, restoreName := names(spec.ID)
+	name, _, _ := names(spec.ID)
+	kept := previousName(spec.ID)
 
+	// An agent stopped part-way through a recreate may have left the old
+	// container renamed and no new one: it is the instance.
+	if _, err := in.dc.InspectContainer(ctx, name); errors.Is(err, docker.ErrNotFound) {
+		if _, err := in.dc.InspectContainer(ctx, kept); err == nil {
+			if err := in.dc.RenameContainer(ctx, kept, name); err != nil {
+				return agentapi.Instance{}, fmt.Errorf("put back the container a recreate left: %w", err)
+			}
+		}
+	}
 	var prev memberPorts
 	if old, err := in.dc.InspectContainer(ctx, name); err == nil && spec.Recreate && spec.Restore == nil {
 		prev = portsOf(old)
+		// The old container is kept, stopped and renamed, until the new
+		// one is ready, and put back if it isn't: a release that won't
+		// start on this data must not leave the instance down.
+		if err := in.dc.RemoveContainer(ctx, kept); err != nil {
+			return agentapi.Instance{}, fmt.Errorf("remove a previous container left by an earlier recreate: %w", err)
+		}
 		if err := in.dc.StopContainer(ctx, name, 60*time.Second); err != nil {
 			return agentapi.Instance{}, fmt.Errorf("stop for recreate: %w", err)
 		}
-		if err := in.dc.RemoveContainer(ctx, name); err != nil {
-			return agentapi.Instance{}, fmt.Errorf("remove for recreate: %w", err)
+		if err := in.dc.RenameContainer(ctx, name, kept); err != nil {
+			if serr := in.dc.StartContainer(context.WithoutCancel(ctx), name); serr != nil {
+				err = errors.Join(err, fmt.Errorf("start it again: %w", serr))
+			}
+			return agentapi.Instance{}, fmt.Errorf("set the old container aside for recreate: %w", err)
 		}
 		// The volume stays: the new container below starts on the same data.
+		res, err := in.build(ctx, spec, prev)
+		if err != nil {
+			return agentapi.Instance{}, in.putBack(ctx, name, kept, err)
+		}
+		if err := in.dc.RemoveContainer(ctx, kept); err != nil {
+			return res, fmt.Errorf("remove the old container after recreate: %w", err)
+		}
+		return res, nil
 	} else if err == nil {
 		if err := in.dc.StartContainer(ctx, name); err != nil {
 			return agentapi.Instance{}, err
@@ -137,11 +164,51 @@ func (in *instances) Create(ctx context.Context, spec agentapi.InstanceSpec) (ag
 		if err := in.ready(ctx, name); err != nil {
 			return agentapi.Instance{}, err
 		}
+		// A recreate that stopped after the new container was made.
+		_ = in.dc.RemoveContainer(ctx, kept)
 		return in.info(ctx, spec.ID)
 	} else if !errors.Is(err, docker.ErrNotFound) {
 		return agentapi.Instance{}, err
 	}
+	return in.build(ctx, spec, prev)
+}
 
+// previousName is the name a recreate gives the old container until the
+// new one is ready.
+func previousName(id string) string { return "xenibase-" + id + "-previous" }
+
+// putBackTimeout bounds starting the old container again after a failed
+// recreate; it runs even when the request was cancelled.
+var putBackTimeout = 11 * time.Minute
+
+// putBack replaces a new container that failed (cause) with the old one,
+// set aside stopped as kept, and starts it again. The error says whether
+// that worked.
+func (in *instances) putBack(ctx context.Context, name, kept string, cause error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), putBackTimeout)
+	defer cancel()
+	fail := func(step string, err error) error {
+		return fmt.Errorf("%w; the old container could not be put back (%s): %w", cause, step, err)
+	}
+	if err := in.dc.RemoveContainer(ctx, name); err != nil {
+		return fail("remove the new one", err)
+	}
+	if err := in.dc.RenameContainer(ctx, kept, name); err != nil {
+		return fail("rename", err)
+	}
+	if err := in.dc.StartContainer(ctx, name); err != nil {
+		return fail("start", err)
+	}
+	if err := in.ready(ctx, name); err != nil {
+		return fail("ready", err)
+	}
+	return fmt.Errorf("%w; the old container was started again", cause)
+}
+
+// build creates and starts the instance's container (restoring its volume
+// first if asked) and waits until it is ready.
+func (in *instances) build(ctx context.Context, spec agentapi.InstanceSpec, prev memberPorts) (agentapi.Instance, error) {
+	name, vol, restoreName := names(spec.ID)
 	image := agentapi.ImageFor(in.cfg.Image, spec.PGVersion)
 	if ok, err := in.dc.ImageExists(ctx, image); err != nil {
 		return agentapi.Instance{}, err
@@ -467,8 +534,10 @@ func (in *instances) info(ctx context.Context, id string) (agentapi.Instance, er
 		Image: c.Config.Image,
 	}
 	// The official image records its release in PG_VERSION
-	// ("18.1-1.pgdg13+1"); a lookup that fails leaves the field empty.
-	if img, err := in.dc.InspectImage(ctx, c.ImageID); err == nil {
+	// ("18.1-1.pgdg13+1"); a lookup that fails leaves the field empty. A
+	// container that isn't running (stopped, or crash-looping between
+	// restarts) runs no release, so a failed upgrade can't read as done.
+	if img, err := in.dc.InspectImage(ctx, c.ImageID); err == nil && c.State.Status == "running" {
 		out.Version = pgRelease(img.Env("PG_VERSION"))
 	}
 	if img, err := in.dc.InspectImage(ctx, c.Config.Image); err == nil {
@@ -500,6 +569,7 @@ func (in *instances) Destroy(ctx context.Context, id string) error {
 	defer in.lock(id)()
 	name, vol, restoreName := names(id)
 	_ = in.dc.RemoveContainer(ctx, restoreName)
+	_ = in.dc.RemoveContainer(ctx, previousName(id))
 	if err := in.dc.RemoveContainer(ctx, name); err != nil {
 		return err
 	}

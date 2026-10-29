@@ -61,7 +61,7 @@ grep -q '^XENIBASE_PUBLIC_URL=' .env || echo "XENIBASE_PUBLIC_URL=https://$(grep
 # (PostgreSQL + WAL-G, one image per supported major).
 # shellcheck disable=SC2086 # XENIBASE_BUILD_FLAGS is a list of flags
 for major in 17 18; do
-	docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg PG_MAJOR=$major -t xenibase-postgres:$major-walg3.0.9 ../images/postgres
+	sh ../images/postgres/build.sh "$major" ${XENIBASE_BUILD_FLAGS:-}
 done
 # The binaries report the release they were built from (git describe: the tag
 # itself on a tagged checkout), which upgrade.sh and the Nodes page rely on.

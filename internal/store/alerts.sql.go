@@ -136,6 +136,60 @@ func (q *Queries) FailedLatestOperations(ctx context.Context, kinds []string) ([
 	return items, nil
 }
 
+const failedMinorUpgrades = `-- name: FailedMinorUpgrades :many
+SELECT l.id, l.instance_id, l.from_release, l.to_release, COALESCE(l.error, '')::text AS error, l.finished_at, i.kind, n.name AS node_name
+FROM (
+  SELECT DISTINCT ON (m.instance_id) m.id, m.instance_id, m.from_release, m.to_release, m.started_at, m.finished_at, m.pause_ms, m.error FROM minor_upgrades m
+  WHERE m.finished_at IS NOT NULL
+  ORDER BY m.instance_id, m.started_at DESC
+) l
+JOIN instances i ON i.id = l.instance_id AND i.deleted_at IS NULL
+JOIN nodes n ON n.id = i.node_id
+WHERE l.error IS NOT NULL
+`
+
+type FailedMinorUpgradesRow struct {
+	ID          uuid.UUID
+	InstanceID  uuid.UUID
+	FromRelease string
+	ToRelease   string
+	Error       string
+	FinishedAt  *time.Time
+	Kind        string
+	NodeName    string
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// Live instances whose latest finished minor upgrade failed.
+func (q *Queries) FailedMinorUpgrades(ctx context.Context) ([]FailedMinorUpgradesRow, error) {
+	rows, err := q.db.Query(ctx, failedMinorUpgrades)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FailedMinorUpgradesRow
+	for rows.Next() {
+		var i FailedMinorUpgradesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstanceID,
+			&i.FromRelease,
+			&i.ToRelease,
+			&i.Error,
+			&i.FinishedAt,
+			&i.Kind,
+			&i.NodeName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const fireAlert = `-- name: FireAlert :one
 INSERT INTO alerts (kind, key, severity, target_type, target_id, target_name, summary, detail)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

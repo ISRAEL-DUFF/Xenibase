@@ -123,7 +123,8 @@ will happen and what it costs before anything is queued.
 `XENIBASE_PG_VERSIONS` (default `17,18`) lists the majors Xenibase offers; the
 newest is the default for new projects. Each needs its image on every node
 (`xenibase-postgres:{major}-walg3.0.9`; `install.sh` and `make pg-image` build
-17 and 18). Shared projects go to a shared cluster of their version, so add
+17 and 18, each from the minor release the Dockerfile pins, also tagged
+with that release, e.g. `xenibase-postgres:18.6-walg3.0.9`). Shared projects go to a shared cluster of their version, so add
 one per version you offer (Nodes → a node → **Run a shared cluster here**,
 choosing the version).
 
@@ -143,13 +144,18 @@ versions** (`GET /api/v1/admin/pg-versions`, `PATCH …/{major}`):
 - **Deprecating** needs a retirement date at least **180 days** ahead.
   Owners and admins of every organisation with a project on that major
   are emailed at once, with their projects and the link to each one's
-  upgrade, and again at 90, 30 and 7 days before the date (once per step).
+  upgrade, and again at 90, 30 and 7 days before the date (once per step;
+  a mail that fails is sent again at the next hourly check).
   Those projects show a banner on their overview and Compute pages.
 - **Retired:** a deprecated major is retired once its date passes (or
   when an admin retires it, which is refused while projects still run on
   it). Existing projects keep running, marked unsupported; they are never
   upgraded automatically, since a new major can break an application.
   Shared clusters of the major can still be created for them.
+- Whatever the status (preview and retired included), a project can still
+  be **restored to a point in time, branched, or have a read replica
+  detached**: the new project stays on its source's major, as long as the
+  server still has that major's image (`XENIBASE_PG_VERSIONS`).
 
 ### Major upgrades
 
@@ -174,6 +180,13 @@ The upgrade is then a move as above. Test the application against the new
 version first, for example on a branch: a new major can change query plans
 and defaults.
 
+There is no downgrade in place. To get back to the old major, **restore to
+a point in time before the upgrade** (Backups → Point-in-time recovery): the
+base backups taken before it are still offered, and the new project starts
+on the major they were taken on, with the data as it was then. Writes made
+since the upgrade are not in it. The old instance itself is kept stopped for
+48 hours, but nothing points the project back at it.
+
 ### Minor upgrades and the maintenance window
 
 Minor releases (18.1 → 18.2) need no data change, only a restart on the
@@ -187,8 +200,23 @@ Sunday 02:00–06:00 UTC), Xenibase restarts the instances that are behind,
 each restart the poolers hold the projects' clients, so the restart (about
 a second or two) looks like a short pause rather than an outage. An
 instance whose projects are in the middle of something (a move, a restore,
-a queued operation) waits for the next sweep. The window can be disabled,
-and **Upgrade now** restarts one instance at once. The panel lists the
+a queued operation) waits for the next sweep. Each restart is a
+`minor_upgrade` operation: on a dedicated instance it is the project's
+operation (it shows in the project's activity, and nothing else can be
+queued on the project until it ends); on a shared cluster it belongs to no
+project, but its projects can't start other operations until it ends. With
+several xenibase-servers, one sweeps at a time, and a server that stops
+mid-restart hands the operation to another, which resumes the poolers. The window can be disabled,
+and **Upgrade now** restarts one instance at once.
+
+If the new release won't start on an instance (it fails to create, exits,
+or isn't ready within 10 minutes), the agent starts the old container again,
+which it keeps stopped until the new one is ready, so the instance comes
+back on its old release. The failure is in the history with its error, a
+**Minor upgrade failed** alert fires, and the sweep moves on to the other
+instances: it doesn't try that instance again until its image holds a newer
+release, or you press **Upgrade now**. If even the old container can't be
+started, the error says the instance is down. The panel lists the
 instances still behind and the last 20 restarts, with how long clients were
 held.
 
