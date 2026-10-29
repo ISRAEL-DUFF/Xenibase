@@ -717,6 +717,14 @@ bundle share one version (spec §11.5).
   promotion's target instance, now count towards the dedicated allowance
   (a replica as an instance the size of its primary); they were not
   counted, so replicas could be added whatever the allowance.
+- **Suspension and hard locks now switch off the logins a dedicated
+  project's owner created.** With role management on, the owner's own
+  logins (an app login, say, recorded in `project_owned_logins`) were left
+  out of the logins a suspension or a hard storage lock switches off, so
+  they could still log in at the instance from the private network, and
+  sessions opened before kept running. They are now switched off and their
+  sessions ended with the project's other logins, and switched back on
+  with them; the role sync keeps them recorded meanwhile.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its

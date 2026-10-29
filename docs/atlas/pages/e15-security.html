@@ -186,7 +186,7 @@
 <div class="table-wrap"><table>
   <thead><tr><th>Surface</th><th>While the organisation is suspended</th><th>Where</th></tr></thead>
   <tbody>
-    <tr><td>Postgres logins</td><td>The owner, the V1 owner, members' logins and the five backend-service logins become <code>NOLOGIN</code>; their sessions end</td><td><code>SetLogins</code>, <x-ref path="internal/provision/logins.go" symbol="func (s *Service) ProjectLogins("><code>ProjectLogins</code></x-ref></td></tr>
+    <tr><td>Postgres logins</td><td>The owner, the V1 owner, members' logins, the logins a dedicated project's owner created (<code>project_owned_logins</code>) and the five backend-service logins become <code>NOLOGIN</code>; their sessions end</td><td><code>SetLogins</code>, <x-ref path="internal/provision/logins.go" symbol="func (s *Service) ProjectLogins("><code>ProjectLogins</code></x-ref></td></tr>
     <tr><td>Poolers</td><td>The databases' clients are killed, and the next sync leaves the organisation's routes out</td><td><code>PoolerRoutes</code> (<x-page id="connections--files"/>)</td></tr>
     <tr><td>Edge</td><td>Requests answer <code>project_suspended</code>; open WebSockets close</td><td><x-page id="realtime--lifecycle"/></td></tr>
     <tr><td>Web API and tokens</td><td>Members can sign in and view; mutating calls answer <code>org_suspended</code>; API tokens are refused</td><td><x-page id="control-plane--guard"/></td></tr>
@@ -195,9 +195,7 @@
     <tr><td>Dedicated instances</td><td>Keep running, with the logins above off</td><td>—</td></tr>
   </tbody>
 </table></div>
-<div class="callout risk"><span class="callout-label">Risk</span>
-  <p><strong>Suspension leaves the logins a dedicated project's owner created able to log in.</strong> With role management on, the owner's migrations create logins of their own (such as an app login), recorded in <code>project_owned_logins</code> and synced to the poolers. <code>ProjectLogins</code> lists the owner, the V1 owner, <code>project_db_users</code> and the service roles, not owned logins, so <code>SetLogins</code> leaves them <code>LOGIN</code> and does not end their sessions. The pooler routes go, so the public path closes, but the instance still accepts them from <code>XENIBASE_AGENT_DB_ALLOW</code> (every private range by default for an agent installed by hand, <x-page id="connections--allowlist"/>), for example from another organisation's dedicated <code>postgres_fdw</code>; sessions opened that way before the suspension carry on. <code>isocheck</code> audits only shared clusters, so nothing reports it. <code>ProjectLogins</code> should include the owned logins (they are re-synced from the instance, so their names are known). Low: it needs a foothold on the private network.</p>
-</div>
+<div class="callout"><span class="callout-label">Resolved</span><p>Suspension used to leave the logins a dedicated project's owner created able to log in. With role management on, the owner's migrations create logins of their own (such as an app login), recorded in <code>project_owned_logins</code>; <code>ProjectLogins</code> listed the owner, the V1 owner, <code>project_db_users</code> and the service roles but not those, so <code>SetLogins</code> left them <code>LOGIN</code> and their sessions open, reachable at the instance from the private network. Now <code>ProjectLogins</code> includes them, so a suspension or a hard lock switches them off and ends their sessions, and switching back on restores them. The role sync (<x-ref path="internal/dedicated/roles.go" symbol="func (s *Service) SyncOwnedRoles("><code>SyncOwnedRoles</code></x-ref>) keeps a recorded login it finds <code>NOLOGIN</code> while the project's logins are off, which it would otherwise drop as no longer a login, so reinstating finds it. <code>TestSetLoginsCoversOwnedLogins</code> and <code>TestSyncOwnedRolesKeepsLoginsSwitchedOff</code> cover it.</p></div>
 
 <h3>Break-glass, dedicated allowances, deletion</h3>
 <ul>
