@@ -31,6 +31,15 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Revoking a key, suspending an organisation or turning services off now
+  closes open realtime connections.** They were checked only when they
+  opened: a connection made with a since-revoked secret key kept receiving
+  every change and could join private channels, a suspended organisation's
+  clients carried on, and turning services off left broadcasts and the
+  edge's database connection running. The edge now closes such connections
+  (WebSocket code 1008, with the reason) as soon as the change reaches it,
+  within 10 seconds at most, and stops listening to a project whose
+  services are off. A spend cap still leaves open connections alone.
 - **Realtime channels follow their user's token and the channel policies
   while open.** A private channel's policies were asked only at join, so a
   member removed from a room kept hearing it, and a new `access_token`

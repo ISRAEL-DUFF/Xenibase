@@ -66,7 +66,8 @@ type rtConn struct {
 	ws    *websocket.Conn
 	v2    atomic.Bool // the client speaks the v2 wire format; set by the read loop, read by senders
 	ip    string
-	base  Request // the key's role: service for the secret key, else anon
+	base  Request   // the key's role: service for the secret key, else anon
+	keyID uuid.UUID // the key it was opened with
 	out   chan []byte
 	done  chan struct{}
 	close sync.Once
@@ -177,8 +178,12 @@ func (e *Edge) realtime(c *call, req Request) {
 	}
 	conn := &rtConn{e: e, hub: hub, ws: ws, ip: c.ip, base: base,
 		out: make(chan []byte, rtSendQueue), done: make(chan struct{}), channels: map[string]*rtChannel{}, started: time.Now(), id: randRef()}
+	if c.keyID != nil {
+		conn.keyID = *c.keyID
+	}
 	conn.v2.Store(c.r.URL.Query().Get("vsn") == "2.0.0")
 	conn.lastSeen.Store(time.Now().UnixNano())
+	hub.opened(conn)
 	conn.run(c.r.Context())
 }
 
@@ -250,6 +255,11 @@ func (rc *rtConn) idleLoop(ctx context.Context) {
 // channel's policies again every rtRecheck: a user removed from a room
 // stops hearing it within a minute.
 func (rc *rtConn) recheck(ctx context.Context) {
+	// The feed's changes reach the hub (feedChanged); this is the backstop.
+	if reason := refusal(rc.e.lookup(rc.hub.ref), rc.keyID); reason != "" {
+		rc.refuse(reason)
+		return
+	}
 	rc.mu.Lock()
 	chans := make([]*rtChannel, 0, len(rc.channels))
 	for _, ch := range rc.channels {
@@ -291,6 +301,21 @@ func (rc *rtConn) recheck(ctx context.Context) {
 	}
 }
 
+// refuse closes the connection for reason: each channel is told, then the
+// socket closes with it.
+func (rc *rtConn) refuse(reason string) {
+	rc.mu.Lock()
+	chans := make([]*rtChannel, 0, len(rc.channels))
+	for _, ch := range rc.channels {
+		chans = append(chans, ch)
+	}
+	rc.mu.Unlock()
+	for _, ch := range chans {
+		ch.system("error", "", reason)
+	}
+	rc.shutdown(websocket.StatusPolicyViolation, reason)
+}
+
 // expire closes a channel whose token has expired, once.
 func (ch *rtChannel) expire() {
 	if !ch.closing.CompareAndSwap(false, true) {
@@ -314,6 +339,7 @@ func (rc *rtConn) shutdown(code websocket.StatusCode, reason string) {
 		for _, ch := range chans {
 			rc.hub.leave(ch)
 		}
+		rc.hub.closed(rc)
 		if rc.ws != nil { // nil in unit tests
 			_ = rc.ws.Close(code, reason)
 		}

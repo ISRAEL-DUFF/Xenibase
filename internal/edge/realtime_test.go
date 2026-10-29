@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"net/url"
@@ -34,13 +35,23 @@ func rtTestEdge(t *testing.T) (*Edge, edgeapi.Project) {
 	return e, pc
 }
 
-// testConn is a connection on h with no socket behind it.
+// testConn is a connection on h with no socket behind it, opened with the
+// project's key for base's role.
 func testConn(h *rtHub, base Request) *rtConn {
 	if base.Claims == nil {
 		base.Claims = map[string]any{"role": base.Role}
 	}
-	return &rtConn{e: h.e, hub: h, base: base, out: make(chan []byte, rtSendQueue), done: make(chan struct{}),
+	rc := &rtConn{e: h.e, hub: h, base: base, out: make(chan []byte, rtSendQueue), done: make(chan struct{}),
 		channels: map[string]*rtChannel{}, started: time.Now(), id: randRef()}
+	if p := h.e.lookup(h.ref); p != nil {
+		for _, k := range p.keys {
+			if (k.Kind == edgeapi.KindSecret) == (base.Role == "service") {
+				rc.keyID = k.ID
+			}
+		}
+	}
+	h.opened(rc)
+	return rc
 }
 
 // testChannel is a public channel on rc, joined to the hub without starting
@@ -461,5 +472,88 @@ func TestRealtimeTokenExpiry(t *testing.T) {
 	quiet.join(ctx, msg("realtime:again", phxJoin, map[string]any{"config": map[string]any{}}), nil)
 	if got, _ := replies(t, quiet); len(got) != 1 || !strings.Contains(got[0], "has expired") {
 		t.Fatalf("a join on an expired bearer connection: %v", got)
+	}
+}
+
+// closedWith waits for the edge to close ws, and returns its close code
+// and reason.
+func closedWith(t *testing.T, ws *websocket.Conn) (websocket.StatusCode, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		if _, _, err := ws.Read(ctx); err != nil {
+			var ce websocket.CloseError
+			if !errors.As(err, &ce) {
+				t.Fatalf("not closed by the edge: %v", err)
+			}
+			return ce.Code, ce.Reason
+		}
+	}
+}
+
+// alive checks that ws still answers a heartbeat.
+func alive(t *testing.T, ws *websocket.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ws.Write(ctx, websocket.MessageText, []byte(`{"topic":"phoenix","event":"heartbeat","payload":{},"ref":"hb"}`)); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if _, b, err := ws.Read(ctx); err != nil || !strings.Contains(string(b), `"hb"`) {
+		t.Fatalf("heartbeat reply: %s %v", b, err)
+	}
+}
+
+// TestRealtimeConnectionsFollowTheFeed: an open connection is closed when
+// the key it was opened with is revoked, when the organisation is
+// suspended, and when the project leaves the feed.
+func TestRealtimeConnectionsFollowTheFeed(t *testing.T) {
+	e, pc := rtTestEdge(t)
+	srv := rtServe(t, e)
+	h := e.hub(rtTestRef)
+	pub, sec := rtDial(t, srv, rtTestRef, "xb_pub_rtunit"), rtDial(t, srv, rtTestRef, "xb_sec_rtunit")
+	alive(t, pub)
+	alive(t, sec)
+	update := func(change func(*edgeapi.Project)) {
+		pc.Version++
+		change(&pc)
+		e.apply([]edgeapi.Project{pc})
+	}
+
+	// The publishable key is rotated: its connection goes, the other stays.
+	keys := pc.Keys
+	update(func(p *edgeapi.Project) { p.Keys = keys[1:] })
+	if code, reason := closedWith(t, pub); code != websocket.StatusPolicyViolation || !strings.Contains(reason, "revoked") {
+		t.Fatalf("a revoked key's connection: %d %q", code, reason)
+	}
+	alive(t, sec)
+
+	// The organisation is suspended.
+	update(func(p *edgeapi.Project) { p.State = edgeapi.StateSuspended })
+	if code, reason := closedWith(t, sec); code != websocket.StatusPolicyViolation || !strings.Contains(reason, "suspended") {
+		t.Fatalf("a suspended project's connection: %d %q", code, reason)
+	}
+
+	// Services turned off: the project leaves the feed.
+	update(func(p *edgeapi.Project) { p.State, p.Keys = edgeapi.StateActive, keys })
+	ws := rtDial(t, srv, rtTestRef, "xb_pub_rtunit")
+	alive(t, ws)
+	update(func(p *edgeapi.Project) { p.State = edgeapi.StateDisabled })
+	if code, reason := closedWith(t, ws); code != websocket.StatusPolicyViolation || !strings.Contains(reason, "off") {
+		t.Fatalf("a connection to a project that left the feed: %d %q", code, reason)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.mu.Lock()
+		n := len(h.conns)
+		h.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections still open on the hub", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -443,4 +444,71 @@ func TestRealtimePrivateChannelsRechecked(t *testing.T) {
 	}
 	rc.handle(ctx, msg("realtime:vip", evAccessToken, map[string]any{"access_token": rp.token(t, bob.String(), time.Hour)}))
 	closedFor(t, rc, "realtime:vip", "not allowed")
+}
+
+// TestRealtimeListenerStopsWithTheProject: when the project leaves the feed
+// its listener stops at once, with its connection to the database, and
+// its clients are closed; a project back in the feed listens again.
+func TestRealtimeListenerStopsWithTheProject(t *testing.T) {
+	rp := newRTProject(t)
+	ctx := context.Background()
+	h := rp.e.hub(rp.pc.Ref)
+	listeners := func() int {
+		var n int
+		if err := rp.db.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+			AND application_name LIKE 'xenibase-edge_realtime'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("waiting for %s", what)
+			}
+		}
+	}
+	join := func() (*rtConn, chan struct{}) {
+		rc := testConn(h, Request{Role: "anon"})
+		ch := &rtChannel{c: rc, topic: "realtime:room", presence: "p", req: rc.base,
+			acc: rtAccess{readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}}
+		rc.mu.Lock()
+		rc.channels[ch.topic] = ch
+		rc.mu.Unlock()
+		h.join(ch)
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		h.waitReady(wctx)
+		h.mu.Lock()
+		done := h.listenDone
+		h.mu.Unlock()
+		return rc, done
+	}
+
+	rc, done := join()
+	waitFor("the listener's connection", func() bool { return listeners() == 1 })
+	pc := rp.pc
+	pc.Version, pc.State = 2, edgeapi.StateDisabled
+	rp.e.apply([]edgeapi.Project{pc})
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the listener is still running")
+	}
+	select {
+	case <-rc.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client is still connected")
+	}
+	waitFor("the listener's connection to close", func() bool { return listeners() == 0 })
+
+	pc.Version, pc.State = 3, edgeapi.StateActive
+	rp.e.apply([]edgeapi.Project{pc})
+	rc, done = join()
+	waitFor("a new listener's connection", func() bool { return listeners() == 1 })
+	h.stop()
+	<-done
+	rc.shutdown(websocket.StatusNormalClosure, "")
+	waitFor("the listener's connection to close", func() bool { return listeners() == 0 })
 }

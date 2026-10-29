@@ -954,7 +954,9 @@ A private channel and a public one of the same name don't hear each other.
 
 Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects
-and refetches). A connection joins at most 100 channels, sends at most 600
+and refetches). Open connections are closed (code 1008) when the key they
+were opened with is revoked or rotated away, when the organisation is
+suspended, and when backend services are turned off. A connection joins at most 100 channels, sends at most 600
 broadcasts and presence updates a minute, and a broadcast or presence
 message is at most 32 KB (other frames 64 KB). A channel may have at most 20
 `postgres_changes` subscriptions and a connection 100, and a client that

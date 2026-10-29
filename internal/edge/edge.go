@@ -346,6 +346,11 @@ func (e *Edge) poll(ctx context.Context) error {
 // apply updates the cache. A project's pool is kept unless how it connects
 // changed.
 func (e *Edge) apply(ps []edgeapi.Project) {
+	refs := make([]string, 0, len(ps))
+	defer func() {
+		// Realtime's open connections follow the change (rthub.go).
+		go e.rtProjectsChanged(refs)
+	}()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, pc := range ps {
@@ -353,6 +358,7 @@ func (e *Edge) apply(ps []edgeapi.Project) {
 		if old != nil && old.cfg.Version > pc.Version {
 			continue // an older copy (from a resync racing a poll)
 		}
+		refs = append(refs, pc.Ref)
 		if pc.State == edgeapi.StateDisabled {
 			if old != nil {
 				delete(e.byRef, pc.Ref)
