@@ -60,6 +60,8 @@ type Config struct {
 	FreeTier FreeTier
 	// Signup configures open signup's protections (V3 §7.4).
 	Signup Signup
+	// Invitations caps organisation invitations a day.
+	Invitations Invitations
 	// Support configures support's channels (V3 §7.1).
 	Support Support
 	// AuthPhone is the platform's SMS and WhatsApp for auth codes (V4 §6.2).
@@ -179,6 +181,7 @@ func load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 	errs = append(errs, loadEdge(getenv, readFile, &cfg)...)
 	errs = append(errs, loadPayments(getenv, readFile, &cfg)...)
 	errs = append(errs, loadFreeTier(getenv, readFile, &cfg)...)
+	errs = append(errs, loadInvitations(getenv, &cfg)...)
 	errs = append(errs, loadSupport(getenv, readFile, &cfg)...)
 	errs = append(errs, loadAuthPhone(getenv, readFile, &cfg)...)
 	errs = append(errs, loadCDN(getenv, readFile, &cfg)...)

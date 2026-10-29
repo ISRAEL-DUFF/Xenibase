@@ -160,6 +160,10 @@ func (s *Server) GetOAuthAuthorization(w http.ResponseWriter, r *http.Request, p
 	for _, sc := range a.Scopes {
 		out.Scopes = append(out.Scopes, gen.TokenScope(sc))
 	}
+	if out.Consent, err = s.tokens.SealConsent(sess.UserID, req, a); err != nil {
+		s.internalError(w, "oauth authorize", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -176,8 +180,16 @@ func (s *Server) DecideOAuthAuthorization(w http.ResponseWriter, r *http.Request
 		ClientID: req.ClientId, RedirectURI: req.RedirectUri, State: deref(req.State),
 		CodeChallenge: req.CodeChallenge, CodeChallengeMethod: req.CodeChallengeMethod,
 	}
-	if req.Scopes != nil {
-		areq.Scope = strings.Join(scopeStrings(*req.Scopes), " ")
+	sess, _ := sessionFrom(r.Context())
+	if req.Approve {
+		// The scopes the app asked for come from the consent the page was
+		// given, not from the page: the user narrows them, never widens.
+		requested, err := s.tokens.OpenConsent(sess.UserID, deref(req.Consent), areq)
+		if err != nil {
+			tokenError(s, w, "oauth authorize", err)
+			return
+		}
+		areq.Scope = strings.Join(requested, " ")
 	}
 	a, err := s.tokens.ValidateAuthorize(r.Context(), areq)
 	if err != nil {
@@ -198,11 +210,22 @@ func (s *Server) DecideOAuthAuthorization(w http.ResponseWriter, r *http.Request
 		return
 	}
 	scopes := a.Scopes
+	if req.Scopes != nil {
+		if scopes, err = tokens.NormalizeScopes(scopeStrings(*req.Scopes)); err != nil {
+			tokenError(s, w, "oauth authorize", err)
+			return
+		}
+		for _, sc := range scopes {
+			if !tokens.HasScope(a.Scopes, sc) {
+				writeError(w, http.StatusBadRequest, "invalid", "the app did not ask for the "+sc+" scope")
+				return
+			}
+		}
+	}
 	exp := expiryDays(req.ExpiresInDays)
 	if !s.checkTokenGrant(w, r, *req.OrgId, scopes, req.ProjectIds, max(exp, tokens.DefaultExpiry)) {
 		return
 	}
-	sess, _ := sessionFrom(r.Context())
 	p := tokens.CodeParams{Request: areq, UserID: sess.UserID, OrgID: *req.OrgId, Scopes: scopes, ExpiresIn: exp}
 	if req.ProjectIds != nil {
 		p.Projects = *req.ProjectIds

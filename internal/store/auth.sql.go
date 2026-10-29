@@ -59,7 +59,7 @@ func (q *Queries) AdvanceTOTPStep(ctx context.Context, arg AdvanceTOTPStepParams
 }
 
 const approveUser = `-- name: ApproveUser :one
-UPDATE users SET approved_at = COALESCE(approved_at, now()) WHERE id = $1 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip
+UPDATE users SET approved_at = COALESCE(approved_at, now()) WHERE id = $1 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at
 `
 
 func (q *Queries) ApproveUser(ctx context.Context, id uuid.UUID) (User, error) {
@@ -82,6 +82,7 @@ func (q *Queries) ApproveUser(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }
@@ -95,6 +96,26 @@ func (q *Queries) BumpChallengeAttempts(ctx context.Context, id string) (int32, 
 	var attempts int32
 	err := row.Scan(&attempts)
 	return attempts, err
+}
+
+const claimLockoutNotice = `-- name: ClaimLockoutNotice :execrows
+UPDATE users SET lockout_notified_at = ($1::timestamptz)
+WHERE id = $2 AND (lockout_notified_at IS NULL OR lockout_notified_at <= ($1::timestamptz) - interval '1 second' * ($3::float8))
+`
+
+type ClaimLockoutNoticeParams struct {
+	Now          time.Time
+	ID           uuid.UUID
+	EverySeconds float64
+}
+
+// Claims the lockout email for an account, at most once every every_seconds.
+func (q *Queries) ClaimLockoutNotice(ctx context.Context, arg ClaimLockoutNoticeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimLockoutNotice, arg.Now, arg.ID, arg.EverySeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const consumeEmailToken = `-- name: ConsumeEmailToken :one
@@ -195,6 +216,21 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 	return err
 }
 
+const deleteStaleAddressFailures = `-- name: DeleteStaleAddressFailures :exec
+DELETE FROM login_address_failures
+WHERE updated_at < ($1::timestamptz) AND (locked_until IS NULL OR locked_until <= ($2::timestamptz))
+`
+
+type DeleteStaleAddressFailuresParams struct {
+	Before time.Time
+	Now    time.Time
+}
+
+func (q *Queries) DeleteStaleAddressFailures(ctx context.Context, arg DeleteStaleAddressFailuresParams) error {
+	_, err := q.db.Exec(ctx, deleteStaleAddressFailures, arg.Before, arg.Now)
+	return err
+}
+
 const deleteUserSession = `-- name: DeleteUserSession :execrows
 DELETE FROM sessions WHERE user_id = $1 AND id = $2
 `
@@ -225,6 +261,18 @@ type DeleteUserSessionsParams struct {
 func (q *Queries) DeleteUserSessions(ctx context.Context, arg DeleteUserSessionsParams) error {
 	_, err := q.db.Exec(ctx, deleteUserSessions, arg.UserID, arg.Keep)
 	return err
+}
+
+const getAddressLock = `-- name: GetAddressLock :one
+SELECT locked_until FROM login_address_failures WHERE email = $1
+`
+
+// When a sign-in address with no enabled account is locked until.
+func (q *Queries) GetAddressLock(ctx context.Context, email string) (*time.Time, error) {
+	row := q.db.QueryRow(ctx, getAddressLock, email)
+	var locked_until *time.Time
+	err := row.Scan(&locked_until)
+	return locked_until, err
 }
 
 const getChallenge = `-- name: GetChallenge :one
@@ -292,7 +340,7 @@ func (q *Queries) GetSession(ctx context.Context, id string) (GetSessionRow, err
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip FROM users WHERE id = $1
+SELECT id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (User, error) {
@@ -315,12 +363,13 @@ func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip FROM users WHERE email = $1
+SELECT id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -343,6 +392,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }
@@ -453,7 +503,7 @@ func (q *Queries) InsertTerms(ctx context.Context, arg InsertTermsParams) (Terms
 const insertUser = `-- name: InsertUser :one
 INSERT INTO users (email, password_hash, name, platform_role, email_verified_at, approved_at, signup_ip)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip
+RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at
 `
 
 type InsertUserParams struct {
@@ -494,6 +544,7 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }
@@ -531,7 +582,7 @@ func (q *Queries) LatestTerms(ctx context.Context) (TermsVersion, error) {
 }
 
 const listPlatformAdmins = `-- name: ListPlatformAdmins :many
-SELECT id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip FROM users WHERE platform_role = 'platform_admin' ORDER BY created_at
+SELECT id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at FROM users WHERE platform_role = 'platform_admin' ORDER BY created_at
 `
 
 // tenant: system - the platform's own administrators.
@@ -561,6 +612,7 @@ func (q *Queries) ListPlatformAdmins(ctx context.Context) ([]User, error) {
 			&i.RecoveryCodes,
 			&i.LastActiveAt,
 			&i.SignupIp,
+			&i.LockoutNotifiedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -611,7 +663,7 @@ func (q *Queries) ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Lis
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT u.id, u.email, u.password_hash, u.totp_secret, u.platform_role, u.created_at, u.disabled_at, u.failed_logins, u.locked_until, u.totp_last_step, u.name, u.email_verified_at, u.approved_at, u.recovery_codes, u.last_active_at, u.signup_ip, (SELECT count(*) FROM org_members m WHERE m.user_id = u.id)::int AS org_count
+SELECT u.id, u.email, u.password_hash, u.totp_secret, u.platform_role, u.created_at, u.disabled_at, u.failed_logins, u.locked_until, u.totp_last_step, u.name, u.email_verified_at, u.approved_at, u.recovery_codes, u.last_active_at, u.signup_ip, u.lockout_notified_at, (SELECT count(*) FROM org_members m WHERE m.user_id = u.id)::int AS org_count
 FROM users u
 WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%' OR u.name ILIKE '%' || $1 || '%')
   AND (NOT $2::bool OR (u.approved_at IS NULL AND u.disabled_at IS NULL))
@@ -626,23 +678,24 @@ type ListUsersParams struct {
 }
 
 type ListUsersRow struct {
-	ID              uuid.UUID
-	Email           string
-	PasswordHash    string
-	TotpSecret      []byte
-	PlatformRole    string
-	CreatedAt       time.Time
-	DisabledAt      *time.Time
-	FailedLogins    int32
-	LockedUntil     *time.Time
-	TotpLastStep    int64
-	Name            *string
-	EmailVerifiedAt *time.Time
-	ApprovedAt      *time.Time
-	RecoveryCodes   []byte
-	LastActiveAt    *time.Time
-	SignupIp        *netip.Addr
-	OrgCount        int32
+	ID                uuid.UUID
+	Email             string
+	PasswordHash      string
+	TotpSecret        []byte
+	PlatformRole      string
+	CreatedAt         time.Time
+	DisabledAt        *time.Time
+	FailedLogins      int32
+	LockedUntil       *time.Time
+	TotpLastStep      int64
+	Name              *string
+	EmailVerifiedAt   *time.Time
+	ApprovedAt        *time.Time
+	RecoveryCodes     []byte
+	LastActiveAt      *time.Time
+	SignupIp          *netip.Addr
+	LockoutNotifiedAt *time.Time
+	OrgCount          int32
 }
 
 // tenant: system - the platform admin's user list.
@@ -672,6 +725,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUse
 			&i.RecoveryCodes,
 			&i.LastActiveAt,
 			&i.SignupIp,
+			&i.LockoutNotifiedAt,
 			&i.OrgCount,
 		); err != nil {
 			return nil, err
@@ -703,18 +757,62 @@ func (q *Queries) MarkEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const recordAddressFailure = `-- name: RecordAddressFailure :one
+INSERT INTO login_address_failures AS f (email, failed_logins, locked_until, updated_at)
+VALUES ($1, 1, CASE WHEN 1 >= ($2::int) THEN ($3::timestamptz) + interval '1 second' * least(($4::float8), ($5::float8)) END, ($3::timestamptz))
+ON CONFLICT (email) DO UPDATE
+SET failed_logins = f.failed_logins + 1,
+    locked_until  = CASE WHEN f.failed_logins + 1 >= ($2::int)
+      THEN ($3::timestamptz) + interval '1 second' * least(($4::float8) * power(2, least(f.failed_logins + 1 - ($2::int), 30)), ($5::float8))
+      ELSE f.locked_until END,
+    updated_at    = ($3::timestamptz)
+RETURNING failed_logins, locked_until
+`
+
+type RecordAddressFailureParams struct {
+	Email          string
+	Threshold      int32
+	Now            time.Time
+	LockSeconds    float64
+	MaxLockSeconds float64
+}
+
+type RecordAddressFailureRow struct {
+	FailedLogins int32
+	LockedUntil  *time.Time
+}
+
+// Counts a failed sign-in for an address with no enabled account, and locks
+// it as RecordLoginFailure locks an account.
+func (q *Queries) RecordAddressFailure(ctx context.Context, arg RecordAddressFailureParams) (RecordAddressFailureRow, error) {
+	row := q.db.QueryRow(ctx, recordAddressFailure,
+		arg.Email,
+		arg.Threshold,
+		arg.Now,
+		arg.LockSeconds,
+		arg.MaxLockSeconds,
+	)
+	var i RecordAddressFailureRow
+	err := row.Scan(&i.FailedLogins, &i.LockedUntil)
+	return i, err
+}
+
 const recordLoginFailure = `-- name: RecordLoginFailure :one
 UPDATE users
-SET failed_logins = CASE WHEN failed_logins + 1 >= $1::int THEN 0 ELSE failed_logins + 1 END,
-    locked_until  = CASE WHEN failed_logins + 1 >= $1::int THEN now() + make_interval(secs => $2::int) ELSE locked_until END
-WHERE id = $3
+SET failed_logins = failed_logins + 1,
+    locked_until  = CASE WHEN failed_logins + 1 >= ($1::int)
+      THEN ($2::timestamptz) + interval '1 second' * least(($3::float8) * power(2, least(failed_logins + 1 - ($1::int), 30)), ($4::float8))
+      ELSE locked_until END
+WHERE id = $5
 RETURNING failed_logins, locked_until
 `
 
 type RecordLoginFailureParams struct {
-	Threshold   int32
-	LockSeconds int32
-	ID          uuid.UUID
+	Threshold      int32
+	Now            time.Time
+	LockSeconds    float64
+	MaxLockSeconds float64
+	ID             uuid.UUID
 }
 
 type RecordLoginFailureRow struct {
@@ -722,10 +820,17 @@ type RecordLoginFailureRow struct {
 	LockedUntil  *time.Time
 }
 
-// Counts a failed password or TOTP attempt and locks the account for
-// @lock_seconds once @threshold consecutive failures are reached.
+// Counts a failed password or TOTP attempt. The threshold-th failure in a
+// row locks the account for lock_seconds, and each further one for twice
+// as long as the last, up to max_lock_seconds.
 func (q *Queries) RecordLoginFailure(ctx context.Context, arg RecordLoginFailureParams) (RecordLoginFailureRow, error) {
-	row := q.db.QueryRow(ctx, recordLoginFailure, arg.Threshold, arg.LockSeconds, arg.ID)
+	row := q.db.QueryRow(ctx, recordLoginFailure,
+		arg.Threshold,
+		arg.Now,
+		arg.LockSeconds,
+		arg.MaxLockSeconds,
+		arg.ID,
+	)
 	var i RecordLoginFailureRow
 	err := row.Scan(&i.FailedLogins, &i.LockedUntil)
 	return i, err
@@ -779,7 +884,7 @@ func (q *Queries) SetSessionReauth(ctx context.Context, arg SetSessionReauthPara
 
 const setUserDisabled = `-- name: SetUserDisabled :one
 UPDATE users SET disabled_at = CASE WHEN $1::bool THEN COALESCE(disabled_at, now()) ELSE NULL END
-WHERE id = $2 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip
+WHERE id = $2 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at
 `
 
 type SetUserDisabledParams struct {
@@ -807,6 +912,7 @@ func (q *Queries) SetUserDisabled(ctx context.Context, arg SetUserDisabledParams
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }
@@ -826,7 +932,7 @@ func (q *Queries) SetUserPassword(ctx context.Context, arg SetUserPasswordParams
 }
 
 const setUserPlatformRole = `-- name: SetUserPlatformRole :one
-UPDATE users SET platform_role = $1 WHERE id = $2 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip
+UPDATE users SET platform_role = $1 WHERE id = $2 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at
 `
 
 type SetUserPlatformRoleParams struct {
@@ -854,6 +960,7 @@ func (q *Queries) SetUserPlatformRole(ctx context.Context, arg SetUserPlatformRo
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }
@@ -906,7 +1013,7 @@ func (q *Queries) TouchUserActivity(ctx context.Context, id uuid.UUID) error {
 }
 
 const updateUserProfile = `-- name: UpdateUserProfile :one
-UPDATE users SET name = $1 WHERE id = $2 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip
+UPDATE users SET name = $1 WHERE id = $2 RETURNING id, email, password_hash, totp_secret, platform_role, created_at, disabled_at, failed_logins, locked_until, totp_last_step, name, email_verified_at, approved_at, recovery_codes, last_active_at, signup_ip, lockout_notified_at
 `
 
 type UpdateUserProfileParams struct {
@@ -934,6 +1041,7 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.RecoveryCodes,
 		&i.LastActiveAt,
 		&i.SignupIp,
+		&i.LockoutNotifiedAt,
 	)
 	return i, err
 }

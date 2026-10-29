@@ -2021,7 +2021,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Change your password; ends your other sessions */
+        /** Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens */
         post: operations["changePassword"];
         delete?: never;
         options?: never;
@@ -9466,6 +9466,8 @@ export interface components {
             projects: components["schemas"]["OAuthGrantProject"][];
         };
         OAuthAuthorizeInfo: {
+            /** @description The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes. */
+            consent: string;
             client_id: string;
             client_name: string;
             redirect_uri: string;
@@ -9478,13 +9480,15 @@ export interface components {
             organisations: components["schemas"]["OAuthGrantOrg"][];
         };
         OAuthDecision: {
+            /** @description The `consent` the consent page was given; required to approve. */
+            consent?: string;
             client_id: string;
             redirect_uri: string;
             state?: string;
             code_challenge: string;
             code_challenge_method: string;
             approve: boolean;
-            /** @description Within what the app asked for; the request's scopes by default. */
+            /** @description Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default. */
             scopes?: components["schemas"]["TokenScope"][];
             /** Format: uuid */
             org_id?: string;
@@ -9602,6 +9606,11 @@ export interface components {
             current_password: string;
             /** Format: password */
             new_password: string;
+            /**
+             * @description Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+             * @default true
+             */
+            revoke_tokens: boolean;
         };
         Terms: {
             version: number;

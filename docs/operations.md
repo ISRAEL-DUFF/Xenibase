@@ -134,7 +134,8 @@ docker compose exec xenibase-server xenibase-server admin reset-password you@exa
 
 `promote` also approves, verifies and re-enables the account (it need not
 have an authenticator yet; its next sign-in sets one up). `reset-2fa` removes
-the authenticator and recovery codes: a platform admin sets up a new one at the
+the authenticator and recovery codes, ends the user's sessions and revokes
+their API tokens: a platform admin sets up a new one at the
 next sign-in, and anyone else signs in with a password until they turn
 two-factor on again (Account → Security).
 `reset-password` prints a one-hour, single-use link for when email doesn't
@@ -235,7 +236,10 @@ can be turned off on its own, without suspending (see Outbound traffic).
 To look inside an org (a support case), open a **break-glass** session
 with a reason and a length (up to 4 hours). You act as an org admin; its
 owners and admins are emailed, every action is in its audit log marked
-break-glass, and they see a banner. End it when you are done.
+break-glass, and they see a banner. End it when you are done. A
+break-glass session can't invite anyone (you included), change a
+member's organisation or project role, or transfer ownership: it grants
+nothing that outlives it, so ask an owner for those.
 
 Owners can delete an organisation (Organisation → Delete). It is
 read-only for 7 days and can be cancelled; then each project gets a final

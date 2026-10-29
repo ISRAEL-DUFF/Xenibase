@@ -5365,6 +5365,9 @@ type CategoryCost struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+
+	// RevokeTokens Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+	RevokeTokens *bool `json:"revoke_tokens,omitempty"`
 }
 
 // ColumnRef A column's foreign key.
@@ -7257,6 +7260,9 @@ type OAuthAuthorizeInfo struct {
 	CodeChallenge       string `json:"code_challenge"`
 	CodeChallengeMethod string `json:"code_challenge_method"`
 
+	// Consent The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
+	Consent string `json:"consent"`
+
 	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
 	Organisations []OAuthGrantOrg `json:"organisations"`
 	RedirectUri   string          `json:"redirect_uri"`
@@ -7295,16 +7301,19 @@ type OAuthClientList struct {
 
 // OAuthDecision defines model for OAuthDecision.
 type OAuthDecision struct {
-	Approve             bool                  `json:"approve"`
-	ClientId            string                `json:"client_id"`
-	CodeChallenge       string                `json:"code_challenge"`
-	CodeChallengeMethod string                `json:"code_challenge_method"`
-	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
-	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
-	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
-	RedirectUri         string                `json:"redirect_uri"`
+	Approve             bool   `json:"approve"`
+	ClientId            string `json:"client_id"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
 
-	// Scopes Within what the app asked for; the request's scopes by default.
+	// Consent The `consent` the consent page was given; required to approve.
+	Consent       *string               `json:"consent,omitempty"`
+	ExpiresInDays *int                  `json:"expires_in_days,omitempty"`
+	OrgId         *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds    *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri   string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
 	Scopes *[]TokenScope `json:"scopes,omitempty"`
 	State  *string       `json:"state,omitempty"`
 }
@@ -11986,7 +11995,7 @@ type ServerInterface interface {
 	// AcceptMyInvitation Accept one of your pending invitations
 	// (POST /api/v1/me/invitations/{invitation_id}/accept)
 	AcceptMyInvitation(w http.ResponseWriter, r *http.Request, invitationId InvitationID)
-	// ChangePassword Change your password; ends your other sessions
+	// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	// (POST /api/v1/me/password)
 	ChangePassword(w http.ResponseWriter, r *http.Request)
 	// GetRecoveryCodes How many recovery codes you have left
@@ -13705,7 +13714,7 @@ func (_ Unimplemented) AcceptMyInvitation(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ChangePassword Change your password; ends your other sessions
+// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 // (POST /api/v1/me/password)
 func (_ Unimplemented) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)

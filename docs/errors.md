@@ -57,6 +57,7 @@ the SQL endpoint (`/projects/{id}/sql`) and table rows
 | `forbidden`, `permission_denied` | 403 | auth | no | The user's role in the organisation or project doesn't allow it. |
 | `csrf` | 403 | auth | no | A browser session's change without `X-CSRF-Token`. Tokens never need it. |
 | `org_suspended` | 403 | auth | no | The organisation is suspended. |
+| `break_glass` | 403 | auth | no | A platform admin's break-glass session can't invite, change roles or transfer ownership. |
 | `plan_required` | 403 | limit | no | The plan doesn't include this. |
 | `console_disabled`, `console_read_only` | 403 | auth | no | The project's SQL console is off, or read-only (send `read_only: true`). |
 | `not_found` | 404 | not found | no | No such project, webhook, …, or not visible to the caller. |
@@ -64,7 +65,7 @@ the SQL endpoint (`/projects/{id}/sql`) and table rows
 | `quota_exceeded` | 409 | limit | no | An organisation quota (webhooks, jobs, projects, …); `quota` says which. |
 | `outbound_disabled` | 409 | conflict | no | The organisation's outbound traffic is off (an admin's decision). |
 | `capacity_pending_approval` | 409 | unavailable | later | Capacity is being added; the message says when to try again. |
-| `rate_limited` | 429 | rate | yes | Too many requests for the token (default 600 a minute) or the organisation's tokens (1,200). `Retry-After` is sent. |
+| `rate_limited` | 429 | rate | yes | Too many requests for the token (default 600 a minute) or the organisation's tokens (1,200), or too many invitations in 24 hours from the organisation (default 100) or the inviter (50). `Retry-After` is sent. |
 | `internal` | 500 | unavailable | once | A fault on Xenibase's side; report it if it repeats. |
 | `project_resuming` | 503 | unavailable | yes | A Free project was paused for inactivity; this request woke it. `Retry-After: 10`. |
 | `project_restoring` | 503 | unavailable | yes | A Free project was archived; this request started restoring it (a minute or two). `Retry-After: 60`. |

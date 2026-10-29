@@ -43,7 +43,7 @@ AUTHORIZATION`, `set_config('role')`, `pg_authid`, `CREATE ROLE`, and
 | Server-side sessions, `HttpOnly`, `Secure`, `SameSite=Strict`, 12 h idle timeout | `sessions` table; `__Host-` cookies; idle 12 h, at most 7 days | `TestSessionCookieFlags`, `TestReauthAndIdleTimeout`, `TestLoginSessionLogout` |
 | CSRF double-submit on mutations | `guard` checks the header against the cookie and the Origin | `TestAuthFlowOverHTTP` |
 | Re-authentication for delete, in-place restore, master key rotation, node removal | `reauthRequired` (10 min window); master key rotation is a host CLI (`-rotate-master-key`), which needs the key | `TestReauthAndIdleTimeout`, backups and nodes integration tests |
-| Rate limiting and lockout | 10 sign-ins per 5 min per address; account lockout after 5 failures for 15 min | `TestLimiter`, `TestLoginRateLimit`, `TestLockout`, `TestWrongTOTPCountsTowardLockout` |
+| Rate limiting and lockout | 10 sign-ins per 5 min per address; account lockout after 5 failures for 15 min, doubling with each further failure up to a day, with an email to the owner; addresses without an account are counted and locked the same way, and signup takes as long for an existing address, so neither tells which addresses are registered | `TestLimiter`, `TestLoginRateLimit`, `TestLockout`, `TestWrongTOTPCountsTowardLockout`, `TestLockoutDoublesAndSaysNothing`, `TestSignupTakesAsLongForAnExistingAddress` |
 | Single operator in V1, `operators.role` kept | Setup creates one `owner` | `TestSetupFlow` |
 | API tokens (V2 §7.2): hashed, scoped to one org, scopes, project restriction, expiry | `internal/tokens`; the guard's bearer path skips cookies and CSRF; `authz.ScopeFor` per action; platform and session-only routes refuse tokens | `TestRestrictedWriteTokenInCI`, `TestAPITokens`, `TestCLIJobWithRestrictedWriteToken` |
 | Tokens follow their user and org | Revoked on removal or disable; disabled while the org is suspended | `TestAPITokens` |
@@ -126,9 +126,9 @@ review found and fixed.
 | Org scoping in the data layer (V2 §2.6) | Every query on a tenant table filters by `org_id`, or says why it is system-wide (`-- tenant: system`) | `TestTenantQueriesAreScoped` (CI lint), `TestTwoOrgsSeeOnlyTheirOwn` |
 | Opaque names (V2 §10.2) | `p_<10 base32>` databases and roles; nothing descriptive written into Postgres; Xenibase's own sessions use generic `application_name`s | `TestOtherTenantsCannotDiscoverProjectNames` |
 | Quotas and resource limits (V2 §10.3–10.4) | Plans checked before every create, and counted again under the organisation's row lock in the transaction that records it (projects, branches, branch detach, the dedicated allowance with read replicas counted); soft and hard storage locks; `temp_file_limit` and the statement reaper on the shared tier (it cancels a statement past 10 minutes, and terminates the session of one still running the same statement on its next pass, since PL/pgSQL can catch the cancel; it ends sessions idle in a transaction past 5 minutes); a soft lock applies to SQL jobs too | `TestQuotasAndDedicatedRequests` (parallel creates too), `TestParallelCreatesKeepTheQuota`, `TestParallelClaimsKeepTheAllowance`, `TestStorageLimitLocks`, `TestSoftLockedGrowthIsHardLocked`, `TestReaperEndsLongStatements`, `TestReaperEndsStatementThatCatchesCancel`, `TestJobSQLCannotEscalate` |
-| API tokens (V2 §7.2) | Hashed; one org; scopes; project restriction; expiry; refused for disabled or unverified users and suspended orgs; a removed member's tokens fail the membership check | `TestAPITokens`, `TestRestrictedWriteTokenInCI`, `TestTokenRateLimit`, `TestDeviceLogin` |
+| API tokens (V2 §7.2) | Hashed; one org; scopes; project restriction; expiry; refused for disabled or unverified users and suspended orgs; a removed member's tokens fail the membership check; a token made by a token is revoked with it, and an OAuth app's token can't make tokens | `TestAPITokens`, `TestRestrictedWriteTokenInCI`, `TestTokenRateLimit`, `TestDeviceLogin` |
 | Outbound requests (V2 §9.1, §10.7) | `internal/outbound`, also for a project's own SMTP server and SMS provider `base_url`: https only (http to allow-listed hosts); every resolved address checked (IPv4-mapped, NAT64 and 6to4 addresses as the IPv4 address they embed); link-local and metadata never, even allow-listed; the request connects to the checked address, without proxies or redirects; per-org rate limits and counters; outbound off per org | `internal/outbound` tests, `TestWebhookDelivery`, `TestScheduledJobs` |
-| Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it | `TestSuspensionAndBreakGlass` |
+| Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it; it can't invite, change roles or transfer ownership, so it grants nothing that outlives it, and nobody accepts an invitation they sent themselves | `TestSuspensionAndBreakGlass`, `TestBreakGlassCannotGrantMembership` |
 | Webhook trigger function (V2 §9.1) | `xenibase.webhook_enqueue()` is `SECURITY DEFINER` with `search_path = pg_catalog, pg_temp`, in a superuser-owned schema with all access revoked from `PUBLIC` (so tenants can't call it or attach it to triggers); a `xenibase` schema anything else owns is dropped first; the worker delivers an outbox row only for one of its own project's webhooks | `TestWebhookDelivery`, `TestWebhooksAcrossCopies` |
 | No `SECURITY DEFINER` function owned by anything but tenant roles (V2 §10.4) | Xenibase's own (the backend services' in `xb_*`, the webhook trigger in `xenibase`) pin `search_path`; nothing else Xenibase installs is `SECURITY DEFINER` | `isocheck.Database`: a `SECURITY DEFINER` function not installed by an extension and owned by a superuser or a role not of that database (neither its owner nor named after it) is a finding, unless it is in an `xb_*` schema or `xenibase` with `search_path` set; `TestSecurityDefiners`, `TestLiveIsolationCheck` |
 | Limits on every login, and logins off while suspended or hard-locked (V2 §10.4, §10.8) | `CONNECTION LIMIT` and `temp_file_limit` on the owner, members' logins and the backend services' five logins; `SetLogins` switches them all off, and on a dedicated project the logins its owner created (`project_owned_logins`) | `isocheck.Roles`, for the backend-service logins too; `TestRolesServiceLoginsAndGrants`, `TestLiveIsolationCheck` (a suspended project's owner or request role switched back on), `TestSetLoginsCoversOwnedLogins`, `TestSyncOwnedRolesKeepsLoginsSwitchedOff` |
@@ -224,6 +224,58 @@ a test that failed before.
   sync leaves an invalid route, login or allowlist out (an allowlist with
   its project's routes, so nothing opens up) and raises
   `pooler_config_skipped`, instead of failing every region.
+
+## Atlas review: identity and access (Part E)
+
+The Atlas's identity page traced Xenibase's own accounts, organisations,
+tokens and email through the code; each is fixed with a test that failed
+before.
+
+### Found and fixed
+
+- **Break-glass could become permanent membership** (high). Under
+  break-glass a platform admin could invite their own address as admin and
+  accept it, keeping the access after the session, unflagged. Invitations,
+  role changes and ownership transfers now answer 403 `break_glass`; nobody
+  invites their own address or accepts an invitation they sent
+  (`TestBreakGlassCannotGrantMembership`).
+- **The lockout revealed accounts and never grew** (medium). Five wrong
+  passwords locked a registered address but never an unknown one, the lock
+  stayed at 15 minutes, nobody was told, and signup answered an existing
+  address 100 times faster. Unknown addresses are now locked the same way,
+  the lock doubles to a day, the owner is emailed, and signup hashes either
+  way (`TestLockoutDoublesAndSaysNothing`,
+  `TestSignupTakesAsLongForAnExistingAddress`).
+- **Tokens outlived account recovery, and a session minted them without
+  step-up** (high). A stolen cookie could create a year's admin token that
+  survived the owner's password reset, sign-out and two-factor reset. A
+  password reset and a two-factor reset now revoke every token (a password
+  change too, unless the user keeps them), and creating a token or
+  approving a device login from a session needs a recent step-up
+  (`TestRecoveryRevokesTokens`, `TestTokensNeedARecentStepUp`).
+- **An app's tokens outlived disconnecting it** (high). An OAuth token with
+  `write` could create a token of its own, which had no app recorded, so
+  Disconnect and disabling the app left it working for up to a year.
+  Tokens now record the token that created them (`parent_id`), revoking
+  one revokes its descendants, and an app's token can't create tokens
+  (`TestRevokingATokenRevokesWhatItMade`, `TestTokenMadeByATokenGoesWithIt`,
+  `TestOAuthFlowOverHTTP`).
+- **A read token could cut its user off** (low). Leaving an organisation
+  (`org.view`) and revoking a token took the `read` scope, so a leaked
+  read-only token could make its user leave or revoke their admin tokens.
+  Both now need `write`, except a token revoking itself
+  (`TestReadTokensChangeNothing`).
+- **The billing role was lost on re-invitation or transfer** (low). An
+  admin could invite a billing member's address with a project, taking
+  their billing role and giving them project access, which only owners may
+  change. A billing member now stays billing, existing members can't be
+  invited, and a transferred project leaves its billing members
+  (`TestBillingIsKept`).
+- **Invitations were an unlimited mail relay with linked names** (medium).
+  Organisation invitations are capped a day per organisation and per
+  inviter, and user-chosen names in email are never links
+  (`TestInvitationsAreCapped`, `TestInvitationNamesAreNotLinks`,
+  `TestInertTextIsNeverALink`).
 
 ## V3 review of payments and billing (M27)
 

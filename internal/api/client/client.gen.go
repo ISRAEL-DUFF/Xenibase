@@ -5369,6 +5369,9 @@ type CategoryCost struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+
+	// RevokeTokens Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+	RevokeTokens *bool `json:"revoke_tokens,omitempty"`
 }
 
 // ColumnRef A column's foreign key.
@@ -7261,6 +7264,9 @@ type OAuthAuthorizeInfo struct {
 	CodeChallenge       string `json:"code_challenge"`
 	CodeChallengeMethod string `json:"code_challenge_method"`
 
+	// Consent The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
+	Consent string `json:"consent"`
+
 	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
 	Organisations []OAuthGrantOrg `json:"organisations"`
 	RedirectUri   string          `json:"redirect_uri"`
@@ -7299,16 +7305,19 @@ type OAuthClientList struct {
 
 // OAuthDecision defines model for OAuthDecision.
 type OAuthDecision struct {
-	Approve             bool                  `json:"approve"`
-	ClientId            string                `json:"client_id"`
-	CodeChallenge       string                `json:"code_challenge"`
-	CodeChallengeMethod string                `json:"code_challenge_method"`
-	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
-	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
-	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
-	RedirectUri         string                `json:"redirect_uri"`
+	Approve             bool   `json:"approve"`
+	ClientId            string `json:"client_id"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
 
-	// Scopes Within what the app asked for; the request's scopes by default.
+	// Consent The `consent` the consent page was given; required to approve.
+	Consent       *string               `json:"consent,omitempty"`
+	ExpiresInDays *int                  `json:"expires_in_days,omitempty"`
+	OrgId         *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds    *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri   string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
 	Scopes *[]TokenScope `json:"scopes,omitempty"`
 	State  *string       `json:"state,omitempty"`
 }
@@ -13243,14 +13252,14 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/me/invitations/{invitation_id}/accept (the `AcceptMyInvitation` operationId).
 	AcceptMyInvitation(ctx context.Context, invitationId InvitationID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ChangePasswordWithBody Change your password; ends your other sessions
+	// ChangePasswordWithBody Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /api/v1/me/password (the `ChangePassword` operationId).
 	ChangePasswordWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ChangePassword Change your password; ends your other sessions
+	// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -20024,7 +20033,7 @@ func (c *Client) AcceptMyInvitation(ctx context.Context, invitationId Invitation
 	return c.Client.Do(req)
 }
 
-// ChangePasswordWithBody Change your password; ends your other sessions
+// ChangePasswordWithBody Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes any type of body and a specified content type.
 //
@@ -20041,7 +20050,7 @@ func (c *Client) ChangePasswordWithBody(ctx context.Context, contentType string,
 	return c.Client.Do(req)
 }
 
-// ChangePassword Change your password; ends your other sessions
+// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes a body of the `application/json` content type.
 //
@@ -46456,14 +46465,14 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /api/v1/me/invitations/{invitation_id}/accept (the `AcceptMyInvitation` operationId).
 	AcceptMyInvitationWithResponse(ctx context.Context, invitationId InvitationID, reqEditors ...RequestEditorFn) (*AcceptMyInvitationResponse, error)
 
-	// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions
+	// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/me/password (the `ChangePassword` operationId).
 	ChangePasswordWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ChangePasswordResponse, error)
 
-	// ChangePasswordWithResponse Change your password; ends your other sessions
+	// ChangePasswordWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -72429,7 +72438,7 @@ func (c *ClientWithResponses) AcceptMyInvitationWithResponse(ctx context.Context
 	return ParseAcceptMyInvitationResponse(rsp)
 }
 
-// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions
+// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -72442,7 +72451,7 @@ func (c *ClientWithResponses) ChangePasswordWithBodyWithResponse(ctx context.Con
 	return ParseChangePasswordResponse(rsp)
 }
 
-// ChangePasswordWithResponse Change your password; ends your other sessions
+// ChangePasswordWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

@@ -80,6 +80,84 @@ bundle share one version (spec §11.5).
   passed (`backups.verified_at`), the archive drops the database only on a
   verified one, and a retry that finds an unverified backup tests it again
   first; if that fails the database stays and the project stays paused.
+- **OAuth consent narrows scopes on the server, not just the page.** The
+  consent page's answer was checked only against the scopes the app may
+  ever ask for, so the narrowing to what this request asked for (decision
+  OAuth #4) was the page's alone. `GET /api/v1/oauth/authorize` now also
+  returns `consent`, the validated request sealed for the user (30
+  minutes); approving must send it back, and a scope beyond what the app
+  asked for is refused (`400 invalid`). A consent page left open across the
+  upgrade must be reloaded.
+- **A billing member stays billing.** Accepting an invitation, or a
+  project transfer, turned a billing member into a plain member, so an
+  admin could invite a billing member's address with a project and take
+  their billing access while giving them the project, which only owners
+  may do. An existing member now keeps their role unless the new one is
+  higher (owner, then admin); inviting someone who is already a member is
+  refused (`409 conflict`: change their role or add them to a project
+  instead); and a project transferred into an organisation where one of
+  its members is billing leaves that member, with their database login on
+  it.
+- **A read-scoped token can no longer cut its user off.** Leaving an
+  organisation (`POST /orgs/{org}/leave`) and revoking a token
+  (`DELETE /tokens/{token_id}`) took only the `read` scope, so a leaked
+  read-only CI token or a read-only connected app could make its user
+  leave, losing every token and database login there, or revoke their
+  admin tokens. Both now need `write` from a token (`403
+  insufficient_scope`); any token may still revoke itself, as
+  `xenibase logout` does.
+- **Disconnecting an app no longer leaves tokens it made for itself.** An
+  OAuth app's token with `write` could create a token of its own, which
+  carried no record of the app, so **Disconnect** and disabling the app left
+  it working for up to a year. A token created by a token now records its
+  parent, and revoking a token, however it is revoked, revokes the tokens
+  it made and theirs; and an OAuth app's token can't create tokens at all
+  (`403 token_not_allowed`).
+- **Taking an account back now revokes its API tokens, and a session mints
+  them only after a step-up.** A password reset, a password change and a
+  two-factor reset ended sessions but left every API token working, though
+  the reset email promised to sign you out everywhere; and creating a token
+  or approving a CLI login needed no step-up, so a stolen session cookie
+  could mint a 365-day admin token that outlived the owner's reset, and a
+  `/device?code=…` link was one click from a 90-day token. A password reset
+  and a two-factor reset now revoke every token the user has (the emails
+  say so); a password change does too unless **Also revoke my API tokens**
+  is unticked (`revoke_tokens: false`). `POST /api/v1/tokens` from a
+  session, and approving a device login, now need a step-up in the last
+  10 minutes (`403 reauth_required`; the web UI asks); denying one doesn't.
+- **Invitations are no longer an unlimited mail relay with linked names.**
+  Nothing counted invitations, every account owns an organisation, and the
+  organisation's and inviter's names were linkified in the email, so anyone
+  with an account could send Xenibase-branded email to any address with a
+  link of their choosing beside the real button. An organisation may now
+  send 100 invitations in any 24 hours and an inviter 50 across their
+  organisations (`XENIBASE_INVITES_PER_ORG_DAY`,
+  `XENIBASE_INVITES_PER_USER_DAY`; 0 turns a cap off); past either,
+  inviting answers `429 rate_limited` with `Retry-After`. Names someone
+  chose (the organisation's, the inviter's, a token's, the first name in a
+  greeting) go into email through the new `mail.Inert`, which keeps a web
+  address in them from becoming a link, here or in most mail clients.
+- **The sign-in lockout no longer reveals accounts, grows, and tells the
+  owner.** Five wrong passwords for a registered address answered
+  `429 locked` while an unknown address only ever answered `401`, so five
+  requests told anyone whether an address had an account; the lock was a
+  fixed 15 minutes that reset the count, so someone with the password could
+  try about 480 TOTP codes a day; and the owner was never told. An address
+  without an enabled account is now counted and locked exactly as an
+  account is; each failure after the fifth locks for twice as long as the
+  last, up to a day (`429 locked` now carries `Retry-After`); and the owner
+  is emailed when a lock starts, at most once an hour. Signup in approval
+  and open mode now hashes the password and sends one email for an
+  existing address as for a new one, so it takes as long either way.
+- **Break-glass can no longer become permanent membership.** Under
+  break-glass a platform admin acts as an org admin, and could invite their
+  own address as admin and accept it, keeping the access after the session
+  expired or an owner ended it, with nothing after that flagged
+  `break_glass`. Invitations (to the organisation or a project), role
+  changes and ownership transfers made under break-glass now answer 403
+  `break_glass`; everything else it allows is unchanged. Nobody can invite
+  their own address, and an invitation sent by the account accepting it is
+  refused, so one sent before this release can't be used either.
 - **A new delivering server no longer starts with a full webhook rate.**
   The per-organisation delivery rate was a token bucket in the delivering
   server's memory, so a server that took over after a failover or a restart
@@ -829,6 +907,28 @@ bundle share one version (spec §11.5).
 - Migration 00093 adds `backups.verified_at`, when a backup's restore test
   passed. Earlier backups have none; an archive in progress at the upgrade
   tests its backup again before dropping the database.
+- Migration 00088 adds `api_tokens.parent_id` and a trigger that revokes a
+  token's descendants with it. Tokens created by other tokens before the
+  upgrade have no recorded parent: to find any an OAuth app made for
+  itself, look under Organisation → API tokens for tokens created via
+  `api` by a user with a connected app, and revoke them.
+- A password reset, a two-factor reset, and (by default) a password change
+  now revoke every API token the user has, including the CLI's and
+  connected apps': CI jobs using a revoked token fail with
+  `401 invalid_token` until given a new one. A password change keeps them
+  with `"revoke_tokens": false` (or by unticking the box under Account →
+  Security). Creating a token from a browser session, or approving
+  `xenibase login`, asks for the password and code when the last step-up is
+  more than 10 minutes old; scripts that create tokens with a session
+  cookie call `POST /api/v1/auth/reauth` first.
+- Organisation invitations are capped at 100 per organisation and 50 per
+  inviter in any 24 hours. An installation that onboards more people a
+  day raises `XENIBASE_INVITES_PER_ORG_DAY` and
+  `XENIBASE_INVITES_PER_USER_DAY` (0 turns a cap off).
+- Migration 00087 adds `users.lockout_notified_at` and the
+  `login_address_failures` table. Sign-in locks now double with each
+  further failure up to a day instead of staying at 15 minutes, and their
+  owners are emailed.
 - Backend services' schema version 7 runs on every enabled project with its
   next reconcile (within seconds of the upgrade). It revokes the request
   roles' `EXECUTE` on functions an extension installed; the data API no
