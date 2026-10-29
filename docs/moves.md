@@ -123,7 +123,8 @@ will happen and what it costs before anything is queued.
 `XENIBASE_PG_VERSIONS` (default `17,18`) lists the majors Xenibase offers; the
 newest is the default for new projects. Each needs its image on every node
 (`xenibase-postgres:{major}-walg3.0.9`; `install.sh` and `make pg-image` build
-17 and 18). Shared projects go to a shared cluster of their version, so add
+17 and 18, each from the minor release the Dockerfile pins, also tagged
+with that release, e.g. `xenibase-postgres:18.6-walg3.0.9`). Shared projects go to a shared cluster of their version, so add
 one per version you offer (Nodes → a node → **Run a shared cluster here**,
 choosing the version).
 

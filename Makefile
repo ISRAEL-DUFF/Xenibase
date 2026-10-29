@@ -226,7 +226,7 @@ e2e-images:
 	docker build $(DOCKER_BUILD_FLAGS) -t xenibase-pebble:local -f test/e2e/bundle/Dockerfile.pebble test/e2e/bundle
 	docker build $(DOCKER_BUILD_FLAGS) -t xenibase-fakes3:local -f test/e2e/bundle/Dockerfile.fakes3 .
 	for v in $(PG_VERSIONS); do \
-		docker build $(DOCKER_BUILD_FLAGS) --build-arg PG_MAJOR=$$v -t xenibase-postgres:$$v-walg3.0.9 deploy/images/postgres; \
+		sh deploy/images/postgres/build.sh $$v $(DOCKER_BUILD_FLAGS) || exit 1; \
 	done
 
 ## test-integration: provisioning end to end and the tenant-isolation suite,
@@ -257,7 +257,7 @@ PG_VERSIONS := 17 18
 PG_IMAGE := xenibase-postgres:18-walg3.0.9
 pg-image:
 	for v in $(PG_VERSIONS); do \
-		docker build $(DOCKER_BUILD_FLAGS) --build-arg PG_MAJOR=$$v -t xenibase-postgres:$$v-walg3.0.9 deploy/images/postgres; \
+		sh deploy/images/postgres/build.sh $$v $(DOCKER_BUILD_FLAGS) || exit 1; \
 	done
 
 ## pooler-host-images: the edge pooler host and its keepalived (V3 §2.1).

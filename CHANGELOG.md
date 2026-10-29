@@ -19,6 +19,15 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **The instance image did not pin the Postgres minor release:** it was
+  built from the moving `postgres:<major>` tag, so nodes ran whatever
+  release they last pulled, and a rebuild left the previous release
+  untagged. Each major is now built from a pinned release (17.11 and 18.6,
+  `PG17_RELEASE`/`PG18_RELEASE` in `deploy/images/postgres/Dockerfile`)
+  and tagged with it as well (`xenibase-postgres:18.6-walg3.0.9`); the
+  `{major}` tag the agent uses is unchanged. `make pg-image` and
+  `install.sh` build through `deploy/images/postgres/build.sh`. See
+  `docs/upgrade.md` ("PostgreSQL minor versions").
 - **A point-in-time recovery to before a major upgrade could not start:**
   it used the project's new major on data from the old one. The restore now
   starts on the major of the instance that took the base backup, so an
