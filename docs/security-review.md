@@ -54,7 +54,7 @@ AUTHORIZATION`, `set_config('role')`, `pg_authid`, `CREATE ROLE`, and
 | Item | Implementation | Test |
 | --- | --- | --- |
 | Secrets encrypted at rest with `XENIBASE_MASTER_KEY` (TOTP secrets, storage credentials, backup key, agent CA key, cluster and instance admin passwords, alert secrets, operation password hand-offs) | AES-256-GCM with per-secret associated data (`internal/crypto`) | `internal/crypto` tests |
-| Master key rotation by CLI | `xenibase-server -rotate-master-key` re-encrypts everything in one transaction, then proves the new key alone opens it all | `TestMasterKeyRotation` (including a wrong old key rolling back) |
+| Master key rotation by CLI | `xenibase-server -rotate-master-key` re-encrypts everything in one transaction, then proves the new key alone opens it all. What `Derive` gives (the backend services' and console logins' passwords, file URL keys, the pooler admin's salt) is keyed on a derive seed sealed in the `derive_seed` settings row, which the rotation re-seals, so derived values do not change and backend services keep working | `TestMasterKeyRotation` (including a wrong old key rolling back, and a project with backend services whose derived passwords still match its verifiers), `TestDerivedSurviveRotation`, `TestDeriveSeedSurvivesRotation`, `TestPrepareDeriveSeed` |
 | Backups encrypted before upload | Per-object file keys wrapped by the backup key (`internal/backupfmt`); WAL-G uses an OpenPGP key derived from it | backup integration tests (`TestBackupDeleteRestoreVerify` checks the object is ciphertext) |
 | The operator is made to export the backup key | Setup wizard step 4; a banner until it is confirmed | e2e "fresh install" |
 

@@ -648,6 +648,18 @@ bundle share one version (spec §11.5).
   be deleted while it holds files. A region without one keeps working as
   before, with a warning in the server's log, a launch-check warning and
   the new `files_share_backups` alert.
+- **Rotating the master key no longer takes backend services offline.**
+  The edge and request roles' passwords, the console logins' passwords,
+  the keys that sign file URLs and the pooler admin's salt were derived
+  from the primary master key, so after `-rotate-master-key` the edge was
+  handed new passwords while the poolers and the instances still held the
+  verifiers made from the old ones, and every data API, auth, storage and
+  realtime request failed until the stored verifiers were cleared by hand;
+  signed file URLs stopped verifying too. They are now derived from a
+  derive seed, 32 bytes sealed under the master key in the `derive_seed`
+  settings row, which a rotation re-seals like every other secret, so they
+  do not change. `rotate.Verify` opens the seed and fails when projects
+  exist without one.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
@@ -690,6 +702,13 @@ bundle share one version (spec §11.5).
   `files_share_backups` alert fires for each region with backend services:
   give each a files target, copying `files/` across around the switch
   (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
+- The first server to start makes the derive seed. On an install with
+  projects it is the current master key, so every derived password and URL
+  key stays as it is; a new install gets random bytes. Upgrade before you
+  rotate the master key. A rotation run before any server of this release
+  started makes the seed from the old key itself, and refuses when
+  `XENIBASE_MASTER_KEY_PREVIOUS` lists more than one key, since it cannot
+  tell which one the servers used (`docs/operations.md`, "Secrets").
 
 ## v4.2.4
 

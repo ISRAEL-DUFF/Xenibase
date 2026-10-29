@@ -1,6 +1,7 @@
 // Package rotate re-encrypts every secret Xenibase stores under the primary
 // master key (spec §7.3: "The master key can be rotated with a CLI command
-// that re-encrypts the stored secrets").
+// that re-encrypts the stored secrets"), and keeps the derive seed (seed.go)
+// that the derived passwords come from.
 //
 // Rotation: start xenibase-server once with -rotate-master-key, the new key
 // as XENIBASE_MASTER_KEY and the old one in XENIBASE_MASTER_KEY_PREVIOUS. When
@@ -67,6 +68,9 @@ var settingBlobs = []setting{
 	{"alert webhook secret", "alerts", "settings.alerts.webhook_secret", []string{"webhook_secret"}},
 	{"alert SMTP password", "alerts", "settings.alerts.smtp_password", []string{"smtp", "password"}},
 	{"SMTP password", "mail", "settings.mail.password", []string{"password"}},
+	// What Derive keys on (seed.go): re-sealed, never replaced, so the
+	// derived passwords and URL keys survive the rotation.
+	{"derive seed", deriveSeedKey, deriveSeedAAD, []string{"sealed"}},
 }
 
 // opAADPrefix starts the operation password handoff's associated data
@@ -105,7 +109,9 @@ func Run(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring) (Result, erro
 }
 
 // Verify decrypts every stored secret with k and fails on the first one it
-// cannot open (run it with only the new key after a rotation).
+// cannot open (run it with only the new key after a rotation). It also
+// fails when projects exist but the derive seed does not, since the
+// servers would then derive their passwords from the new key.
 func Verify(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring) (Result, error) {
 	return walk(ctx, db, k, verify)
 }
@@ -123,6 +129,11 @@ func walk(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring, m mode) (Res
 		secrets, err := collect(ctx, tx)
 		if err != nil {
 			return err
+		}
+		if m == verify {
+			if err := seedPresent(ctx, tx); err != nil {
+				return err
+			}
 		}
 		for _, s := range secrets {
 			res.Checked[s.what]++
@@ -154,6 +165,19 @@ func walk(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring, m mode) (Res
 		return nil
 	})
 	return res, err
+}
+
+func seedPresent(ctx context.Context, tx pgx.Tx) error {
+	var projects, seed bool
+	// Platform-wide: the seed is one row for every organisation.
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM projects),
+		EXISTS (SELECT 1 FROM settings WHERE key = $1)`, deriveSeedKey).Scan(&projects, &seed); err != nil {
+		return err
+	}
+	if projects && !seed {
+		return errors.New("derive seed: missing, so the backend services' passwords would change with the master key")
+	}
+	return nil
 }
 
 func collect(ctx context.Context, tx pgx.Tx) ([]secret, error) {

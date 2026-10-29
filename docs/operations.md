@@ -427,6 +427,17 @@ organisations allows the host.
   The rotation re-encrypts everything in one transaction and checks the new
   key alone opens it all; on any error nothing changes. Operators sign in
   again afterwards. Back up the new `.env`.
+- The passwords Xenibase derives instead of storing (the backend services'
+  edge and request logins, the console logins, the keys that sign file
+  URLs, the pooler admin's salt) come from a **derive seed**, sealed under
+  the master key in the `derive_seed` settings row. A rotation re-seals it,
+  so they do not change and backend services keep working. The first
+  server of this release to start makes the seed: on an install with
+  projects it is the master key in use then, so nothing changes on upgrade
+  either. If you
+  rotate before any server of this release has started, the rotation makes
+  the seed from the old key, and needs `XENIBASE_MASTER_KEY_PREVIOUS` to
+  hold that one key only.
 - Releases before this one skipped part of what is sealed (per-project
   backup keys, Patroni secrets, webhook secrets and headers, scheduled jobs,
   projects' auth SMTP settings and queued messages, device sign-in tokens,
