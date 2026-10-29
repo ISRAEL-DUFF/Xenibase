@@ -6,9 +6,15 @@
 -- apply_settings applies it to the existing ones, so queue one for each
 -- active shared project (as 00018 did for temp_file_limit). Archived
 -- projects have no database until they are restored, which creates it.
+-- A project with an exclusive operation already pending is skipped (00063
+-- allows one at a time): a pending apply_settings applies the restriction
+-- itself, and for any other kind the next apply_settings does; isocheck
+-- reports a database still open until then.
 INSERT INTO operations (kind, project_id)
-SELECT 'apply_settings', id FROM projects
-WHERE tier = 'shared' AND status = 'active' AND deleted_at IS NULL AND lifecycle <> 'archived';
+SELECT 'apply_settings', p.id FROM projects p
+WHERE p.tier = 'shared' AND p.status = 'active' AND p.deleted_at IS NULL AND p.lifecycle <> 'archived'
+  AND NOT EXISTS (SELECT 1 FROM operations o
+                  WHERE o.project_id = p.id AND o.exclusive AND o.status IN ('queued', 'running'));
 
 -- +goose Down
 SELECT 1;
