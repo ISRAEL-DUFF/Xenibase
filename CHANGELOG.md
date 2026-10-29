@@ -39,6 +39,18 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Taking an account back now revokes its API tokens, and a session mints
+  them only after a step-up.** A password reset, a password change and a
+  two-factor reset ended sessions but left every API token working, though
+  the reset email promised to sign you out everywhere; and creating a token
+  or approving a CLI login needed no step-up, so a stolen session cookie
+  could mint a 365-day admin token that outlived the owner's reset, and a
+  `/device?code=…` link was one click from a 90-day token. A password reset
+  and a two-factor reset now revoke every token the user has (the emails
+  say so); a password change does too unless **Also revoke my API tokens**
+  is unticked (`revoke_tokens: false`). `POST /api/v1/tokens` from a
+  session, and approving a device login, now need a step-up in the last
+  10 minutes (`403 reauth_required`; the web UI asks); denying one doesn't.
 - **Invitations are no longer an unlimited mail relay with linked names.**
   Nothing counted invitations, every account owns an organisation, and the
   organisation's and inviter's names were linkified in the email, so anyone
@@ -683,6 +695,15 @@ bundle share one version (spec §11.5).
   the new `files_share_backups` alert.
 
 ### Upgrading
+- A password reset, a two-factor reset, and (by default) a password change
+  now revoke every API token the user has, including the CLI's and
+  connected apps': CI jobs using a revoked token fail with
+  `401 invalid_token` until given a new one. A password change keeps them
+  with `"revoke_tokens": false` (or by unticking the box under Account →
+  Security). Creating a token from a browser session, or approving
+  `xenibase login`, asks for the password and code when the last step-up is
+  more than 10 minutes old; scripts that create tokens with a session
+  cookie call `POST /api/v1/auth/reauth` first.
 - Organisation invitations are capped at 100 per organisation and 50 per
   inviter in any 24 hours. An installation that onboards more people a
   day raises `XENIBASE_INVITES_PER_ORG_DAY` and

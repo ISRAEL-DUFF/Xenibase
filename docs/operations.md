@@ -132,7 +132,8 @@ docker compose exec xenibase-server xenibase-server admin reset-password you@exa
 
 `promote` also approves, verifies and re-enables the account (it need not
 have an authenticator yet; its next sign-in sets one up). `reset-2fa` removes
-the authenticator and recovery codes: a platform admin sets up a new one at the
+the authenticator and recovery codes, ends the user's sessions and revokes
+their API tokens: a platform admin sets up a new one at the
 next sign-in, and anyone else signs in with a password until they turn
 two-factor on again (Account → Security).
 `reset-password` prints a one-hour, single-use link for when email doesn't

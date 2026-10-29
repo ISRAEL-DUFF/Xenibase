@@ -5359,6 +5359,9 @@ type CategoryCost struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+
+	// RevokeTokens Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+	RevokeTokens *bool `json:"revoke_tokens,omitempty"`
 }
 
 // ColumnRef A column's foreign key.
@@ -11976,7 +11979,7 @@ type ServerInterface interface {
 	// AcceptMyInvitation Accept one of your pending invitations
 	// (POST /api/v1/me/invitations/{invitation_id}/accept)
 	AcceptMyInvitation(w http.ResponseWriter, r *http.Request, invitationId InvitationID)
-	// ChangePassword Change your password; ends your other sessions
+	// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	// (POST /api/v1/me/password)
 	ChangePassword(w http.ResponseWriter, r *http.Request)
 	// GetRecoveryCodes How many recovery codes you have left
@@ -13695,7 +13698,7 @@ func (_ Unimplemented) AcceptMyInvitation(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ChangePassword Change your password; ends your other sessions
+// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 // (POST /api/v1/me/password)
 func (_ Unimplemented) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)

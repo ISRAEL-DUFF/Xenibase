@@ -237,6 +237,13 @@ before.
   the lock doubles to a day, the owner is emailed, and signup hashes either
   way (`TestLockoutDoublesAndSaysNothing`,
   `TestSignupTakesAsLongForAnExistingAddress`).
+- **Tokens outlived account recovery, and a session minted them without
+  step-up** (high). A stolen cookie could create a year's admin token that
+  survived the owner's password reset, sign-out and two-factor reset. A
+  password reset and a two-factor reset now revoke every token (a password
+  change too, unless the user keeps them), and creating a token or
+  approving a device login from a session needs a recent step-up
+  (`TestRecoveryRevokesTokens`, `TestTokensNeedARecentStepUp`).
 - **Invitations were an unlimited mail relay with linked names** (medium).
   Organisation invitations are capped a day per organisation and per
   inviter, and user-chosen names in email are never links

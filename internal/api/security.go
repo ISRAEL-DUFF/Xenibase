@@ -428,10 +428,14 @@ var reauthRequired = map[string]bool{
 	"POST /api/v1/admin/orgs/{org}/break-glass":              true,
 	"POST /api/v1/admin/orgs/{org}/suspend":                  true,
 	"GET /api/v1/projects/{id}/backup-key/download":          true,
-	// Handing a third-party app a token, and creating roles on an instance.
+	// Handing a third-party app a token, creating one from a session (a
+	// stolen cookie must not mint a year's access), and creating roles on
+	// an instance.
 	"POST /api/v1/oauth/authorize":                   true,
+	"POST /api/v1/tokens":                            true,
 	"POST /api/v1/admin/projects/{project_id}/roles": true,
-	// POST /api/v1/backups/{id}/restore checks it for mode in_place only.
+	// POST /api/v1/backups/{id}/restore checks it for mode in_place only;
+	// POST /api/v1/auth/device/approve for an approval (not a denial).
 }
 
 func isMutating(method string) bool {

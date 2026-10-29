@@ -414,6 +414,12 @@ func (s *Server) ApproveDeviceLogin(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// Approving issues a token, as creating one does: a session needs a
+	// recent step-up, so a link sent to a signed-in user can't be one click.
+	if sess, _ := sessionFrom(r.Context()); sess.Token == nil && !s.auth.RecentlyReauthenticated(sess) {
+		writeError(w, http.StatusForbidden, "reauth_required", "confirm your password and code to continue")
+		return
+	}
 	if req.OrgId == nil {
 		writeError(w, http.StatusBadRequest, "invalid", "choose the organisation the CLI will act in")
 		return

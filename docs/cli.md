@@ -19,7 +19,8 @@ xenibase login --server https://xenibase.example.com
 
 The CLI prints a code and opens your browser. Sign in if you aren't
 already, check the code matches, choose the **organisation** the CLI
-will act in and its **scopes**, and approve. The CLI saves the token in
+will act in and its **scopes**, and approve (confirming your password and
+code if you haven't in the last 10 minutes). The CLI saves the token in
 `~/.config/xenibase/config.toml` (readable only by you) as a **context**.
 Logging in to another organisation, or another Xenibase, adds another
 context:
@@ -58,10 +59,17 @@ confirmation (`--confirm <name>` in the CLI, a `confirm` field in the
 API), in place of the browser's password-and-code step.
 
 Manage your tokens under **Account → API tokens** or with
-`xenibase tokens list | create | revoke`. Organisation owners and admins
+`xenibase tokens list | create | revoke`. Creating one in the browser asks
+for your password and code if you haven't confirmed them in the last 10
+minutes. Organisation owners and admins
 see and can revoke every token scoped to their organisation
 (**Organisation → API tokens**). You get an email when a token is
 created and a week before it expires.
+
+A **password reset** by email and a **two-factor reset** by the platform
+admin revoke every token you have, since they are how an account is taken
+back; so does changing your password, unless you untick **Also revoke my
+API tokens** (or send `"revoke_tokens": false`). Make new ones afterwards.
 
 ## Connected apps
 

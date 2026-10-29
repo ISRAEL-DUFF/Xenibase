@@ -2693,7 +2693,7 @@ paths:
   /api/v1/me/password:
     post:
       operationId: changePassword
-      summary: Change your password; ends your other sessions
+      summary: Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
       tags: [account]
       requestBody:
         required: true
@@ -15461,6 +15461,10 @@ components:
           type: string
           format: password
           minLength: 12
+        revoke_tokens:
+          type: boolean
+          default: true
+          description: Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
     Terms:
       type: object
       required: [version, terms_md, privacy_md, published_at]

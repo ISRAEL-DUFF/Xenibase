@@ -102,6 +102,7 @@ func TestAPITokens(t *testing.T) {
 	appPath := "/api/v1/projects/" + app.Project.Id.String()
 
 	// Scopes: admin requires write; unknown scopes and over-long expiries fail.
+	e.Reauth()
 	for _, bad := range []map[string]any{
 		{"name": "x", "org_id": e.OrgID, "scopes": []string{"admin"}},
 		{"name": "x", "org_id": e.OrgID, "scopes": []string{"read"}, "expires_in_days": 400},
@@ -207,6 +208,7 @@ func TestAPITokens(t *testing.T) {
 	}
 	carol := e.AcceptInvitation(e.MailToken("carol@example.com", "invitation"), "carol@example.com")
 	var ct gen.CreatedToken
+	carol.Reauth()
 	if code := carol.Do("POST", "/api/v1/tokens", map[string]any{"name": "carol ci", "org_id": team, "scopes": []string{"read"}}, &ct); code != http.StatusCreated {
 		t.Fatalf("carol's token: %d", code)
 	}
@@ -298,7 +300,8 @@ func TestDeviceLogin(t *testing.T) {
 	if code := e.Do("GET", "/api/v1/auth/device/requests/"+strings.ToLower(start.UserCode), nil, &req); code != http.StatusOK || req.ClientName != "xenibase CLI on laptop" {
 		t.Fatalf("lookup: %d %+v", code, req)
 	}
-	// More than the CLI asked for is refused.
+	// Approving needs a recent step-up; more than the CLI asked for is refused.
+	e.Reauth()
 	if code := e.Do("POST", "/api/v1/auth/device/approve", map[string]any{"user_code": start.UserCode, "org_id": team, "scopes": []string{"write", "admin"}}, nil); code != http.StatusBadRequest {
 		t.Fatalf("approve with admin: %d", code)
 	}

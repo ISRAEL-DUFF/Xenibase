@@ -56,7 +56,9 @@ func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, "change password", err)
 		return
 	}
-	if err := s.auth.ChangePassword(r.Context(), sess, req.CurrentPassword, req.NewPassword); err != nil {
+	revoke := req.RevokeTokens == nil || *req.RevokeTokens
+	auditFrom(r.Context()).set("revoke_tokens", revoke)
+	if err := s.auth.ChangePassword(r.Context(), sess, req.CurrentPassword, req.NewPassword, revoke); err != nil {
 		s.authError(w, "change password", err)
 		return
 	}

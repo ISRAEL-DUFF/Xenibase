@@ -29,7 +29,11 @@ locks: if it wasn't you, reset your password and turn on two-factor sign-in.
 
 **Account** lists your sessions (revoke any), lets you change your password
 and name, and shows new recovery codes (after confirming your password and
-code). A password reset by email signs you out everywhere.
+code). A password reset by email signs you out everywhere and revokes your
+API tokens; so does a two-factor reset, and so does changing your password
+unless you untick **Also revoke my API tokens**. Creating a token, or
+approving the CLI's login, asks for your password and code if you haven't
+confirmed them in the last 10 minutes.
 
 ### Getting around
 

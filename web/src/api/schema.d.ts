@@ -2021,7 +2021,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Change your password; ends your other sessions */
+        /** Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens */
         post: operations["changePassword"];
         delete?: never;
         options?: never;
@@ -9599,6 +9599,11 @@ export interface components {
             current_password: string;
             /** Format: password */
             new_password: string;
+            /**
+             * @description Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+             * @default true
+             */
+            revoke_tokens: boolean;
         };
         Terms: {
             version: number;

@@ -1472,6 +1472,7 @@ test.describe("with the saved session", () => {
     await page.getByTestId("token-some-projects").check();
     await page.getByTestId("token-project-Team data").check();
     await page.getByTestId("create-token").click();
+    await stepUpIfAsked(page); // a session creates a token after a recent step-up
     const token = await revealedValue(page, "token-secret");
     expect(token).toMatch(/^xb_[0-9A-Za-z]{43}$/);
     await shot(page, "37-token-created");
@@ -1499,6 +1500,7 @@ test.describe("with the saved session", () => {
     await page.getByTestId("device-org").selectOption(metered.id);
     await shot(page, "38-device-login");
     await page.getByTestId("device-approve").click();
+    await stepUpIfAsked(page);
     await expect(page.getByTestId("device-approved")).toBeVisible();
     const collected = await page.evaluate(async (device) => {
       const r = await fetch("/api/v1/auth/device/token", { method: "POST", credentials: "omit", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_code: device }) });
