@@ -4,18 +4,178 @@
   "title": "Database branches",
   "part": "C",
   "order": 2,
-  "status": "planned",
   "summary": "Branches as shared-tier copies of a parent: from a backup or live, schema only, reset, detach and expiry.",
-  "scope": [
-    "Creating a branch from a backup or live, with or without data",
-    "Reset, detach and the hourly expiry",
-    "Who may manage branches, and tokens restricted to a parent",
-    "Branches with backend services of their own"
-  ],
+  "verified": "c67d14d81fea439156a49a243aa0839d7bf5ff47",
   "sources": [
     "internal/branching/",
     "internal/services/branch.go",
-    "test/integration/branches_test.go"
+    "internal/api/branches.go",
+    "internal/api/access.go",
+    "internal/api/routes.go",
+    "internal/authz/authz.go",
+    "internal/store/queries/branches.sql",
+    "internal/store/queries/backups.sql",
+    "internal/store/queries/tenancy.sql",
+    "internal/store/migrations/00015_branches.sql",
+    "internal/provision/service.go",
+    "internal/provision/export.go",
+    "internal/provision/flows.go",
+    "internal/backup/service.go",
+    "internal/tenancy/quotas.go",
+    "internal/tenancy/usage.go",
+    "internal/orgs/orgs.go",
+    "internal/storage/objects.go",
+    "internal/dedicated/promote.go",
+    "cmd/server/main.go",
+    "test/integration/branches_test.go",
+    "test/integration/branch_services_test.go",
+    "docs/decisions.md"
   ]
 }
 -->
+<p>A branch is a project that starts as a copy of another project, its parent, and can be refilled from it later. Typical uses are a database per pull request in CI, trying a migration, or debugging against real data (V2 §8). <x-ref path="internal/branching/branching.go"><code>internal/branching</code></x-ref> holds the whole lifecycle. It reuses provisioning and restores from <x-page id="control-plane--provisioning">the control plane</x-page> and <x-page id="backups">backups</x-page>, and adds very little of its own.</p>
+<x-packages names="branching"/>
+
+<h2 id="branching--what">What a branch is</h2>
+<p>A branch is an ordinary row in <code>projects</code> with its own database, owner role, app password and pooler route. Seven columns, added by <x-ref path="internal/store/migrations/00015_branches.sql">migration 00015</x-ref>, make it a branch:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>parent_project_id</code></td><td>The parent. Not null means "is a branch". A foreign key to <code>projects(id)</code> only, not to <code>(id, org_id)</code>.</td></tr>
+    <tr><td><code>branch_source</code></td><td><code>backup</code> or <code>live</code>: where it was filled from, and the default for a reset.</td></tr>
+    <tr><td><code>branch_schema_only</code></td><td>Whether it holds the parent's schema without rows. Fixed at creation. A reset keeps it.</td></tr>
+    <tr><td><code>expires_at</code>, <code>expiry_notified_at</code></td><td>When the sweep deletes it (null: never), and whether the 24-hour warning was sent.</td></tr>
+    <tr><td><code>branch_backups</code></td><td>Whether it takes nightly backups and a final backup on delete. Off by default.</td></tr>
+    <tr><td><code>sensitive_data</code></td><td>"Contains sensitive data" (V2 §8.5). Shared with ordinary projects. A branch copies its parent's.</td></tr>
+  </tbody>
+</table></div>
+<p>How a branch relates to its parent:</p>
+<ul>
+  <li><strong>One level deep.</strong> <x-ref path="internal/branching/branching.go" symbol="func (s *Service) Resolve("><code>Resolve</code></x-ref> refuses a parent that is itself a branch.</li>
+  <li><strong>Same organisation, same region, always the shared tier,</strong> on the organisation's own shared cluster if it has one, even when the parent is dedicated. It runs the parent's Postgres major (<x-ref path="internal/branching/branching.go" symbol="func (s *Service) Create("><code>Create</code></x-ref> reads the parent's instance).</li>
+  <li><strong>Members are a snapshot.</strong> The transaction that inserts the branch copies the parent's project members and roles (<x-ref path="internal/store/queries/branches.sql" symbol="-- name: CopyProjectMembers :exec"><code>CopyProjectMembers</code></x-ref>). Its creator becomes its admin, unless they are an organisation owner or admin, who are admins of every project anyway. Later changes to the parent's members do not reach the branch.</li>
+  <li><strong>Its own credentials.</strong> The branch gets a new opaque database name, owner role and app password, shown once in the create response. A reset keeps all of them, and members' personal logins, so a <code>DATABASE_URL</code> in CI or a <code>.env</code> keeps working (<code>TestBranchResetKeepsURL</code>).</li>
+  <li><strong>Not copied:</strong> webhooks and scheduled jobs. The <code>xenibase</code> schema that comes with the data is dropped or rebuilt by <x-ref path="internal/provision/export.go" symbol="func (s *Service) ResetWebhooks("><code>ResetWebhooks</code></x-ref> (see <x-page id="life-of-a-project">Life of a project</x-page>).</li>
+  <li><strong>Not promotable.</strong> Promotion refuses a branch (<x-ref path="internal/dedicated/promote.go" symbol="branches can't be promoted"><code>dedicated.Promote</code></x-ref>). Detach it first.</li>
+</ul>
+
+<h2 id="branching--create">Creating a branch</h2>
+<p><code>POST /api/v1/projects/{id}/branches</code> (<x-ref path="internal/api/branches.go" symbol="func (s *Server) CreateBranch("><code>CreateBranch</code></x-ref>), or <code>xenibase branch create</code>, whose <code>--replace</code> deletes a branch of the same name first and whose <code>--env</code> prints <code>DATABASE_URL</code> lines for CI.</p>
+<ol>
+  <li><strong>Resolve.</strong> <x-ref path="internal/branching/branching.go" symbol="func (s *Service) Resolve("><code>Resolve</code></x-ref> checks the request against the parent and fills the defaults. The parent must be <code>active</code>. A live copy needs a parent that is not asleep (a sleeping Free project refuses connections). A backup copy needs a succeeded logical backup. The TTL defaults to 7 days and must be 1 hour to 30 days, or 0 for none.</li>
+  <li><strong>Quotas.</strong> The handler checks <x-ref path="internal/tenancy/quotas.go" symbol="func (s *Service) CheckCreateBranch("><code>CheckCreateBranch</code></x-ref> with the parent's latest measured size, then operations in flight (see <a href="#branching--limits">limits</a>).</li>
+  <li><strong>Insert and queue.</strong> <code>Create</code> calls <code>provision.Create</code> with a <code>BranchSpec</code>. One transaction inserts the project, sets the branch columns, copies the members, adds the creator and enqueues <code>branch_create</code>. The parent and options go into the operation's params as <code>{"branch": {...}}</code>, next to the sealed password.</li>
+  <li><strong>Backend services.</strong> If the parent has them, <x-ref path="internal/services/branch.go" symbol="func (s *Service) PrepareBranch("><code>PrepareBranch</code></x-ref> makes the branch's API row, ref and keys now, so the response can return them once (<a href="#branching--services">below</a>).</li>
+  <li><strong>Fill.</strong> The worker runs <x-ref path="internal/branching/branching.go" symbol="func (s *Service) runCreate("><code>runCreate</code></x-ref>: <code>Prepare</code> (role, database, hardening). On a second attempt, <code>RecreateDatabase</code> first, to start from an empty database. Then <x-ref path="internal/branching/branching.go" symbol="func (s *Service) fill("><code>fill</code></x-ref>, then <code>Publish</code> (member logins, pooler route, smoke test, <code>active</code>), then <code>EnableBranch</code>.</li>
+</ol>
+<p><code>fill</code> first runs <x-ref path="internal/branching/branching.go" symbol="func (s *Service) copyExtensions("><code>copyExtensions</code></x-ref>. It reads the parent's extensions, and creates those in <code>public</code> on the branch as the admin, because the restore runs as the owner, who may not. Extensions in a schema of their own come with the dump. Then it copies from one of two sources:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Source</th><th>How</th><th>Cost to the parent</th></tr></thead>
+  <tbody>
+    <tr><td><code>backup</code> (default)</td><td>The newest succeeded <code>logical</code>, <code>final</code> or <code>safety</code> backup (<x-ref path="internal/store/queries/backups.sql" symbol="-- name: LatestSucceededBackup :one"><code>LatestSucceededBackup</code></x-ref>), restored by <x-ref path="internal/backup/service.go" symbol="func (s *Service) RestoreInto("><code>backup.RestoreInto</code></x-ref> on the branch's agent: decrypted as it streams, <code>pg_restore</code> as the console login with <code>--role</code> the owner.</td><td>None. The data is as of that backup.</td></tr>
+    <tr><td><code>live</code></td><td>The agent's <code>/v1/copy</code>: <code>pg_dump</code> of the parent as the instance admin, with <code>--no-owner</code> and <code>--no-acl</code>, piped into <code>pg_restore</code> as the owner on the branch (see <x-page id="nodes-agents--commands">agent commands</x-page>).</td><td>A full dump, now.</td></tr>
+  </tbody>
+</table></div>
+<p>Schema only passes <code>SchemaOnly</code> to the dump or the restore. Its default is the parent's <code>sensitive_data</code>, and only the parent's project admin may take a full copy of a sensitive parent:</p>
+<x-code path="internal/branching/branching.go" start="r.SchemaOnly = parent.SensitiveData" lines="7" caption="Resolve: schema only by default for sensitive data, and a full copy needs the project admin role"/>
+<p><code>MayCopySensitive</code> is the caller's effective role on the <em>parent</em> (the request was authorised there), so organisation owners and admins qualify. <code>TestBranchQuotaOnPersonalPlan</code> covers both refusals.</p>
+
+<h2 id="branching--reset">Reset</h2>
+<p><code>POST /api/v1/projects/{id}/reset</code> on the branch (<x-ref path="internal/api/branches.go" symbol="func (s *Server) ResetBranch("><code>ResetBranch</code></x-ref>). <x-ref path="internal/branching/branching.go" symbol="func (s *Service) Reset("><code>Reset</code></x-ref> queues <code>branch_reset</code> through <x-ref path="internal/provision/service.go" symbol="func (s *Service) EnqueueExclusiveTx("><code>EnqueueExclusiveTx</code></x-ref>: the branch must be <code>active</code> or <code>error</code> with nothing else in flight (<x-page id="control-plane--exclusive">one operation per project</x-page>), and it moves to <code>restoring</code>. The source is the request's, or the branch's own. A backup source needs a backup of the parent. Schema only is always the branch's own.</p>
+<x-code path="internal/branching/branching.go" start="func (s *Service) runReset(" caption="the reset: hold clients, recreate, refill, restore logins and the API, resume"/>
+<p>PgBouncer's <code>KILL</code> drops the branch's client and server connections, and new clients wait until <code>RESUME</code> instead of failing. <x-ref path="internal/provision/export.go" symbol="func (s *Service) RecreateDatabase("><code>RecreateDatabase</code></x-ref> drops the database <code>WITH (FORCE)</code> and makes it again with the same name and owner. The owner's SCRAM verifier lives on the role, which is not dropped, so the app password still works. <code>SyncMemberRoles</code> puts members' grants back. If both attempts fail, <x-ref path="internal/branching/branching.go" symbol="func (s *Service) failReset("><code>failReset</code></x-ref> resumes the route and leaves the branch in <code>error</code>, its data possibly partial. Another reset or a delete fixes it.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A reset re-reads the parent without asking whether the caller may still read it.</strong> The route checks <code>project.branch</code> on the branch only, and <code>fill</code> reads the parent by ID. Two ways this hands out data that was meant to be withdrawn. First, membership: removing someone from the parent (<x-ref path="internal/orgs/orgs.go" symbol="func (s *Service) RemoveProjectMember("><code>RemoveProjectMember</code></x-ref>) deletes only the parent's row, so a developer copied onto a branch, or its creator, can keep calling reset with <code>"source": "live"</code> and get a fresh dump of the parent's current data. Second, sensitivity: the full-data rule is checked only in <code>Resolve</code>. A full branch of a parent marked sensitive afterwards keeps refilling with every row, for any developer on the branch. Re-checking the caller's <code>project.branch</code> (and, for a full copy of a sensitive parent, the admin role) on the parent in <code>Reset</code> would close both.</p>
+</div>
+
+<h2 id="branching--keep">Detach, expiry and backups</h2>
+<ul>
+  <li><strong>Detach</strong> (<code>POST /api/v1/projects/{id}/detach</code>, <x-ref path="internal/branching/branching.go" symbol="func (s *Service) Detach("><code>Detach</code></x-ref>) is one statement, <x-ref path="internal/store/queries/branches.sql" symbol="-- name: DetachBranch :one"><code>DetachBranch</code></x-ref>: it clears the parent, the expiry, the warning and <code>branch_backups</code>. The project keeps its database, credentials, members and API. <code>branch_source</code> and <code>branch_schema_only</code> stay on the row as history.</li>
+  <li><strong>Expiry</strong> moves with <code>PATCH /api/v1/projects/{id}/settings</code> (<code>expires_at</code>, or <code>no_expiry</code>), which needs <code>project.settings</code>, the admin role. <x-ref path="internal/branching/branching.go" symbol="func (s *Service) SetExpiry("><code>SetExpiry</code></x-ref> accepts a time in the next 30 days and re-arms the warning. <code>branch_backups</code> goes through the same route (<x-ref path="internal/branching/branching.go" symbol="func (s *Service) SetBackups("><code>SetBackups</code></x-ref>).</li>
+  <li><strong>The sweep</strong>, <x-ref path="internal/branching/branching.go" symbol="func (s *Service) Sweep("><code>Sweep</code></x-ref>, deletes up to 100 expired branches per pass through the ordinary <code>provision.Delete</code>, with no final backup unless the branch takes backups. It then emails each creator once when less than 24 hours remain. Without SMTP the warning counts as sent. A conflict (another server got there first) is ignored, so several servers can sweep at once.</li>
+</ul>
+<x-code path="internal/store/queries/branches.sql" start="-- name: ExpiredBranches :many" end="LIMIT 100;" lang="sql" caption="what the sweep may delete: nothing in flight, and not while the organisation is suspended"/>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V2 §8.4 calls for "an hourly job". <code>cmd/server</code> runs the sweep every 10 minutes (<x-ref path="cmd/server/main.go" symbol="branchSvc.Run(bgCtx, 10*time.Minute)"><code>branchSvc.Run</code></x-ref>), as <code>docs/decisions.md</code> (M13 #4) records, though the package and the comment above that line still say hourly.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Detach makes a standalone project without the checks a new project gets.</strong> Detach needs only <code>project.branch</code>, the developer role, and calls neither <code>CheckCreateProject</code> nor <code>org.create_project</code>. Branches don't count toward the <code>projects</code> quota (<x-ref path="internal/store/queries/tenancy.sql" symbol="-- name: CountOrgProjects :one"><code>CountOrgProjects</code></x-ref>), and detaching frees the branch's slot, so create-then-detach repeats without limit. It gives an organisation as many permanent projects as it likes, and it lets a developer in an organisation whose members may not create projects own one as its admin. Restore-into-new-project, by contrast, checks <code>CheckCreateProject</code>. Detach also takes no lock and ignores the status, so a branch detached mid-reset is overwritten from its former parent once the reset continues. Running detach through <code>EnqueueExclusive</code>-style locking with <code>CheckCreateProject</code> would match the other paths.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The sweep deletes from a list it read earlier.</strong> <code>ExpiredBranches</code> runs once per pass, and <code>provision.Delete</code> locks the row but does not look at <code>expires_at</code> or <code>parent_project_id</code> again. A branch extended or detached between the query and its turn in the loop is deleted anyway, and without a final backup unless it took backups, because the sweep passes the <code>skipFinalBackup</code> it worked out from the row it read earlier. The window is short, a pass of up to 100 deletes, but it is exactly when a user acts to save a branch at the last minute. A check inside the delete transaction that the row is still an expired branch would close it.</p>
+</div>
+
+<h2 id="branching--who">Who may manage branches</h2>
+<p>One action covers branches: <x-ref path="internal/authz/authz.go" symbol="Action = &quot;project.branch&quot;"><code>project.branch</code></x-ref>, developer and above, token scope <code>write</code>.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Route</th><th>Action</th><th>Checked on</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET …/{id}/branches</code></td><td><code>project.view</code></td><td>The parent. The list then leaves out branches the caller is not a member of, or a token does not cover.</td></tr>
+    <tr><td><code>POST …/{id}/branches</code></td><td><code>project.branch</code></td><td>The parent</td></tr>
+    <tr><td><code>POST …/{id}/reset</code>, <code>…/detach</code></td><td><code>project.branch</code></td><td>The branch</td></tr>
+    <tr><td><code>DELETE /api/v1/projects/{id}</code></td><td><code>project.delete</code>, or <code>project.branch</code> on a branch</td><td>The branch</td></tr>
+    <tr><td><code>PATCH …/{id}/settings</code> (expiry, backups)</td><td><code>project.settings</code></td><td>The branch</td></tr>
+  </tbody>
+</table></div>
+<p>The delete row is how developers delete branches but not projects (V2 §2.3). A route rule may carry a <x-ref path="internal/api/routes.go" symbol="branchAction authz.Action"><code>branchAction</code></x-ref>, and the guard swaps it in when the project it resolved has a parent:</p>
+<x-code path="internal/api/access.go" start="res = authz.Resource{OrgID: rp.OrgID, ProjectID: id}" lines="7" caption="authorize: a branch's parent is resolved with it, and may change the action"/>
+<p>The resolved parent also widens restricted tokens. <x-ref path="internal/authz/authz.go" symbol="func Can(ctx context.Context"><code>authz.Can</code></x-ref> lets a token restricted to a project act on that project's branches, so a CI token for the parent can create, use and delete them. Lists apply the same rule through <x-ref path="internal/api/branches.go" symbol="func tokenAllows("><code>tokenAllows</code></x-ref>. A detached branch is outside the token from then on. Roles still come from <code>project_members</code> of the branch itself, and scopes still apply. See <x-page id="security">Security</x-page> for the guard as a whole.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A transfer breaks the rule that a branch and its parent share an organisation.</strong> <x-ref path="internal/orgs/orgs.go" symbol="func (s *Service) Transfer("><code>orgs.Transfer</code></x-ref> refuses neither a parent with live branches nor a branch, and the foreign key on <code>parent_project_id</code> does not include <code>org_id</code>. Moving a branch to organisation B leaves it a branch of A's project. B's owners and admins, project admins of everything in B, can then reset it from live, and <code>fill</code> reads A's parent by ID with no organisation check, so they keep receiving A's current data. Moving a parent instead leaves its branches in A: <code>ListBranches</code> filters by the parent's organisation and no longer shows them, while <code>CountLiveBranches</code> does not filter and keeps B from deleting the parent. Only someone who owns both organisations can transfer, but the access lasts after that, for everyone in B. Refusing transfers of branches and of parents with branches, or checking the organisation in <code>fill</code>, would keep the rule.</p>
+</div>
+
+<h2 id="branching--services">Branches with backend services of their own</h2>
+<p>When the parent has backend services (V4.1 §9.5), the branch gets an API of its own, never the parent's, so neither's tokens work on the other. <code>cmd/server</code> sets <code>branching.Service.API</code> to the services service. The work is split in two because the keys must be in the create response but the API can only be turned on once the copy is in:</p>
+<ol>
+  <li><x-ref path="internal/services/branch.go" symbol="func (s *Service) PrepareBranch("><code>PrepareBranch</code></x-ref>, in the request, in one transaction: the branch's services row and a new ref, the parent's settings (exposed schemas, public tables, CORS, auth configuration and templates) without their secrets (<code>providers_enc</code>: SMTP, SMS, OAuth, captcha and hook secrets), and a publishable and a secret key. A failure here is logged, and the branch is still made, without an API.</li>
+  <li><x-ref path="internal/services/branch.go" symbol="func (s *Service) EnableBranch("><code>EnableBranch</code></x-ref>, at the end of <code>runCreate</code> and of every reset: <x-ref path="internal/services/branch.go" symbol="func (s *Service) purgeSessions("><code>purgeSessions</code></x-ref> deletes the sessions, refresh tokens, flow states, one-time codes and MFA challenges that came with the data, so a parent's refresh token cannot be spent on the branch. Then the request roles, <code>xb_*</code> schemas and a new signing key. The parent's app users and their password hashes come with the data, so they sign in again on the branch with the same passwords.</li>
+  <li>With <code>copy_files</code> on create only, <code>EnableBranch</code> queues <code>copy_branch_files</code> as a background operation. <x-ref path="internal/services/branch.go" symbol="func (s *Service) runCopyBranchFiles("><code>runCopyBranchFiles</code></x-ref> reads the object versions the branch's <code>xb_storage.objects</code> names, which came with the data copy, and copies each one from the parent's prefix to the branch's inside the store.</li>
+</ol>
+<x-code path="internal/services/branch.go" start="for _, v := range versions {" caption="runCopyBranchFiles: skip what a retry finds, count the rest as copied or missing"/>
+<p><code>TestBranchServices</code> covers the keys, the separate signing key, the dropped sessions and the file copy.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Any copy error counts as "not found in the parent", and the operation succeeds.</strong> <x-ref path="internal/storage/objects.go" symbol="func (c *Client) Copy("><code>storage.Client.Copy</code></x-ref> returns <code>ErrNotFound</code> for a missing object and a wrapped error for anything else. The loop does not tell them apart. Throttling, a network error, an object over S3's 5 GB single-copy limit, or the operation's context ending each skip a file. The job then reports success with a "not found" count, and its three attempts are never used. The branch's rows point at files it does not have. Counting only <code>ErrNotFound</code> as missing and returning other errors would let the retry finish the copy.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A reset brings the parent's file rows but not their files, and strands the branch's own.</strong> <code>runReset</code> calls <code>EnableBranch</code> with <code>copyFiles</code> false. The refilled <code>xb_storage.objects</code> names the parent's current versions, so files the parent added since the branch was created are missing on the branch. The objects already under the branch's prefix, copies and the branch's own uploads, are no longer named by any row. The garbage list that would delete them lived in the dropped database, so the storage sweep, which meters rows, neither bills nor removes them until the branch is deleted. Copying files again after a reset, when the branch was created with them, would fix both.</p>
+</div>
+
+<h2 id="branching--limits">Limits and quotas</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Limit</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td><code>branches</code> per organisation (Personal 10, Team 25), counting live branches</td><td><code>CheckCreateBranch</code> with <code>CountOrgBranches</code></td></tr>
+    <tr><td>The parent's latest measured size against <code>project_storage_mb</code>, and the organisation's shared storage plus that size against <code>shared_storage_mb</code></td><td><code>CheckCreateBranch</code> (<code>fitsShared</code>). Unmeasured parents pass.</td></tr>
+    <tr><td>Organisation active, not at its spend cap, not restricted for an overdue balance</td><td><code>CheckCreateBranch</code></td></tr>
+    <tr><td>Operations in flight (3 or 5), counting <code>branch_create</code> and <code>branch_reset</code></td><td><code>CheckOperation</code> on create (<x-ref path="internal/tenancy/quotas.go" symbol="var operationKinds"><code>operationKinds</code></x-ref>)</td></tr>
+    <tr><td>Not counted toward <code>projects</code></td><td><code>CountOrgProjects</code></td></tr>
+    <tr><td>A parent with live branches cannot be deleted</td><td><x-ref path="internal/provision/service.go" symbol="func (s *Service) Delete(ctx context.Context, projectID uuid.UUID, confirmName string"><code>provision.Delete</code></x-ref></td></tr>
+    <tr><td>Usage: <code>branch_hours</code>, the fraction of each hour a branch existed (<x-ref path="internal/store/queries/branches.sql" symbol="-- name: HourlyBranches :many"><code>HourlyBranches</code></x-ref>), and <code>branch_gb_hours</code>, its measured size</td><td><x-ref path="internal/tenancy/usage.go" symbol="MetricBranchHours"><code>tenancy</code> usage</x-ref>, rated by billing (<x-page id="billing">Billing</x-page>)</td></tr>
+  </tbody>
+</table></div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Resets skip the operations-in-flight limit.</strong> <code>branch_reset</code> is in <code>operationKinds</code>, so it counts against the limit, but <code>ResetBranch</code> never calls <code>CheckOperation</code>. A developer, or a CI token, can reset every branch at once: with a live source that is one full <code>pg_dump</code> of the parent per branch, all running together on the parent's instance, past the 3 or 5 the plan allows. Calling <code>CheckOperation</code> in <code>ResetBranch</code> as <code>CreateBranch</code> does would apply the limit.</p>
+</div>
+
+<h2 id="branching--failures">Failure handling</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>What fails</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>No backup to branch from</td><td>409 at request time, telling the caller to branch from live. If the backup disappears before the worker runs, the create fails permanently and rolls back.</td></tr>
+    <tr><td>The parent is deleted before the fill</td><td><code>fill</code> fails permanently. A create rolls back. A reset leaves the branch in <code>error</code>.</td></tr>
+    <tr><td>The copy itself (<code>pg_dump</code>, <code>pg_restore</code>, an extension the shared tier lacks)</td><td>A live copy's error is permanent. A backup restore's error is retried once, on an empty database. Then <code>Rollback</code> soft-deletes the branch and drops its route, database and role, handing them to <code>drop_project_objects</code> if that fails.</td></tr>
+    <tr><td>A live reset of a sleeping parent</td><td>Not checked at request time, unlike create. The copy fails, and the branch ends in <code>error</code>.</td></tr>
+    <tr><td>A reset that gives up</td><td><code>failReset</code>: <code>RESUME</code>, status <code>error</code>, data possibly partial. The sweep still expires it.</td></tr>
+    <tr><td>The server dies mid-reset</td><td>The attempt is retried: <code>KILL</code> again, recreate, refill. Clients wait at the pooler meanwhile.</td></tr>
+    <tr><td><code>PrepareBranch</code> fails</td><td>The branch is made and the response has no API. <code>EnableBranch</code> finds no services row and leaves it alone.</td></tr>
+    <tr><td>The expiry email fails</td><td>Retried next pass. With no SMTP it is marked sent.</td></tr>
+    <tr><td>The organisation is suspended</td><td>Nothing expires until it is active again.</td></tr>
+  </tbody>
+</table></div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A failure after <code>Publish</code> retries against a live branch, and the rollback then does nothing.</strong> In <code>runCreate</code>, <code>Publish</code> marks the branch <code>active</code> and routes it before <code>EnableBranch</code> runs. If <code>EnableBranch</code> fails, the second attempt calls <code>RecreateDatabase</code>, which drops the routed database <code>WITH (FORCE)</code> without the pooler <code>KILL</code> it requires, under any client already connected. If that attempt fails too, <x-ref path="internal/provision/flows.go" symbol="func (s *Service) rollbackCreate("><code>rollbackCreate</code></x-ref> sees <code>active</code> and returns: the operation reads failed, the branch reads active, and the API keys in the create response never work. Running <code>EnableBranch</code> before <code>Publish</code>, or not recreating once the branch is active, would keep the two consistent.</p>
+</div>
+
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>A few smaller differences, most recorded in <code>docs/decisions.md</code> under M13. V2 §8.2 names a branch's database <code>&lt;parent-db&gt;__&lt;branch-slug&gt;_&lt;rand&gt;</code>; branches get opaque names like every project. §8.2 step 3 applies extensions after the restore; they are created first, because the owner cannot. §8.3 pauses the route; the code uses <code>KILL</code>, which also drops open connections. §11 lists a <code>branch_delete</code> operation; a branch is deleted by the ordinary <code>delete</code>. §2.3's role table lets developers create, reset and delete branches; they may also detach, which the spec leaves to no particular role.</p>
+</div>
