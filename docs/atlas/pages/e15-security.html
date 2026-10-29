@@ -4,16 +4,8 @@
   "title": "Security and tenant isolation",
   "part": "E",
   "order": 2,
-  "status": "planned",
   "summary": "The shared tier's isolation checklist and its checks, secrets under the master key and their rotation, outbound requests, signatures, quotas and the isolation tests.",
-  "scope": [
-    "Envelope encryption under the master key, and rotation",
-    "The isolation checklist checked against live clusters",
-    "Per-project IP allowlists at the poolers, and what they do not cover",
-    "Outbound requests only to public addresses; the signature scheme",
-    "Quotas, rate limits, storage locks, the statement reaper and suspension",
-    "The isolation test suite and the security review"
-  ],
+  "verified": "932802e154caf17fea2c44c81854fc8dc78776b2",
   "sources": [
     "internal/crypto/",
     "internal/rotate/",
@@ -21,9 +13,258 @@
     "internal/outbound/",
     "internal/signature/",
     "internal/tenancy/",
+    "internal/provision/activity.go",
+    "internal/provision/extensions.go",
+    "internal/provision/logins.go",
+    "internal/provision/flows.go",
+    "internal/services/feed.go",
+    "internal/services/service.go",
+    "internal/console/extensions.go",
+    "internal/config/config.go",
+    "internal/store/queries/tenancy.sql",
+    "internal/store/queries/isocheck.sql",
+    "internal/alerts/service.go",
+    "internal/api/tokens.go",
+    "cmd/server/main.go",
     "test/isolation/",
+    "test/integration/rotate_test.go",
+    "test/integration/tenancy_test.go",
     "docs/security-review.md",
-    "docs/network-access.md"
+    "docs/network-access.md",
+    "docs/operations.md",
+    "docs/decisions.md",
+    "Xenibase — V1 Specification & Build Plan.md",
+    "Xenibase — V2 Specification & Build Plan.md"
   ]
 }
 -->
+<p>Xenibase runs other people's databases side by side. On the shared tier, many organisations' projects are databases in one Postgres cluster, behind one pair of poolers, reached from one set of servers. This page is the whole of how they are kept apart and how the platform's own secrets are kept: what each kind of attacker can reach, the master key, the isolation checklist and its live audit, the per-tenant limits in <code>tenancy</code>, outbound requests, and the tests. The pieces that belong to one service are on that service's page and are linked from here, not repeated.</p>
+<x-packages names="crypto,rotate,isocheck,outbound,signature,tenancy"/>
+
+<h2 id="security--threats">Who the attackers are</h2>
+<p>V2 assumes any tenant may be careless or hostile (<x-ref path="Xenibase — V2 Specification &amp; Build Plan.md" symbol="### 10.1 Threat model">V2 §10.1</x-ref>). A malicious platform admin with root, timing and cache side channels between tenants on one cluster, and network-level denial of service are out of scope. Tenants who need more use a per-organisation shared cluster or a dedicated instance.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Attacker</th><th>What they hold</th><th>What they can reach</th><th>What stops them going further</th></tr></thead>
+  <tbody>
+    <tr><td>Another tenant</td><td>An owner login and SQL of their choosing on a shared cluster; the console, webhooks, jobs</td><td>Their own database; the catalogs every role reads (<code>pg_database</code>, <code>pg_roles</code>, <code>pg_locks</code>); any route of the poolers, whose auth file is one namespace</td><td><code>CONNECT</code> for the project's roles only, role attributes, hidden activity, opaque names, the limits and the reaper, the outbound client (<a href="#security--checklist">below</a>, <x-page id="connections--isolation"/>)</td></tr>
+    <tr><td>A tenant's end user</td><td>A publishable key and a user token</td><td>That project's backend services, as <code>anon</code> or <code>user</code></td><td>The host alone picks the project; keys and tokens are that project's; row-level security (<x-page id="data-api--request"/>)</td></tr>
+    <tr><td>An internet attacker</td><td>Nothing</td><td>The poolers, the edge, the web API, the waker</td><td>TLS and SCRAM against stored verifiers; IP allowlists; sign-in limits; the PgBouncer console refused from public addresses (<x-page id="connections--allowlist"/>)</td></tr>
+    <tr><td>A compromised node or agent</td><td>Root on a machine that runs instances</td><td>Every database on it, and its containers' environment (admin passwords, S3 credentials, the WAL-G key)</td><td>Nothing on the node; its mTLS certificate is pinned to its node id (<x-page id="nodes-agents--identity"/>). Accepted in <x-ref path="docs/security-review.md" symbol="## Known limitations">the review</x-ref></td></tr>
+    <tr><td>A compromised edge</td><td>Its region's feed</td><td>Every project's edge and request-role passwords and active signing keys, so any project's <code>service</code> role</td><td>It never reads the metadata database; the feed is signed per edge (<x-page id="connections--edge"/>)</td></tr>
+    <tr><td>A compromised pooler host</td><td>PgBouncer's files, the hostname's TLS key</td><td>Every verifier in the region, every session's plaintext, the private network</td><td>Verifiers cannot log in, but can pose as the server. Backends use <code>server_tls_sslmode = prefer</code>, so the network is trusted (<x-page id="connections--tls"/>)</td></tr>
+    <tr><td>A compromised <code>xenibase-server</code></td><td>The master key and the metadata owner role</td><td>Everything, the audit log included</td><td>Nothing in the software; break-glass is an audit control (<x-ref path="Xenibase — V2 Specification &amp; Build Plan.md" symbol="**Honesty note for the terms of use:**">V2 §2.4</x-ref>)</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="security--master-key">Secrets under the master key</h2>
+<p>Secrets the control plane must read back are sealed with one 32-byte master key (<x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 7.3 Secrets">V1 §7.3</x-ref>). Which columns are sealed, hashed or kept in the clear is on <x-page id="data-model--secrets"/>. This section is how the sealing works and what depends on the key.</p>
+<h3>The keyring</h3>
+<p><x-ref path="internal/config/config.go" symbol="func loadMasterKey("><code>loadMasterKey</code></x-ref> reads exactly one of <code>XENIBASE_MASTER_KEY</code> or <code>XENIBASE_MASTER_KEY_FILE</code> (for Docker and systemd secrets), as base64 in either alphabet, padded or not, and refuses anything that does not decode to 32 bytes (<x-ref path="internal/crypto/masterkey.go" symbol="func ParseKey("><code>ParseKey</code></x-ref>). <code>XENIBASE_MASTER_KEY_PREVIOUS</code> holds old keys, comma-separated. <x-ref path="internal/crypto/masterkey.go" symbol="func NewKeyring("><code>NewKeyring</code></x-ref> makes the first the primary and indexes all of them by key id. A key id is the first 8 bytes of SHA-256 over a fixed label and the key, so it names the key without revealing it.</p>
+<x-code path="internal/crypto/masterkey.go" start="func (k *Keyring) Encrypt(" doc caption="Encrypt: version, key id and a random nonce in the header, all authenticated with the caller's associated data"/>
+<p>A ciphertext is <code>version (1) | key id (8) | nonce (12) | AES-256-GCM</code>. The version byte and key id are part of the associated data, and so is the caller's context, which names the column and the row (<code>"nodes.pg_admin_secret:" + id</code>). A sealed value copied into another row, or into another column, fails to open with <code>ErrDecrypt</code>. <x-ref path="internal/crypto/masterkey.go" symbol="func (k *Keyring) Decrypt("><code>Decrypt</code></x-ref> picks the key by the id in the header and answers <code>ErrUnknownKey</code> when the keyring does not hold it. The nonce is random for every seal, and no key seals anywhere near 2<sup>32</sup> values, so nonce reuse is not a concern.</p>
+<h3>Values derived from the key</h3>
+<p><x-ref path="internal/crypto/masterkey.go" symbol="func (k *Keyring) Derive("><code>Derive</code></x-ref> is HMAC-SHA256 under the primary key over a label. It gives values that must be stable and secret without storing them:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Label</th><th>Used as</th><th>Stored anywhere?</th></tr></thead>
+  <tbody>
+    <tr><td><code>xenibase edge role &lt;role&gt;</code></td><td>The password of each project's edge login and four request roles, handed to the edge in the feed (<x-ref path="internal/services/service.go" symbol="func (s *Service) edgePassword("><code>edgePassword</code></x-ref>)</td><td>No. Their SCRAM verifiers are, in <code>project_services.edge_verifier</code> and <code>login_verifiers</code>, and the poolers authenticate against those</td></tr>
+    <tr><td><code>xenibase console role &lt;role&gt;</code></td><td>The console logins' password (<x-ref path="internal/provision/console.go" symbol="func (s *Service) ConsolePassword("><code>ConsolePassword</code></x-ref>)</td><td>No. A failed login repairs the role and retries once (<x-ref path="docs/decisions.md" symbol="| 1 | Console identity |">decision</x-ref>)</td></tr>
+    <tr><td><code>xenibase storage urls &lt;ref&gt;</code></td><td>The key that signs a project's file URLs (<x-ref path="internal/services/feed.go" symbol="func (s *Service) storageSecret("><code>storageSecret</code></x-ref>, <x-page id="storage--signed"/>)</td><td>No</td></tr>
+    <tr><td><code>pooler admin scram salt:&lt;user&gt;</code></td><td>The salt of the PgBouncer admin user's verifier, so the auth file is byte-identical across syncs (<x-ref path="cmd/server/main.go" symbol="keyring.Derive(&quot;pooler admin scram salt:&quot;"><code>setupProvisioning</code></x-ref>)</td><td>No</td></tr>
+  </tbody>
+</table></div>
+<h3>Rotation and verification</h3>
+<p><code>xenibase-server -rotate-master-key</code> runs with the new key as primary and the old one in <code>XENIBASE_MASTER_KEY_PREVIOUS</code>, then exits (<x-ref path="cmd/server/main.go" symbol="func rotateMasterKey("><code>rotateMasterKey</code></x-ref>). It migrates the schema, then <x-ref path="internal/rotate/rotate.go" symbol="func Run("><code>rotate.Run</code></x-ref> collects every sealed value under <code>FOR UPDATE</code> in one transaction: the 16 sealed columns, the six blobs in <code>settings</code> rows, and the secrets in pending operations' parameters. Each one not already under the primary key is re-sealed with the same associated data. Sign-in challenges are deleted rather than re-sealed; their owners sign in again.</p>
+<x-code path="internal/rotate/rotate.go" start="for _, s := range secrets {" end="res.Rewrapped[s.what]++" lang="go" caption="walk: verify decrypts only; rewrap re-seals what is not under the primary key, and any failure rolls the whole transaction back"/>
+<p>A wrong old key, or a value sealed under a key the keyring does not hold, fails the transaction and nothing changes. After the commit, <x-ref path="internal/rotate/rotate.go" symbol="func Verify("><code>rotate.Verify</code></x-ref> opens every value again with a keyring that holds the new key alone. <code>TestEveryEncryptIsRotated</code> reads every <code>Encrypt</code> call in the module and fails on associated data the column list does not cover, so a new sealed column cannot be forgotten silently (<x-page id="data-model--secrets"/> has the earlier gap this closed).</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Rotating the master key takes every project's backend services offline.</strong> <code>Derive</code> keys on the primary key, so after a rotation <code>edgePassword</code> returns new passwords, and the feed hands them to the edge (<x-ref path="internal/services/feed.go" symbol="p.Database, p.EdgeUser, p.Password = r.DbName, edge, s.edgePassword(edge)"><code>feed.go</code></x-ref>). The poolers still authenticate the edge and request roles against the verifiers stored at enable time (<x-ref path="internal/store/queries/services.sql" symbol="-- name: PoolerEdgeUsers"><code>PoolerEdgeUsers</code></x-ref>), and the roles on the instances still have the old ones. Nothing recomputes them: <x-ref path="internal/services/service.go" symbol="func (s *Service) ensureRolesOn("><code>ensureRolesOn</code></x-ref> reuses <code>svc.EdgeVerifier</code> and <code>LoginVerifiers</code> whenever they are set, so even a reconcile restores the mismatch. Every data API, auth, storage and realtime request then fails SCRAM at the pooler, for every project, until someone clears the stored verifiers by hand; outstanding signed file URLs stop verifying too. <code>TestMasterKeyRotation</code> has no project with services, and <code>Verify</code> checks only sealed values, so both pass. Confirmed by reading; a scratch test showed <code>Derive</code>'s output changes with the primary key. The rotation should re-derive the verifiers (or the passwords get a sealed, stored seed), and the test should turn services on.</p>
+</div>
+<div class="callout note"><span class="callout-label">Running servers during a rotation</span>
+  <p>The <x-ref path="docs/operations.md" symbol="## Secrets">operations guide</x-ref> stops the bundle's one server first. With several, one still running on the old key alone cannot open re-sealed values and keeps sealing new ones under the old key, which are lost once it is dropped. Stop every server, and keep the old key in <code>XENIBASE_MASTER_KEY_PREVIOUS</code> until a second rotation rewraps nothing.</p>
+</div>
+<h3>What is lost with the key</h3>
+<p>Everything sealed: storage credentials, the agent and etcd CA keys, instance admin and Patroni passwords, projects' JWT signing keys and backup keys, webhook secrets, jobs, auth providers' settings, and the platform backup key. Project passwords are not affected, since only their verifiers exist. Backups survive only through the backup key the setup wizard makes the operator download (<x-page id="backups--encryption"/>). The derived values above change with any new key, with the effects in the risk above.</p>
+
+<h2 id="security--checklist">The shared-tier isolation checklist</h2>
+<p>V1 §7.1 lists what every create enforces; V2 §10.2 and §10.4 add opaque names, activity privacy and the limits a tenant cannot lift. <x-ref path="internal/isocheck/isocheck.go"><code>isocheck</code></x-ref> checks them against live clusters with the same code CI runs. Every check uses a superuser connection to the instance, not the poolers.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Item</th><th>Enforced by</th><th>Checked by</th></tr></thead>
+  <tbody>
+    <tr><td><code>CONNECT</code> and <code>TEMPORARY</code> revoked from <code>PUBLIC</code>; granted to the owner</td><td><x-ref path="internal/provision/flows.go" symbol="func (s *Service) ensureDatabase("><code>ensureDatabase</code></x-ref>; the database is created from <code>template0</code></td><td><x-ref path="internal/isocheck/isocheck.go" symbol="func Roles("><code>Roles</code></x-ref> (every project); <x-ref path="internal/isocheck/isocheck.go" symbol="func Cluster("><code>Cluster</code></x-ref> for <code>postgres</code> and <code>template1</code></td></tr>
+    <tr><td><code>CREATE</code> on <code>public</code> revoked; the schema owned by the project</td><td><x-ref path="internal/provision/flows.go" symbol="func (s *Service) hardenDatabase("><code>hardenDatabase</code></x-ref></td><td><x-ref path="internal/isocheck/isocheck.go" symbol="func Database("><code>Database</code></x-ref></td></tr>
+    <tr><td>No <code>SUPERUSER</code>, <code>CREATEDB</code>, <code>CREATEROLE</code>, <code>REPLICATION</code>, <code>BYPASSRLS</code></td><td><x-ref path="internal/provision/flows.go" symbol="func (s *Service) ensureRole("><code>ensureRole</code></x-ref> spells every attribute out</td><td><code>Roles</code>: the owner, <code>&lt;db&gt;_console</code>, <code>&lt;db&gt;_console_ro</code>, <code>&lt;db&gt;_ro</code> and every <code>&lt;db&gt;_u_…</code></td></tr>
+    <tr><td>No membership of <code>pg_*</code> or privileged roles; member logins hold only their own project's roles; the read-only console login cannot become the owner</td><td>Never granted</td><td><code>Roles</code></td></tr>
+    <tr><td>A connection limit and a <code>temp_file_limit</code> on every login</td><td><code>ensureRole</code>, <x-ref path="internal/provision/logins.go" symbol="func tempFileLimit("><code>tempFileLimit</code></x-ref></td><td><code>Roles</code> (login roles only)</td></tr>
+    <tr><td>A suspended or hard-locked project's logins are off</td><td><x-ref path="internal/provision/logins.go" symbol="func (s *Service) SetLogins("><code>SetLogins</code></x-ref></td><td><code>Roles</code>, from <code>Tenant.LoginsOff</code></td></tr>
+    <tr><td>No untrusted language, no <code>plpython3u</code>, <code>plperlu</code>, <code>dblink</code>, <code>postgres_fdw</code>, <code>file_fdw</code>, <code>adminpack</code></td><td>Tenants cannot create them; the extension API keeps to the allow-list</td><td><code>Database</code> (<x-ref path="internal/isocheck/isocheck.go" symbol="var EscapeProne"><code>EscapeProne</code></x-ref>)</td></tr>
+    <tr><td>Other sessions' and databases' activity hidden</td><td><x-ref path="internal/provision/activity.go" symbol="func RestrictActivity("><code>RestrictActivity</code></x-ref></td><td><code>Database</code>, against <code>ActivityFunctions</code></td></tr>
+    <tr><td><code>pg_hba.conf</code>: SCRAM, named addresses, <code>hostssl</code> outside private ranges</td><td>The bundle's file; <code>xenibase-hba.sh</code> at initdb</td><td><code>Cluster</code> via <code>pg_hba_file_rules</code> (<x-ref path="internal/isocheck/isocheck.go" symbol="func hbaFinding("><code>hbaFinding</code></x-ref>)</td></tr>
+    <tr><td><code>log_statement = none</code>; only <code>log_min_duration_statement</code></td><td>Cluster configuration</td><td><code>Cluster</code></td></tr>
+    <tr><td>Only opaque names in <code>pg_database</code> and <code>pg_roles</code></td><td>Opaque naming (<x-page id="life-of-a-project--names"/>)</td><td><x-ref path="internal/isocheck/isocheck.go" symbol="func Metadata("><code>Metadata</code></x-ref>, from inside a tenant's session</td></tr>
+  </tbody>
+</table></div>
+<h3>The live two-tenant probes</h3>
+<p>After auditing every project, <x-ref path="internal/isocheck/isocheck.go" symbol="func Instance("><code>Instance</code></x-ref> drops any leftover probes, creates two throwaway tenants with the real create steps (<x-ref path="internal/provision/probe.go" symbol="func (s *Service) NewProbe("><code>NewProbe</code></x-ref>: role, database, hardening), audits their roles, and has A attack B (<x-ref path="internal/isocheck/isocheck.go" symbol="func Probes("><code>Probes</code></x-ref>). B creates a table and keeps a session open. A then tries to connect to B's database, <code>postgres</code> and <code>template1</code>, and runs each of these, every one of which must be refused:</p>
+<x-code path="internal/isocheck/isocheck.go" start="attempts := []struct{ what, sql string }{" lang="go" caption="Probes: tenant A's attempts on tenant B and on the server; CREATE EXTENSION for each escape-prone extension is added after"/>
+<p>Then A must fail to read <code>pg_stat_activity</code>, <code>pg_stat_get_activity</code>, <code>pg_stat_database(_conflicts)</code> and the per-database and per-backend statistics functions, to raise its <code>temp_file_limit</code> or connection limit, and must not be a member of any predefined role. A success is a finding. An error counts as a refusal only if its SQLSTATE class is one Postgres uses for refusals (<x-ref path="internal/isocheck/isocheck.go" symbol="func isRefusal("><code>isRefusal</code></x-ref>); any other error fails the run, so a broken probe cannot pass for a refused one. The probes are dropped afterwards, even when the run fails.</p>
+<h3>How often, and the alert</h3>
+<p><x-ref path="internal/isocheck/service.go" symbol="func (s *Service) Due("><code>Due</code></x-ref> runs every hour and queues an <code>isolation_check</code> operation for each running shared cluster whose latest check is older than <code>Every</code> (24 hours) and not queued or running. A check has two attempts and 30 minutes. Any finding fails it permanently, with the first three findings in the error and all of them in the step log. A failed check of a cluster that still exists raises the critical <code>isolation_check_failed</code> alert (<x-ref path="internal/alerts/service.go" symbol="case &quot;isolation_check&quot;:"><code>alerts</code></x-ref>), which clears when a later check succeeds. Platform admins can run all checks at once from Settings → Tenant isolation (<code>POST /api/v1/security/isolation-checks</code>).</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The audit can pass while the backend-service logins, or a cross-project grant, are wrong.</strong> <code>Roles</code> looks at the owner, the console logins, <code>&lt;db&gt;_ro</code> and the members' logins. It never looks at the five backend-service logins (<code>&lt;db&gt;_edge</code>, <code>_anon</code>, <code>_user</code>, <code>_service</code>, <code>_auth_hook</code>), which are logins tenant SQL runs as on the shared tier. So a request role left with <code>LOGIN</code> while its organisation is suspended, a missing <code>temp_file_limit</code> or connection limit on one, an unexpected attribute, or membership of a predefined role all pass. The database-grants check asks only whether <code>PUBLIC</code> has <code>CONNECT</code> (<code>has_database_privilege('public', …)</code>), so <code>CONNECT</code> on B's database granted to A's owner, or to any other project's role, also passes. The live probes would not catch it either: they create fresh tenants without services. <code>Roles</code> should include <code>store.ServiceRoles</code>, and the grants check should list every grantee of <code>CONNECT</code> on a project database (<code>aclexplode(datacl)</code>) and require it to be one of that project's roles.</p>
+</div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V2 §10.4's nightly audit of forbidden capabilities includes "no <code>SECURITY DEFINER</code> functions owned by anything other than tenant roles or the fixed Xenibase webhook function" (<x-ref path="Xenibase — V2 Specification &amp; Build Plan.md" symbol="**Forbidden capabilities**">V2 §10.4</x-ref>). <code>isocheck</code> never reads <code>prosecdef</code>. The backend services also install platform-owned <code>SECURITY DEFINER</code> functions in <code>xb_auth</code> (<x-page id="data-api--grants"/>), so the rule would need that exception as well.</p>
+</div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>The package comment of <x-ref path="internal/isocheck/isocheck.go" symbol="// Package isocheck"><code>isocheck</code></x-ref>, the doc comments of <code>TestClusterConfiguration</code> and <code>TestLiveIsolationCheck</code>, and the security review's sign-off say the live check runs weekly. <code>Every</code> is 24 hours, as V2 §10.4 asks; V1 §7.1 said weekly.</p>
+</div>
+
+<h2 id="security--postgres">Postgres-level hardening</h2>
+<p>The checklist is the minimum. These are the settings behind it and what each one stops:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Control</th><th>Where</th><th>What it stops</th></tr></thead>
+  <tbody>
+    <tr><td>The owner: <code>NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT</code>, <code>CONNECTION LIMIT</code> from the plan, the SCRAM verifier as its password</td><td><code>ensureRole</code></td><td>Taking any other role or database; creating extra logins to get round the connection limit. <code>CREATEROLE</code> only on a dedicated instance with role management on (<x-page id="control-plane--dedicated"/>)</td></tr>
+    <tr><td>Console and request-role logins: <code>NOINHERIT</code>, reaching the project's roles only by <code>SET ROLE</code> or as themselves; only <code>_service</code> has <code>BYPASSRLS</code></td><td><x-page id="control-plane--console"/>, <x-page id="data-api--enable"/></td><td><code>RESET ROLE</code> in tenant code landing on a superuser or the edge login</td></tr>
+    <tr><td><code>temp_file_limit = 2GB</code> per login, set with <code>ALTER ROLE … SET</code></td><td><x-ref path="internal/provision/logins.go" symbol="const TempFileLimit"><code>TempFileLimit</code></x-ref></td><td>One sort or hash filling the disk. It is superuser-only, so <code>SET</code> and <code>ALTER ROLE … RESET</code> fail for the tenant</td></tr>
+    <tr><td><code>statement_timeout</code> and <code>idle_in_transaction_session_timeout</code> as role defaults</td><td><code>ensureRole</code></td><td>Nothing on their own: both are user-settable. The <a href="#security--reaper">reaper</a> is the guard</td></tr>
+    <tr><td>The activity views and statistics functions revoked from <code>PUBLIC</code> in every shared project database</td><td><code>RestrictActivity</code> (also run by <code>apply_settings</code>)</td><td>Seeing other databases' backends, roles, commits and rows</td></tr>
+    <tr><td>Platform functions in tenant databases: <code>SECURITY DEFINER</code> only with <code>SET search_path = pg_catalog, pg_temp</code>, in schemas <code>PUBLIC</code> cannot use</td><td><x-page id="webhooks-jobs--outbox"/>, <x-page id="data-api--grants"/></td><td>A tenant's object on the search path running inside a platform function</td></tr>
+  </tbody>
+</table></div>
+<x-code path="internal/provision/activity.go" start="var activityPrivacy = []string{" caption="activityPrivacy: catalog ACLs are per database, so this runs in each project database, with every pg_stat_get_backend_*, pg_stat_get_db_*, pg_stat_get_activity and pg_stat_get_progress_info"/>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong><code>pg_locks</code> still shows every backend's database to every tenant.</strong> The activity restriction hides which databases have backends, but <code>pg_locks</code> (over <code>pg_lock_status()</code>) is readable by <code>PUBLIC</code> and lists every lock in the cluster with its <code>database</code> oid, <code>relation</code> oid, mode and <code>pid</code>. Joined with <code>pg_database</code>, a tenant sees which other projects are active, how many sessions each has, which relations they touch and when, the same information the 4.2.4 fix removed from <code>pg_stat_get_backend_dbid</code> (<x-page id="life-of-a-project--isolation"/>). Reproduced on Postgres 16 with two databases hardened as <code>ensureDatabase</code> and <code>RestrictActivity</code> leave them: A's <code>SELECT d.datname, l.pid, l.relation, l.mode FROM pg_locks l JOIN pg_database d ON d.oid = l.database</code> returned B's database, backend and table while <code>pg_stat_activity</code> was refused. Revoking <code>SELECT</code> on <code>pg_catalog.pg_locks</code> and <code>EXECUTE</code> on <code>pg_lock_status()</code> and <code>pg_blocking_pids(int)</code> in <code>activityPrivacy</code>, with probes for them, would close it. Low: names are opaque and no data is exposed.</p>
+</div>
+
+<h2 id="security--extensions">Extensions on the shared tier</h2>
+<p>The shared tier allows <x-ref path="internal/provision/extensions.go" symbol="var SharedExtensions"><code>SharedExtensions</code></x-ref>: <code>pgcrypto</code>, <code>uuid-ossp</code>, <code>citext</code>, <code>pg_trgm</code>, <code>hstore</code>, <code>unaccent</code>, <code>btree_gin</code>, <code>btree_gist</code>, <code>pg_stat_statements</code>, <code>vector</code> and <code>hypopg</code>. Dedicated instances add <code>postgis</code>, <code>pg_partman</code>, <code>timescaledb</code>, <code>postgres_fdw</code> and <code>pg_cron</code> (<x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 7.4 Extension allow-list">V1 §7.4</x-ref>). The rule is that nothing on the shared tier reaches outside its database: no foreign-data wrappers or <code>dblink</code> (they connect from the cluster's own address, which <code>pg_hba.conf</code> trusts), no file access, no background workers running tenant SQL (<code>pg_cron</code>), and no preload library that is unsafe to share. <code>hypopg</code> serves query insights; <code>pg_stat_statements</code> is preloaded cluster-wide, its reset withheld from the request roles (<x-page id="data-api--grants"/>).</p>
+<p><x-ref path="internal/console/extensions.go" symbol="func (s *Service) EnableExtension("><code>EnableExtension</code></x-ref> refuses a name outside the tier's list or missing from the image, then creates it as the superuser <code>WITH SCHEMA public</code>. The image (<x-ref path="deploy/images/postgres/Dockerfile"><code>deploy/images/postgres</code></x-ref>) has every contrib module and <code>hypopg</code>, but not <code>vector</code>.</p>
+<div class="callout note"><span class="callout-label">The allow-list binds the API, not the tenant</span>
+  <p>The owner role owns its database, so it can <code>CREATE EXTENSION</code> any extension Postgres marks <em>trusted</em> without the API: <code>tablefunc</code>, <code>ltree</code>, <code>intarray</code>, <code>fuzzystrmatch</code> and the other trusted contrib modules (checked on Postgres 16). Trusted extensions are by definition ones a non-superuser may install, so none of them escapes the role, and the untrusted ones stay refused. The security review's "Enforced by <code>POST /projects/{id}/extensions</code>" is true of what Xenibase installs, not of what is installed.</p>
+</div>
+
+<h2 id="security--tenancy">Per-tenant controls</h2>
+<p><x-ref path="internal/tenancy/tenancy.go"><code>tenancy</code></x-ref> is V2 §10's hardening. Its loops run in every server: the reaper every 15 seconds, storage enforcement every minute, and a sweep every 5 minutes (opaque renames, usage, break-glass expiry, organisation deletion, retention). Each step is idempotent, so several servers converge.</p>
+<h3 id="security--quotas">Quotas and rate limits</h3>
+<p>An organisation's limits are its plan's, with per-org overrides (<x-ref path="internal/tenancy/tenancy.go" symbol="func (s *Service) Limits("><code>Limits</code></x-ref>). A refused create answers <code>409 quota_exceeded</code> with the limit, the use and the maximum (<x-ref path="internal/tenancy/quotas.go" symbol="type QuotaError struct"><code>QuotaError</code></x-ref>).</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Limit</th><th>Checked</th><th>How</th></tr></thead>
+  <tbody>
+    <tr><td>Projects, branches</td><td>Before a create, a branch, a restore or import into a new project, a replica</td><td>A count (<x-ref path="internal/tenancy/quotas.go" symbol="func (s *Service) CheckCreateProject("><code>CheckCreateProject</code></x-ref>, <code>CheckCreateBranch</code>), also refusing an organisation that is not active or has an overdue balance</td></tr>
+    <tr><td>Per-project and total shared storage</td><td>A branch, a demotion</td><td><code>fitsShared</code> against the measured size; continuously by <a href="#security--storage">storage enforcement</a></td></tr>
+    <tr><td>Operations in flight</td><td>Backups, restores, imports, branches, exports</td><td>A count of queued and running operations of those kinds</td></tr>
+    <tr><td>Backup storage on platform targets</td><td>Each backup</td><td>The organisation's backups there; its own targets never count</td></tr>
+    <tr><td>Connections per project</td><td>Provisioning</td><td>The role's <code>CONNECTION LIMIT</code> and PgBouncer's <code>max_db_connections</code></td></tr>
+    <tr><td>Concurrent console queries</td><td>Each console, editor or table query</td><td><x-ref path="internal/tenancy/quotas.go" symbol="func (s *Service) AcquireConsole("><code>AcquireConsole</code></x-ref>, a counter in the serving process</td></tr>
+    <tr><td>API tokens</td><td>Each bearer request</td><td>600 a minute per token, 1,200 per organisation, in each server's memory (<x-ref path="internal/api/tokens.go" symbol="DefaultTokenRate"><code>DefaultTokenRate</code></x-ref>)</td></tr>
+  </tbody>
+</table></div>
+<p>Webhook and HTTP job limits are on <x-page id="webhooks-jobs--limits"/>; the edge's per-IP, per-key and monthly limits on <x-page id="data-api--gate"/>.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Parallel creates go past the projects quota and the dedicated allowance.</strong> <code>CheckCreateProject</code> counts the organisation's projects, and the handler then calls <code>provision.Create</code> (<x-ref path="internal/api/projects.go" symbol="if !s.checkQuota(w, s.tenancy.CheckCreateProject(r.Context(), acc.OrgID)) {"><code>CreateProject</code></x-ref>) with no lock or recount between the two; nothing in the schema limits projects per organisation. N requests sent at once by one token (well inside 600 a minute) each see the same count and all succeed, so a Personal organisation limited to 10 can hold 10 + N. <code>WithinAllowance</code> for dedicated instances and <code>CheckCreateBranch</code> have the same shape. Not reproduced (it needs the full stack); read end to end. The check and the insert should share a transaction holding the organisation's row (<code>SELECT … FOR UPDATE</code>), as <code>LockJob</code> does for job runs. Low: a quota is a fairness limit, and storage is still capped per organisation.</p>
+</div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V2 §10.3 says rate limits on console queries and operations are per-org token buckets in <code>xenibase-server</code>. Console queries are a concurrency count per process, so with N servers an organisation gets N times its limit; operations are a count of what is queued or running. Token limits are also per process.</p>
+</div>
+
+<h3 id="security--storage">Storage enforcement and locks</h3>
+<p>Postgres has no per-database disk quota, so <x-ref path="internal/tenancy/storage.go" symbol="func (s *Service) EnforceStorage("><code>EnforceStorage</code></x-ref> applies one from each shared project's latest measured size (sampled every 5 minutes, ignored if older than 30). The ratio is the larger of the project's size against its per-project limit and the organisation's total against its shared-storage limit.</p>
+<x-code path="internal/tenancy/storage.go" start="func StorageState(" caption="StorageState: 90% warns, 100% soft-locks, 120% (or 100% on a node at 95% disk) hard-locks"/>
+<p><x-ref path="internal/tenancy/storage.go" symbol="func (s *Service) applyStorageState("><code>applyStorageState</code></x-ref> moves a project between states and records the new state only after it took effect, so a crash part-way repeats the move instead of believing it done. Locks are re-applied every minute.</p>
+<ul>
+  <li><strong>Soft lock.</strong> <code>ALTER DATABASE … SET default_transaction_read_only = on</code>, and idle sessions are ended so reconnecting clients pick it up (<x-ref path="internal/provision/logins.go" symbol="func (s *Service) SetReadOnly("><code>SetReadOnly</code></x-ref>). It is a default: a tenant can still open a read-write transaction to delete data, as V2 §10.4 intends, and the database's owner can reset it, which the next pass undoes.</li>
+  <li><strong>Hard lock.</strong> Every login of the project becomes <code>NOLOGIN</code>, and their sessions end on the poolers and the server (<code>SetLogins</code>). The console logins are left out, so the team can still delete data and run <strong>Reclaim space</strong>.</li>
+  <li><strong>Unlock.</strong> Under 100% the locks lift and the admins are emailed.</li>
+</ul>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The hard limit is a sample and the soft lock is opt-out, so one tenant can still fill a shared node's disk.</strong> A tenant at 99% opens a read-write transaction (which the soft lock allows by design) and inserts at disk speed. Nothing stops it until the next size sample (up to 5 minutes) and enforcement pass (up to 1 more): <code>temp_file_limit</code> covers only temporary files, and the node-disk rule in <code>StorageState</code> applies only past 100%. At a few hundred MB a second that is tens of GB past a 512 MB limit, enough to fill a node and stop every project on it, which V2 §10.1 says no tenant may do. Measuring projects in <code>warn</code> or <code>soft</code> with <code>pg_database_size</code> on every pass would bound it. Not reproduced; read end to end.</p>
+</div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V2 §10.4 and §10.8 say a hard lock and a suspension revoke <code>CONNECT</code> from the project's login roles. The code sets <code>NOLOGIN</code> on them instead, which also covers routes the poolers keep, and leaves the console logins able to connect.</p>
+</div>
+
+<h3 id="security--reaper">The statement reaper</h3>
+<p><code>statement_timeout</code> is user-settable, so it cannot be the guard. Every 15 seconds <x-ref path="internal/tenancy/reaper.go" symbol="func (s *Service) Reap("><code>Reap</code></x-ref> connects to each shared cluster as its admin and looks at the client backends in its project databases, other than its own:</p>
+<x-code path="internal/tenancy/reaper.go" start="SELECT pid, datname, usename, state" end="dbs, now, s.cfg.StatementLimit.String()" lang="sql" caption="reapInstance: active for over 10 minutes since the statement began, or idle in a transaction for over 5"/>
+<p>A long statement is cancelled with <code>pg_cancel_backend</code>; a session idle in a transaction is ended with <code>pg_terminate_backend</code>. Each one acted on is recorded in <code>reaped_sessions</code> with the first 1,000 characters of its query (kept 30 days, <x-page id="data-model--retention"/>) and shown in the project's activity view. Durations are measured against the service clock. Dedicated instances are exempt. The admin's own sessions are excluded; Xenibase's other logins in a project database (the console, restores, moves) are not.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A statement that catches the cancel runs for ever.</strong> PL/pgSQL can trap <code>query_canceled</code> explicitly (only <code>WHEN OTHERS</code> excludes it). A tenant runs <code>DO $$ BEGIN LOOP BEGIN PERFORM pg_sleep(600); EXCEPTION WHEN query_canceled THEN NULL; END; END LOOP; END $$</code>, or any heavy query inside such a block. At 10 minutes the reaper's <code>pg_cancel_backend</code> returns true and the block resumes; <code>query_start</code> does not change, so every 15 seconds after that the reaper cancels it again, records another reaped row and reports success, and the session never ends. Reproduced on Postgres 16: three cancels 1 second apart were each caught, with <code>query_start</code> unchanged, and the block returned normally. A tenant can keep a CPU-heavy statement running indefinitely on a shared cluster, which is what the reaper exists to prevent, and write 5,760 <code>reaped_sessions</code> rows a day per session. The reaper should terminate a backend it already cancelled that is still running the same statement (same <code>pid</code> and <code>query_start</code>) on its next pass.</p>
+</div>
+
+<h3>Usage recording</h3>
+<p><x-ref path="internal/tenancy/usage.go" symbol="func (s *Service) RecordUsage("><code>RecordUsage</code></x-ref> records every completed hour since a watermark under an advisory lock, one server at a time, and redoes the last recorded hour because points can land late. Rows are upserted, so a repeated run changes nothing, and carry the organisation's plan at the time. Hourly rows roll up to daily after 90 days. The metrics and how they are priced are on <x-page id="billing"/>.</p>
+
+<h3 id="security--suspension">Suspension</h3>
+<p><x-ref path="internal/tenancy/lifecycle.go" symbol="func (s *Service) Suspend("><code>Suspend</code></x-ref> takes a reason of up to 1,000 characters, takes a final backup of each active project while it still answers, marks the organisation suspended, then switches its logins off (<x-ref path="internal/tenancy/lifecycle.go" symbol="func (s *Service) setOrgLogins("><code>setOrgLogins</code></x-ref>) and emails the owners. <code>Reinstate</code> reverses it, and also cancels a pending deletion.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Surface</th><th>While the organisation is suspended</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td>Postgres logins</td><td>The owner, the V1 owner, members' logins and the five backend-service logins become <code>NOLOGIN</code>; their sessions end</td><td><code>SetLogins</code>, <x-ref path="internal/provision/logins.go" symbol="func (s *Service) ProjectLogins("><code>ProjectLogins</code></x-ref></td></tr>
+    <tr><td>Poolers</td><td>The databases' clients are killed, and the next sync leaves the organisation's routes out</td><td><code>PoolerRoutes</code> (<x-page id="connections--files"/>)</td></tr>
+    <tr><td>Edge</td><td>Requests answer <code>project_suspended</code>; open WebSockets close</td><td><x-page id="realtime--lifecycle"/></td></tr>
+    <tr><td>Web API and tokens</td><td>Members can sign in and view; mutating calls answer <code>org_suspended</code>; API tokens are refused</td><td><x-page id="control-plane--guard"/></td></tr>
+    <tr><td>Webhooks, jobs, outbound</td><td>Events queue in the outbox; job runs are skipped; <code>outbound.Gate</code> refuses</td><td><x-page id="webhooks-jobs--deliver"/></td></tr>
+    <tr><td>Backups, branch expiry</td><td>Scheduled backups and branch expiry pause</td><td><x-page id="backups--schedule"/>, <x-page id="branching--keep"/></td></tr>
+    <tr><td>Dedicated instances</td><td>Keep running, with the logins above off</td><td>—</td></tr>
+  </tbody>
+</table></div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Suspension leaves the logins a dedicated project's owner created able to log in.</strong> With role management on, the owner's migrations create logins of their own (such as an app login), recorded in <code>project_owned_logins</code> and synced to the poolers. <code>ProjectLogins</code> lists the owner, the V1 owner, <code>project_db_users</code> and the service roles, not owned logins, so <code>SetLogins</code> leaves them <code>LOGIN</code> and does not end their sessions. The pooler routes go, so the public path closes, but the instance still accepts them from <code>XENIBASE_AGENT_DB_ALLOW</code> (every private range by default for an agent installed by hand, <x-page id="connections--allowlist"/>), for example from another organisation's dedicated <code>postgres_fdw</code>; sessions opened that way before the suspension carry on. <code>isocheck</code> audits only shared clusters, so nothing reports it. <code>ProjectLogins</code> should include the owned logins (they are re-synced from the instance, so their names are known). Low: it needs a foothold on the private network.</p>
+</div>
+
+<h3>Break-glass, dedicated allowances, deletion</h3>
+<ul>
+  <li><strong>Break-glass.</strong> <x-ref path="internal/tenancy/lifecycle.go" symbol="func (s *Service) StartBreakGlass("><code>StartBreakGlass</code></x-ref> lets a platform admin who is not a member act as an org admin for 1 minute to 4 hours, with a reason. The expiry is the database's clock, as the authorisation check reads it; every owner is emailed at once, any owner can end it, and actions are flagged in both audit logs.</li>
+  <li><strong>Dedicated allowance.</strong> <x-ref path="internal/tenancy/quotas.go" symbol="func (s *Service) WithinAllowance("><code>WithinAllowance</code></x-ref> and <code>WithinAllowanceChange</code> compare the organisation's instances, vCPU, memory and disk in use plus the request against its allowance; beyond it, a promotion becomes a request the platform admin approves (V2 §10.6). The <code>Unlimited</code> plan skips the check.</li>
+  <li><strong>Organisation deletion.</strong> <x-ref path="internal/tenancy/lifecycle.go" symbol="func (s *Service) RequestOrgDeletion("><code>RequestOrgDeletion</code></x-ref> needs the name typed, refuses a personal organisation, switches logins off at once, and sets a 7-day grace period. <x-ref path="internal/tenancy/lifecycle.go" symbol="func (s *Service) FinishOrgDeletions("><code>FinishOrgDeletions</code></x-ref> then deletes each project (each with a final backup), and once none is left, in one transaction, keeps final backups for 30 days and removes invitations and memberships.</li>
+</ul>
+
+<h2 id="security--outbound">Outbound requests and signatures</h2>
+<p>Webhooks, HTTP jobs, a project's own SMTP server and SMS provider, and import sources are the only ways a tenant makes Xenibase open a connection. All of them go through <x-ref path="internal/outbound/outbound.go"><code>outbound</code></x-ref>. <x-page id="webhooks-jobs--outbound"/> follows a delivery through it; the rules are these:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Destination</th><th>Webhooks, jobs, SMTP, SMS (<code>Check</code>)</th><th>Database sources (<code>CheckSource</code>)</th></tr></thead>
+  <tbody>
+    <tr><td>Public address</td><td>Allowed, <code>https://</code> only</td><td>Allowed</td></tr>
+    <tr><td>RFC 1918, CGNAT, loopback, unique local, multicast, other special ranges</td><td>Only if the platform admin allow-listed the host for the organisation; then <code>http://</code> too</td><td>Private ranges only if allow-listed; loopback never</td></tr>
+    <tr><td>Link-local and metadata (169.254.0.0/16, <code>fe80::/10</code>, <code>fd00:ec2::254</code>)</td><td>Never</td><td>Never</td></tr>
+    <tr><td>Xenibase's own nodes, instances and networks</td><td>Like any address of their kind</td><td>Never, even allow-listed (<code>PlatformAddrs</code>, <code>Internal</code>)</td></tr>
+  </tbody>
+</table></div>
+<p>Every resolved address must pass, after <x-ref path="internal/outbound/outbound.go" symbol="func canon("><code>canon</code></x-ref> maps IPv4-mapped, NAT64 and 6to4 addresses to the IPv4 they embed. The connection is pinned to the checked address, without proxies or redirects. <x-ref path="internal/outbound/outbound.go" symbol="func (s *Service) Gate("><code>Gate</code></x-ref> refuses a suspended organisation or one with outbound traffic off. Requests are counted per organisation, host and day, and the counts swept after 30 days (V2 §10.7).</p>
+<p>The signature is <x-ref path="internal/signature/signature.go"><code>signature</code></x-ref>: <code>Xenibase-Signature: t=&lt;unix&gt;,v1=&lt;hex HMAC-SHA256 of "t.body"&gt;</code>, one <code>v1</code> per secret during a rotation's overlap. <x-ref path="internal/signature/signature.go" symbol="func Verify("><code>Verify</code></x-ref> refuses a timestamp outside the receiver's tolerance and compares in constant time. The package has no dependencies, so <code>xenibase-status</code> uses it for the server's pushes too. The edge's feed uses its own scheme over method, URI and body (<x-page id="connections--edge"/>).</p>
+
+<h2 id="security--tests">The isolation tests and the security review</h2>
+<p><x-ref path="test/isolation/isolation_test.go" symbol="func TestTenantIsolation("><code>TestTenantIsolation</code></x-ref> creates two projects through the API, has B keep a table and a schema, and runs A through the probes above and more, through both poolers and directly: B's role with A's password, B's objects by name, <code>pageinspect</code> and <code>pg_buffercache</code>, and the timeouts it starts with. <code>TestClusterConfiguration</code> runs <code>isocheck.Cluster</code>. <x-ref path="test/isolation/isolation_test.go" symbol="func TestLiveIsolationCheck("><code>TestLiveIsolationCheck</code></x-ref> runs the operation through the API, breaks ten checklist items one at a time and a suspended project's owner switched back on, and requires a finding for each. The suite runs in CI on every push; the live check covers production.</p>
+<p><x-ref path="docs/security-review.md"><code>docs/security-review.md</code></x-ref> maps each item of V1 §7 and the V2, V3 and V4 surfaces to its code and tests, with the findings of each review. Against this commit it is current in substance, with these exceptions:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>The review says</th><th>The code</th></tr></thead>
+  <tbody>
+    <tr><td>Rotation "re-encrypts everything … then proves the new key alone opens it all"</td><td>True of sealed values; the derived passwords and URL keys change and break backend services (<a href="#security--master-key">above</a>)</td></tr>
+    <tr><td>The live check runs nightly (top) and weekly (sign-off)</td><td>Every 24 hours</td></tr>
+    <tr><td><code>isocheck.Roles</code> checks project roles</td><td>Not the five backend-service logins, and only <code>PUBLIC</code>'s database grants</td></tr>
+    <tr><td>The reaper "ends long statements" (<code>TestReaperEndsLongStatements</code>)</td><td>It cancels them; a statement that catches the cancel is not ended</td></tr>
+    <tr><td>The extension allow-list is enforced by the API</td><td>The API's own creates; tenants can create trusted extensions themselves</td></tr>
+    <tr><td>Activity hidden (<code>pg_stat_*</code>)</td><td>Yes, but <code>pg_locks</code> still shows every backend's database</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="security--failures">Failure handling</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>What fails</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>The master key is missing, or not 32 bytes of base64</td><td>The server refuses to start, naming the variable.</td></tr>
+    <tr><td>A sealed value was sealed under a key the keyring does not hold</td><td><code>ErrUnknownKey</code> wherever it is read. A rotation fails with the kind of secret and a hint about <code>XENIBASE_MASTER_KEY_PREVIOUS</code>, and rolls back.</td></tr>
+    <tr><td>Rotation's verify step fails after the commit</td><td>The command exits with an error naming the secret; the old key is still needed, so keep it in <code>XENIBASE_MASTER_KEY_PREVIOUS</code>.</td></tr>
+    <tr><td>An isolation finding</td><td>The check fails permanently, with every finding in its log, and the critical <code>isolation_check_failed</code> alert fires until a later check passes.</td></tr>
+    <tr><td>The check cannot connect, or a probe returns an error that is not a refusal</td><td>The operation fails after two attempts and raises the same alert. The probe tenants are dropped in a deferred call; leftovers are dropped at the next run's start.</td></tr>
+    <tr><td>A shared cluster is not <code>running</code></td><td>It is not checked, and no alert says so.</td></tr>
+    <tr><td>A size sample is missing for 30 minutes</td><td>The project is skipped by storage enforcement; its state stays as it was.</td></tr>
+    <tr><td>A storage lock cannot be applied (instance down)</td><td>The state is not recorded, so the next pass tries again.</td></tr>
+    <tr><td>A reaper cancel fails, or one cluster cannot be reached</td><td>Logged; the other clusters are still reaped, and the next pass in 15 seconds tries again.</td></tr>
+    <tr><td>Suspension's final backup fails</td><td>Logged as a warning; the suspension goes ahead.</td></tr>
+    <tr><td>Switching an organisation's logins fails on one instance</td><td><code>Suspend</code> returns the error after the organisation is marked suspended; its routes are still removed, and <code>isocheck</code> reports a shared project whose logins remain on.</td></tr>
+    <tr><td>An outbound destination resolves to a refused address at send time</td><td>The request is not sent; a webhook delivery dead-letters at once (<x-page id="webhooks-jobs--retries"/>).</td></tr>
+  </tbody>
+</table></div>
