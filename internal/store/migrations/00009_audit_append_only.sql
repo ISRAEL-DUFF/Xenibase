@@ -1,5 +1,9 @@
--- The audit log is append-only (spec §7.5): rows can be added, never
--- changed or removed, even by xenibase-server itself.
+-- The audit log is append-only (spec §7.5): the triggers refuse UPDATE,
+-- DELETE and TRUNCATE from any role, so no query xenibase-server runs can
+-- change or remove a row. They stop mistakes and SQL injection through the
+-- server's queries, not a compromised server: xenibase-server connects as
+-- the role that owns the table, which can DISABLE TRIGGER or drop it
+-- (docs/security-review.md §7.5).
 -- +goose Up
 -- +goose StatementBegin
 CREATE FUNCTION audit_log_append_only() RETURNS trigger LANGUAGE plpgsql AS $$

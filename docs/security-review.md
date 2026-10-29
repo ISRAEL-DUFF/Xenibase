@@ -73,6 +73,21 @@ Every mutating API call writes a row with operator, action, target, IP, user
 agent, time, and outcome (`guard` in `internal/api/security.go`). The table
 is append-only in the database itself: triggers refuse `UPDATE`, `DELETE`,
 and `TRUNCATE` (`TestAuditLogIsAppendOnly`). It is filterable at `/audit`.
+A row the database refuses is retried rather than dropped
+([operations](operations.md#the-audit-log)).
+
+What the triggers do not do: stop a compromised xenibase-server. The server
+connects as the role that ran the migrations and owns every table (in the
+Compose bundle, the metadata database's superuser), so it can
+`ALTER TABLE audit_log DISABLE TRIGGER` or drop the table. They stop a bug,
+a mistaken statement in the SQL shell, or SQL injection through the
+server's queries from changing history, not someone who controls the
+server or its database credentials. Making the log hold against that needs
+the migrations run by a separate owner and the server connecting as a role
+with only `SELECT, INSERT` on `audit_log`; that is not done (it changes every
+install's database roles and the upgrade path). Until then, for a log the
+server cannot rewrite, ship the server's logs or a logical replica of
+`audit_log` somewhere it cannot reach.
 
 ## Transport and network
 
@@ -286,6 +301,8 @@ vulnerabilities in both; the Go toolchain is 1.25.13.
 - Operators with shell access to a node can read container environments
   (instance admin passwords, S3 credentials, the WAL-G key), as they can
   read the data itself.
+- The audit log is append-only against the server's queries, not against
+  the server: it owns the table and could disable the triggers (§7.5).
 
 Sign-off: every §7.1 item is enforced at create and verified automatically
 in CI and weekly on live clusters; §7.2–7.5 items are implemented and

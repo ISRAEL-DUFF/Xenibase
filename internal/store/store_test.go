@@ -105,6 +105,22 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'test.append'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("audit rows: %d %v", n, err)
 	}
+
+	// What the triggers don't do, as migration 00009 and
+	// docs/security-review.md §7.5 say: the role xenibase-server connects as
+	// owns the table and can switch them off. If this ever fails (the
+	// server runs as a role that can only SELECT and INSERT), update both.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update_delete`); err != nil {
+		t.Fatalf("the owner could not disable the trigger (update the docs): %v", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM audit_log`); err != nil {
+		t.Fatalf("delete with the trigger disabled: %v", err)
+	}
 }
 
 // A release must not run on a database a newer one migrated: its queries
