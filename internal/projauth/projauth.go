@@ -628,8 +628,28 @@ func codeHash(id uuid.UUID, code string) string {
 }
 
 // NewCode makes a code and link for userID's kind, to target (an email
-// address); it replaces the user's earlier ones of that kind.
+// address); it replaces the user's earlier ones of that kind. It keeps
+// the password the code it replaces was sent with (a sign-up code sent
+// again).
 func NewCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target string, ttl time.Duration) (Code, error) {
+	return newCode(ctx, q, userID, kind, target, ttl, nil)
+}
+
+// NewPasswordCode is NewCode for a request that set the user's password
+// to passwordHash: the code records it, so whoever uses the code keeps
+// that password only while it is still the user's (KeepsPassword).
+func NewPasswordCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target string, ttl time.Duration, passwordHash string) (Code, error) {
+	sha := passwordSHA(passwordHash)
+	return newCode(ctx, q, userID, kind, target, ttl, &sha)
+}
+
+// passwordSHA is what a code records of a password hash.
+func passwordSHA(h string) string {
+	s := sha256.Sum256([]byte("password:" + h))
+	return hex.EncodeToString(s[:])
+}
+
+func newCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target string, ttl time.Duration, password *string) (Code, error) {
 	code, err := randomDigits(codeDigits)
 	if err != nil {
 		return Code{}, err
@@ -639,12 +659,11 @@ func NewCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target stri
 		return Code{}, err
 	}
 	tok := base64.RawURLEncoding.EncodeToString(b)
-	if _, err := q.Exec(ctx, `DELETE FROM xb_auth.one_time_codes WHERE user_id = $1 AND kind = $2`, userID, kind); err != nil {
-		return Code{}, err
-	}
 	id := uuid.New()
-	_, err = q.Exec(ctx, `INSERT INTO xb_auth.one_time_codes (id, user_id, kind, target, code_hash, token_hash, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, id, userID, kind, NormalizeEmail(target), codeHash(id, code), hashToken(tok), time.Now().Add(ttl))
+	_, err = q.Exec(ctx, `WITH old AS (DELETE FROM xb_auth.one_time_codes WHERE user_id = $2 AND kind = $3 RETURNING password_sha, created_at)
+		INSERT INTO xb_auth.one_time_codes (id, user_id, kind, target, code_hash, token_hash, expires_at, password_sha)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8, (SELECT password_sha FROM old ORDER BY created_at DESC LIMIT 1)))`,
+		id, userID, kind, NormalizeEmail(target), codeHash(id, code), hashToken(tok), time.Now().Add(ttl), password)
 	return Code{Code: code, Token: tok}, err
 }
 
@@ -664,6 +683,18 @@ type Verified struct {
 	// OK is false for a wrong or expired code; the attempt is counted,
 	// so the caller commits.
 	OK bool
+	// passwordSHA records the password the request that sent the code
+	// set (NewPasswordCode), if it set one.
+	passwordSHA *string
+}
+
+// KeepsPassword reports whether u's password is the one the request that
+// sent the code set. A code proving an address for the first time keeps
+// only that password: one set by anyone else (whoever signed up with the
+// address before its owner) is cleared.
+func (v Verified) KeepsPassword(u *User) bool {
+	return u.passwordHash != nil && v.passwordSHA != nil &&
+		subtle.ConstantTimeCompare([]byte(passwordSHA(*u.passwordHash)), []byte(*v.passwordSHA)) == 1
 }
 
 // VerifyCode checks a 6-digit code sent to target for one of kinds; a
@@ -672,9 +703,10 @@ func VerifyCode(ctx context.Context, q Querier, target string, kinds []string, c
 	var id, uid uuid.UUID
 	var kind, hash string
 	var attempts int
-	err := q.QueryRow(ctx, `SELECT id, user_id, kind, code_hash, attempts FROM xb_auth.one_time_codes
+	var password *string
+	err := q.QueryRow(ctx, `SELECT id, user_id, kind, code_hash, attempts, password_sha FROM xb_auth.one_time_codes
 		WHERE target = $1 AND kind = ANY($2) AND expires_at > now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-		NormalizeEmail(target), kinds).Scan(&id, &uid, &kind, &hash, &attempts)
+		NormalizeEmail(target), kinds).Scan(&id, &uid, &kind, &hash, &attempts, &password)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Verified{}, nil
 	}
@@ -692,14 +724,14 @@ func VerifyCode(ctx context.Context, q Querier, target string, kinds []string, c
 		return Verified{}, err
 	}
 	_, err = q.Exec(ctx, `DELETE FROM xb_auth.one_time_codes WHERE id = $1`, id)
-	return Verified{UserID: uid, Kind: kind, Target: NormalizeEmail(target), OK: true}, err
+	return Verified{UserID: uid, Kind: kind, Target: NormalizeEmail(target), OK: true, passwordSHA: password}, err
 }
 
 // VerifyToken uses a link's token, if it is one of kinds and not expired.
 func VerifyToken(ctx context.Context, q Querier, token string, kinds []string) (Verified, error) {
 	var v Verified
 	err := q.QueryRow(ctx, `DELETE FROM xb_auth.one_time_codes WHERE token_hash = $1 AND kind = ANY($2) AND expires_at > now()
-		RETURNING user_id, kind, target`, hashToken(token), kinds).Scan(&v.UserID, &v.Kind, &v.Target)
+		RETURNING user_id, kind, target, password_sha`, hashToken(token), kinds).Scan(&v.UserID, &v.Kind, &v.Target, &v.passwordSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Verified{}, nil
 	}

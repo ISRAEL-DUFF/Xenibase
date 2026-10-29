@@ -31,6 +31,19 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A squatter's password no longer survives the owner's sign-up.**
+  Someone who signed up first with another person's address kept their
+  password: when the owner signed up too, the unconfirmed row was only
+  sent a new code, the owner's password was dropped, and confirming kept
+  the squatter's, who could then sign in. The same held for an admin-API
+  invitation of a squatted address and for phone sign-up. Signing up again
+  before confirming (by email or phone, or a sign-up link from the admin
+  API) now replaces the password and ends the row's sessions, and each
+  code records the password its request set (project schema version 10
+  adds `xb_auth.one_time_codes.password_sha`). A `signup`, `invite` or
+  `phone_signup` code that first proves the address or number clears any
+  other password and ends the sessions; `/resend` keeps the password of
+  the sign-up it repeats.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a

@@ -121,9 +121,16 @@ func phoneTooSoon(ctx context.Context, tx pgx.Tx, phone string, kinds []string) 
 	return nil, nil
 }
 
-// newPhoneCode makes and sends a code of kind to phone for user uid.
-func (e *Edge) newPhoneCode(ctx context.Context, c *call, tx pgx.Tx, uid uuid.UUID, kind, channel, phone string) error {
-	code, err := projauth.NewCode(ctx, tx, uid, kind, phone, projauth.CodeTTL)
+// newPhoneCode makes and sends a code of kind to phone for user uid;
+// passwordHash is the password the request set ("" for none).
+func (e *Edge) newPhoneCode(ctx context.Context, c *call, tx pgx.Tx, uid uuid.UUID, kind, channel, phone, passwordHash string) error {
+	var code projauth.Code
+	var err error
+	if passwordHash != "" {
+		code, err = projauth.NewPasswordCode(ctx, tx, uid, kind, phone, projauth.CodeTTL, passwordHash)
+	} else {
+		code, err = projauth.NewCode(ctx, tx, uid, kind, phone, projauth.CodeTTL)
+	}
 	if err != nil {
 		return err
 	}
@@ -176,10 +183,22 @@ func (e *Edge) signupPhone(c *call, raw, channel, password string, data json.Raw
 			if existing.PhoneConfirmedAt != nil {
 				return nil
 			}
+			// Unconfirmed: as for an email address, this request's password
+			// replaces whoever's signed up with the number before.
+			set := ""
+			if existing.EmailConfirmedAt == nil {
+				if _, err := projauth.UpdateUser(ctx, tx, existing.ID, projauth.Update{PasswordHash: &hash}); err != nil {
+					return err
+				}
+				if _, err := projauth.EndSessions(ctx, tx, existing.ID, nil); err != nil {
+					return err
+				}
+				set = hash
+			}
 			if soon, err := phoneTooSoon(ctx, tx, phone, []string{projauth.CodePhoneSignup}); err != nil || soon != nil {
 				return err
 			}
-			return e.newPhoneCode(ctx, c, tx, existing.ID, projauth.CodePhoneSignup, channel, phone)
+			return e.newPhoneCode(ctx, c, tx, existing.ID, projauth.CodePhoneSignup, channel, phone, set)
 		}
 		u, err := e.createUser(ctx, c, tx, projauth.NewUser{Phone: phone, PasswordHash: hash, PhoneConfirmed: !a.PhoneConfirm,
 			UserMetadata: data}, "phone")
@@ -194,7 +213,7 @@ func (e *Edge) signupPhone(c *call, raw, channel, password string, data json.Raw
 			out = &t
 			return err
 		}
-		return e.newPhoneCode(ctx, c, tx, u.ID, projauth.CodePhoneSignup, channel, phone)
+		return e.newPhoneCode(ctx, c, tx, u.ID, projauth.CodePhoneSignup, channel, phone, hash)
 	})
 	if err != nil {
 		e.authDBError(c, err)
@@ -243,7 +262,7 @@ func (e *Edge) signinPhoneOTP(c *call, raw, channel string, create bool, data js
 		if u.Banned(time.Now()) {
 			return nil
 		}
-		return e.newPhoneCode(ctx, c, tx, u.ID, projauth.CodePhone, channel, phone)
+		return e.newPhoneCode(ctx, c, tx, u.ID, projauth.CodePhone, channel, phone, "")
 	})
 	if err != nil {
 		e.authDBError(c, err)
@@ -265,7 +284,9 @@ func (e *Edge) usePhoneVerified(ctx context.Context, c *call, tx pgx.Tx, u *proj
 		}
 		// A sign-in code proves the number for the first time: a password
 		// set by whoever signed up with it unconfirmed doesn't come with it.
-		if v.Kind == projauth.CodePhone && u.PhoneConfirmedAt == nil && u.HasPassword() && u.EmailConfirmedAt == nil {
+		// A sign-up code keeps only the password its own request set.
+		drop := v.Kind == projauth.CodePhone || (v.Kind == projauth.CodePhoneSignup && !v.KeepsPassword(u))
+		if drop && u.PhoneConfirmedAt == nil && u.HasPassword() && u.EmailConfirmedAt == nil {
 			none := ""
 			up.PasswordHash = &none
 			if _, err := projauth.EndSessions(ctx, tx, u.ID, nil); err != nil {

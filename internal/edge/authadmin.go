@@ -271,7 +271,9 @@ func (e *Edge) adminSignOut(c *call, id uuid.UUID) {
 }
 
 // linkFor makes a code of kind for email (creating an invited user when
-// asked) and returns the user and the code.
+// asked) and returns the user and the code. password is the hash of the
+// password a sign-up link sets ("" for none): it replaces the password of
+// an unconfirmed user, which whoever signed up first may have set.
 func linkFor(ctx context.Context, tx pgx.Tx, kind, email string, createInvited bool, password string, data json.RawMessage) (*projauth.User, projauth.Code, error) {
 	u, err := projauth.UserByEmail(ctx, tx, email, true)
 	if errors.Is(err, projauth.ErrNotFound) && createInvited {
@@ -280,6 +282,10 @@ func linkFor(ctx context.Context, tx pgx.Tx, kind, email string, createInvited b
 		if err == nil {
 			err = projauth.EnsureEmailIdentity(ctx, tx, u.ID, email)
 		}
+	} else if err == nil && password != "" && u.EmailConfirmedAt == nil && u.PhoneConfirmedAt == nil {
+		if u, err = projauth.UpdateUser(ctx, tx, u.ID, projauth.Update{PasswordHash: &password}); err == nil {
+			_, err = projauth.EndSessions(ctx, tx, u.ID, nil)
+		}
 	}
 	if err != nil {
 		return nil, projauth.Code{}, err
@@ -287,6 +293,13 @@ func linkFor(ctx context.Context, tx pgx.Tx, kind, email string, createInvited b
 	ttl := projauth.CodeTTL
 	if kind == projauth.CodeInvite {
 		ttl = projauth.InviteTTL
+	}
+	// An invitation (or a sign-up link) keeps only the password this
+	// request set: one already on an unconfirmed row is cleared when the
+	// link is used (useVerified).
+	if password != "" {
+		code, err := projauth.NewPasswordCode(ctx, tx, u.ID, kind, email, ttl, password)
+		return u, code, err
 	}
 	code, err := projauth.NewCode(ctx, tx, u.ID, kind, email, ttl)
 	return u, code, err

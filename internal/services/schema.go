@@ -528,6 +528,12 @@ var schemaVersions = []schemaVersion{
 		  FROM PUBLIC, {{owner}}, {{anon}}, {{hook}}`,
 		`GRANT EXECUTE ON FUNCTION xb_auth.idempotency_claim(text, text), xb_auth.idempotency_store(text, int, text) TO {{user}}, {{service}}`,
 	}},
+	{10, []string{
+		// Project auth: a code records the password the request that sent
+		// it set (a hash of its hash), so confirming an address keeps only
+		// that password, not one a squatter set before the owner signed up.
+		`ALTER TABLE xb_auth.one_time_codes ADD COLUMN IF NOT EXISTS password_sha text`,
+	}},
 }
 
 // exposureStmts let the request roles use what the owner makes in an

@@ -607,11 +607,27 @@ func (e *Edge) signup(c *call) {
 				}
 				return nil // confirmed already: answer as for a new address
 			}
-			// Unconfirmed: send the confirmation again (within the rate).
+			// Unconfirmed: whoever signed up before may not be the address's
+			// owner, so this request's password replaces theirs and their
+			// sessions end. The confirmation goes again (within the rate);
+			// a code sent before keeps no password now.
+			if existing.PhoneConfirmedAt == nil {
+				if _, err := projauth.UpdateUser(ctx, tx, existing.ID, projauth.Update{PasswordHash: &hash}); err != nil {
+					return err
+				}
+				if _, err := projauth.EndSessions(ctx, tx, existing.ID, nil); err != nil {
+					return err
+				}
+			}
 			if soon, err := tooSoon(ctx, tx, email, []string{projauth.CodeSignup}); err != nil || soon != nil {
 				return err
 			}
-			code, err := projauth.NewCode(ctx, tx, existing.ID, projauth.CodeSignup, email, projauth.CodeTTL)
+			var code projauth.Code
+			if existing.PhoneConfirmedAt == nil {
+				code, err = projauth.NewPasswordCode(ctx, tx, existing.ID, projauth.CodeSignup, email, projauth.CodeTTL, hash)
+			} else {
+				code, err = projauth.NewCode(ctx, tx, existing.ID, projauth.CodeSignup, email, projauth.CodeTTL)
+			}
 			if err != nil {
 				return err
 			}
@@ -626,7 +642,7 @@ func (e *Edge) signup(c *call) {
 			return err
 		}
 		if a.EmailConfirm {
-			code, err := projauth.NewCode(ctx, tx, u.ID, projauth.CodeSignup, email, projauth.CodeTTL)
+			code, err := projauth.NewPasswordCode(ctx, tx, u.ID, projauth.CodeSignup, email, projauth.CodeTTL, hash)
 			if err != nil {
 				return err
 			}
@@ -886,8 +902,15 @@ func (e *Edge) useVerified(ctx context.Context, c *call, tx pgx.Tx, v projauth.V
 	action := projauth.ActConfirmed
 	// A magic link or reset proves the address for the first time: a
 	// password (and sessions) set before by whoever signed up with it
-	// unconfirmed must not come with it (pre-registration takeover).
-	if u.EmailConfirmedAt == nil && (v.Kind == projauth.CodeMagicLink || v.Kind == projauth.CodeRecovery) {
+	// unconfirmed must not come with it (pre-registration takeover). A
+	// sign-up confirmation or an invitation keeps only the password the
+	// request that sent it set: not a squatter's, kept through the owner's
+	// own sign-up or an invitation.
+	drop := v.Kind == projauth.CodeMagicLink || v.Kind == projauth.CodeRecovery
+	if v.Kind == projauth.CodeSignup || v.Kind == projauth.CodeInvite {
+		drop = u.PhoneConfirmedAt == nil && u.HasPassword() && !v.KeepsPassword(u)
+	}
+	if u.EmailConfirmedAt == nil && drop {
 		if u.HasPassword() {
 			none := ""
 			up.PasswordHash = &none
@@ -1390,7 +1413,7 @@ func (e *Edge) updateUser(c *call, req Request) {
 				fail = soon
 				return err
 			}
-			return e.newPhoneCode(ctx, c, tx, uid, projauth.CodePhoneChange, channel, newPhone)
+			return e.newPhoneCode(ctx, c, tx, uid, projauth.CodePhoneChange, channel, newPhone, "")
 		}
 		return nil
 	})
