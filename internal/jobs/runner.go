@@ -187,7 +187,7 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 		timeout = DefaultTimeout
 	}
 	log := r.log.With("operation_id", op.ID, "kind", op.Kind, "attempt", op.Attempts)
-	steps := &StepLogger{q: r.q, id: op.ID, worker: r.cfg.WorkerID, slog: log}
+	steps := &StepLogger{q: r.q, id: op.ID, worker: r.cfg.WorkerID, attempt: op.Attempts, slog: log}
 
 	// Final state writes must happen even when ctx is cancelled for shutdown.
 	finishCtx := func() (context.Context, context.CancelFunc) {
@@ -228,7 +228,7 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 	defer cancel()
 	switch {
 	case err == nil:
-		if _, werr := r.q.SucceedOperation(fctx, store.SucceedOperationParams{ID: op.ID, Worker: r.cfg.WorkerID}); werr != nil {
+		if _, werr := r.q.SucceedOperation(fctx, store.SucceedOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts}); werr != nil {
 			log.Error("mark operation succeeded", "err", werr)
 		}
 		log.Info("operation succeeded")
@@ -265,20 +265,37 @@ func (r *Runner) safeOnFail(ctx context.Context, kind Kind, op store.Operation, 
 	return kind.OnFail(ctx, op, steps, cause)
 }
 
+// heartbeat renews the lease every LeaseTTL/3. It abandons the attempt
+// (closes lost and cancels it) when the row is no longer this attempt's, or
+// when heartbeats have failed for two thirds of the lease: by then another
+// worker may be about to reclaim the operation, and a worker that cannot
+// reach the metadata database must not keep running it alongside.
 func (r *Runner) heartbeat(ctx context.Context, op store.Operation, lost chan<- struct{}, cancel context.CancelFunc) {
-	t := time.NewTicker(r.cfg.LeaseTTL / 3)
+	interval := r.cfg.LeaseTTL / 3
+	t := time.NewTicker(interval)
 	defer t.Stop()
+	lastOK := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		n, err := r.q.HeartbeatOperation(ctx, store.HeartbeatOperationParams{ID: op.ID, Worker: r.cfg.WorkerID})
+		hctx, hcancel := context.WithTimeout(ctx, interval)
+		n, err := r.q.HeartbeatOperation(hctx, store.HeartbeatOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts})
+		hcancel()
 		if err != nil {
-			if ctx.Err() == nil {
-				r.log.Warn("operation heartbeat failed", "operation_id", op.ID, "err", err)
+			if ctx.Err() != nil {
+				return
 			}
+			if since := time.Since(lastOK); since >= 2*r.cfg.LeaseTTL/3 {
+				r.log.Error("operation heartbeats failing; abandoning attempt before its lease expires",
+					"operation_id", op.ID, "since_last_heartbeat", since.Round(time.Millisecond), "err", err)
+				close(lost)
+				cancel()
+				return
+			}
+			r.log.Warn("operation heartbeat failed", "operation_id", op.ID, "err", err)
 			continue
 		}
 		if n == 0 {
@@ -286,6 +303,7 @@ func (r *Runner) heartbeat(ctx context.Context, op store.Operation, lost chan<- 
 			cancel()
 			return
 		}
+		lastOK = time.Now()
 	}
 }
 
@@ -306,7 +324,7 @@ func (r *Runner) fail(parent context.Context, kind Kind, op store.Operation, ste
 	ctx, cancel := context.WithTimeout(base, 10*time.Second)
 	defer cancel()
 	_ = steps.Error(ctx, "queue", "operation failed: %v", err)
-	if _, werr := r.q.FailOperation(ctx, store.FailOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Error: err.Error()}); werr != nil {
+	if _, werr := r.q.FailOperation(ctx, store.FailOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error()}); werr != nil {
 		r.log.Error("mark operation failed", "operation_id", op.ID, "err", werr)
 	}
 	r.log.Warn("operation failed", "operation_id", op.ID, "kind", op.Kind, "err", err)
@@ -314,7 +332,7 @@ func (r *Runner) fail(parent context.Context, kind Kind, op store.Operation, ste
 
 func (r *Runner) retry(ctx context.Context, op store.Operation, err error, at time.Time) {
 	if _, werr := r.q.RetryOperation(ctx, store.RetryOperationParams{
-		ID: op.ID, Worker: r.cfg.WorkerID, Error: err.Error(), RunAfter: at,
+		ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error(), RunAfter: at,
 	}); werr != nil {
 		r.log.Error("requeue operation", "operation_id", op.ID, "err", werr)
 	}

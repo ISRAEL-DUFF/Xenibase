@@ -45,13 +45,17 @@ func TestClaimSkipsLockedAndFiltersKinds(t *testing.T) {
 	}
 
 	// Only the lock holder may write.
-	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w2"}); n != 0 {
+	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w2", Attempt: 1}); n != 0 {
 		t.Fatal("non-owner completed the operation")
 	}
-	if n, _ := q.AppendOperationLog(ctx, store.AppendOperationLogParams{ID: a.ID, Worker: "w1", Entry: json.RawMessage(`{"msg":"hi"}`)}); n != 1 {
+	// Nor may an earlier attempt of the same worker.
+	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w1", Attempt: 0}); n != 0 {
+		t.Fatal("a stale attempt completed the operation")
+	}
+	if n, _ := q.AppendOperationLog(ctx, store.AppendOperationLogParams{ID: a.ID, Worker: "w1", Attempt: 1, Entry: json.RawMessage(`{"msg":"hi"}`)}); n != 1 {
 		t.Fatal("owner could not append log")
 	}
-	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w1"}); n != 1 {
+	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w1", Attempt: 1}); n != 1 {
 		t.Fatal("owner could not complete")
 	}
 	done, err := q.GetOperation(ctx, a.ID)

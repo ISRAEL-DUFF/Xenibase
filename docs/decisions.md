@@ -18,6 +18,7 @@ The spec's own decisions log is §16.
 | 8 | Not yet enforced | The final backup on delete waits for backups (M3) and is logged as skipped. (Re-authentication for delete landed in M2.) | Milestone order. |
 | 9 | Cluster hardening at registration | `CONNECT`/`TEMPORARY` on `postgres` and `template1` are revoked from `PUBLIC`. `log_statement` and non-SCRAM `pg_hba.conf` network rules are reported as warnings. | Project roles must reach only their own database. Logging and `pg_hba.conf` are the operator's to change; the isolation suite checks them. |
 | 10 | Attempts include crashed ones | An attempt cut short by a worker crash counts toward the kind's attempt limit. | Keeps a crash-looping operation from retrying forever. |
+| 11 | The lease is fenced by attempt | Every write an attempt makes to its operation (heartbeat, step log, result) matches `locked_by` and `attempts`. An attempt whose heartbeats have failed for two thirds of the lease cancels itself and writes nothing. | A worker cut off from the metadata database must stop before another reclaims its work, and a stale attempt must not overwrite a newer one, even in the same process. |
 
 ## M2 — Auth, TLS & the web UI shell
 

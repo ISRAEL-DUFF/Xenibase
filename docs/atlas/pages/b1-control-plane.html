@@ -97,7 +97,7 @@
   <tbody>
     <tr><td>Concurrency</td><td>4</td><td>Operations run at once per process (<code>XENIBASE_WORKERS</code>).</td></tr>
     <tr><td>Poll interval</td><td>2 s</td><td>Fallback claim when no notification arrives.</td></tr>
-    <tr><td>Lease</td><td>30 s</td><td>Heartbeats every 10 s. Every worker's reclaim loop, every 15 s, requeues <code>running</code> rows whose <code>locked_at</code> is older than the lease.</td></tr>
+    <tr><td>Lease</td><td>30 s</td><td>Heartbeats every 10 s; an attempt whose heartbeats have failed for 20 s stops itself. Writes to the row must match the worker and the attempt number. Every worker's reclaim loop, every 15 s, requeues <code>running</code> rows whose <code>locked_at</code> is older than the lease.</td></tr>
     <tr><td>Retry backoff</td><td>2 s doubling to 5 min</td><td><x-ref path="internal/jobs/runner.go" symbol="func (r *Runner) backoff("><code>backoff</code></x-ref>, no jitter.</td></tr>
     <tr><td><code>MaxAttempts</code>, <code>Timeout</code></td><td>3, 30 min</td><td>Per kind. Create: 3 and 45 min. Delete: 5. Import: 1 and 12 h.</td></tr>
   </tbody>

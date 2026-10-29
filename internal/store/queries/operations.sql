@@ -33,15 +33,17 @@ WHERE id = (
 )
 RETURNING *;
 
+-- The writes below are fenced by worker and attempt: an attempt whose lease
+-- was reclaimed (even one re-claimed by the same worker) writes nothing.
 -- name: HeartbeatOperation :execrows
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations SET locked_at = now()
-WHERE id = @id AND locked_by = @worker::text AND status = 'running';
+WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
 -- name: AppendOperationLog :execrows
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations SET log = log || jsonb_build_array(@entry::jsonb)
-WHERE id = @id AND locked_by = @worker::text AND status = 'running';
+WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
 -- params.secrets carries encrypted, short-lived handoff data (for example
 -- a new password for the smoke test). It is scrubbed when an operation
@@ -50,19 +52,19 @@ WHERE id = @id AND locked_by = @worker::text AND status = 'running';
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations
 SET status = 'succeeded', error = NULL, params = params - 'secrets', finished_at = now(), locked_by = NULL, locked_at = NULL
-WHERE id = @id AND locked_by = @worker::text AND status = 'running';
+WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
 -- name: FailOperation :execrows
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations
 SET status = 'failed', error = @error::text, params = params - 'secrets', finished_at = now(), locked_by = NULL, locked_at = NULL
-WHERE id = @id AND locked_by = @worker::text AND status = 'running';
+WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
 -- name: RetryOperation :execrows
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations
 SET status = 'queued', error = @error::text, run_after = @run_after, locked_by = NULL, locked_at = NULL
-WHERE id = @id AND locked_by = @worker::text AND status = 'running';
+WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
 -- ReclaimStaleOperations requeues running operations whose worker stopped
 -- heartbeating (crashed or partitioned), so they resume elsewhere.
