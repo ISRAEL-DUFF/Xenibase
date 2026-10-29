@@ -740,6 +740,10 @@ func (e *Edge) restBroadcast(c *call, req Request) {
 		c.fail(http.StatusForbidden, "secret_key_required", "sending broadcasts over HTTP needs the secret key")
 		return
 	}
+	if c.p.cfg.Realtime.MessagesBlocked {
+		c.fail(http.StatusTooManyRequests, "realtime_quota_exceeded", "the organisation's realtime messages for this month are used up")
+		return
+	}
 	var in struct {
 		Messages []struct {
 			Topic   string          `json:"topic"`

@@ -950,7 +950,7 @@ A private channel and a public one of the same name don't hear each other.
 | | Personal | Pro | Team |
 | --- | --- | --- | --- |
 | Concurrent connections (per edge process) | 100 | 1,000 | 5,000 |
-| Messages a month | 1 million, then refused | metered | metered |
+| Messages a month | 1 million, then refused (open connections are closed) | metered | metered |
 
 Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects

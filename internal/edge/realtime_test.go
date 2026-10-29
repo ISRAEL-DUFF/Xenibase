@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -555,5 +556,45 @@ func TestRealtimeConnectionsFollowTheFeed(t *testing.T) {
 			t.Fatalf("%d connections still open on the hub", n)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRealtimeMonthlyLimitsCloseConnections: once the organisation has
+// used its month's realtime messages, or its API requests, open
+// connections are closed and HTTP broadcasts refused; a spend cap leaves
+// them open.
+func TestRealtimeMonthlyLimitsCloseConnections(t *testing.T) {
+	e, pc := rtTestEdge(t)
+	srv := rtServe(t, e)
+	update := func(change func(*edgeapi.Project)) {
+		pc.Version++
+		change(&pc)
+		e.apply([]edgeapi.Project{pc})
+	}
+	ws := rtDial(t, srv, rtTestRef, "xb_pub_rtunit")
+	update(func(p *edgeapi.Project) { p.SpendCapped = true })
+	time.Sleep(100 * time.Millisecond)
+	alive(t, ws)
+
+	update(func(p *edgeapi.Project) { p.Realtime.MessagesBlocked = true })
+	if code, reason := closedWith(t, ws); code != websocket.StatusPolicyViolation || !strings.Contains(reason, "used up") {
+		t.Fatalf("messages used up: %d %q", code, reason)
+	}
+	r := httptest.NewRequest(http.MethodPost, "http://edge/realtime/v1/api/broadcast",
+		strings.NewReader(`{"messages":[{"topic":"room","event":"x","payload":{}}]}`))
+	r.Host = rtTestRef + ".edge.test"
+	r.Header.Set("apikey", "xb_sec_rtunit")
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests || !strings.Contains(w.Body.String(), "realtime_quota_exceeded") {
+		t.Fatalf("an HTTP broadcast with the messages used up: %d %s", w.Code, w.Body)
+	}
+
+	update(func(p *edgeapi.Project) { p.Realtime.MessagesBlocked, p.SpendCapped = false, false })
+	ws = rtDial(t, srv, rtTestRef, "xb_pub_rtunit")
+	alive(t, ws)
+	update(func(p *edgeapi.Project) { p.RequestsBlocked = true })
+	if code, reason := closedWith(t, ws); code != websocket.StatusPolicyViolation || !strings.Contains(reason, "API requests") {
+		t.Fatalf("API requests used up: %d %q", code, reason)
 	}
 }

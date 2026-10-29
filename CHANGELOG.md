@@ -31,6 +31,12 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The Personal plan's monthly realtime messages now stop connections
+  already open.** Using them up (or the month's API requests) only refused
+  new connections, so clients that stayed connected kept sending and
+  receiving for the rest of the month. The edge now closes the project's
+  open connections when either limit is reached (WebSocket code 1008) and
+  refuses HTTP broadcasts with `429 realtime_quota_exceeded`.
 - **Revoking a key, suspending an organisation or turning services off now
   closes open realtime connections.** They were checked only when they
   opened: a connection made with a since-revoked secret key kept receiving

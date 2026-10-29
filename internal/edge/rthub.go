@@ -149,8 +149,9 @@ func (e *Edge) rtProjectsChanged(refs []string) {
 }
 
 // refusal is why a connection may no longer stay open, "" when it may:
-// the project left the feed (services off) or isn't active, or the key it
-// was opened with was revoked.
+// the project left the feed (services off) or isn't active, its
+// organisation used up the month's realtime messages or API requests, or
+// the key it was opened with was revoked.
 func refusal(p *project, keyID uuid.UUID) string {
 	switch {
 	case p == nil:
@@ -159,6 +160,10 @@ func refusal(p *project, keyID uuid.UUID) string {
 		return "the project's organisation is suspended"
 	case p.cfg.State != edgeapi.StateActive:
 		return "the project isn't active"
+	case p.cfg.Realtime.MessagesBlocked:
+		return "the organisation's realtime messages for this month are used up"
+	case p.cfg.RequestsBlocked:
+		return "the organisation has used its plan's API requests for the month"
 	}
 	for _, k := range p.keys {
 		if k.ID == keyID {
