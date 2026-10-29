@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -28,6 +29,8 @@ type fakeProvider struct {
 	mu       sync.Mutex
 	deleted  []string
 	onDelete func()
+	// deleteErr fails DeleteServer (after recording the attempt).
+	deleteErr error
 }
 
 func (*fakeProvider) Name() string { return cloud.Hetzner }
@@ -43,12 +46,18 @@ func (*fakeProvider) CreateServer(context.Context, cloud.ServerSpec) (cloud.Serv
 func (f *fakeProvider) DeleteServer(_ context.Context, id string) error {
 	f.mu.Lock()
 	f.deleted = append(f.deleted, id)
-	hook := f.onDelete
+	hook, err := f.onDelete, f.deleteErr
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
-	return nil
+	return err
+}
+
+func (f *fakeProvider) failDeletes(err error) {
+	f.mu.Lock()
+	f.deleteErr = err
+	f.mu.Unlock()
 }
 
 func (f *fakeProvider) deletedServers() []string {
@@ -79,6 +88,9 @@ type harness struct {
 	s    *Service
 	db   *pgxpool.Pool
 	prov *fakeProvider
+
+	mu  sync.Mutex
+	now time.Time
 }
 
 func newHarness(t *testing.T, serverMonthly int64) *harness {
@@ -102,7 +114,20 @@ func newHarness(t *testing.T, serverMonthly int64) *harness {
 		t.Fatal(err)
 	}
 	prov := &fakeProvider{monthly: serverMonthly}
-	return &harness{s: New(db, ns, nil, prov, nil, Config{Region: "eu-central", Location: "fsn1"}, quiet), db: db, prov: prov}
+	h := &harness{db: db, prov: prov, now: time.Now()}
+	h.s = New(db, ns, nil, prov, nil, Config{Region: "eu-central", Location: "fsn1", Now: func() time.Time {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.now
+	}}, quiet)
+	return h
+}
+
+// advance moves the harness's clock on.
+func (h *harness) advance(d time.Duration) {
+	h.mu.Lock()
+	h.now = h.now.Add(d)
+	h.mu.Unlock()
 }
 
 // settings saves the defaults with automatic provisioning on and a budget.

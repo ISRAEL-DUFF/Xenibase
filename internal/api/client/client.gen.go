@@ -1778,6 +1778,7 @@ const (
 	NodeLifecycleActive       NodeLifecycle = "active"
 	NodeLifecycleDraining     NodeLifecycle = "draining"
 	NodeLifecycleProvisioning NodeLifecycle = "provisioning"
+	NodeLifecycleRetiring     NodeLifecycle = "retiring"
 )
 
 // Valid indicates whether the value is a known member of the NodeLifecycle enum.
@@ -1788,6 +1789,8 @@ func (e NodeLifecycle) Valid() bool {
 	case NodeLifecycleDraining:
 		return true
 	case NodeLifecycleProvisioning:
+		return true
+	case NodeLifecycleRetiring:
 		return true
 	default:
 		return false
@@ -7163,8 +7166,10 @@ type Node struct {
 	Id                 openapi_types.UUID `json:"id"`
 
 	// Keep Never deleted for being empty.
-	Keep             *bool          `json:"keep,omitempty"`
-	LastHeartbeat    *time.Time     `json:"last_heartbeat,omitempty"`
+	Keep          *bool      `json:"keep,omitempty"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+
+	// Lifecycle retiring is an empty node out of placement whose server is about to be deleted.
 	Lifecycle        *NodeLifecycle `json:"lifecycle,omitempty"`
 	MonthlyCostMinor *int64         `json:"monthly_cost_minor,omitempty"`
 	Name             string         `json:"name"`
@@ -7181,7 +7186,7 @@ type Node struct {
 	Status     string  `json:"status"`
 }
 
-// NodeLifecycle defines model for Node.Lifecycle.
+// NodeLifecycle retiring is an empty node out of placement whose server is about to be deleted.
 type NodeLifecycle string
 
 // NodeCost defines model for NodeCost.

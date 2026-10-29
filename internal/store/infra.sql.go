@@ -540,7 +540,7 @@ func (q *Queries) OrgSharedInstances(ctx context.Context, orgID *uuid.UUID) ([]O
 }
 
 const pickDedicatedNode = `-- name: PickDedicatedNode :one
-SELECT n.id, n.name, n.private_addr, n.agent_port, n.role, n.agent_cert_fp, n.pg_admin_secret, n.capacity, n.status, n.last_heartbeat, n.created_at, n.agent_host, n.agent_version, n.registration_token, n.registration_expires_at, n.last_reachable_at, n.provider_server_id, n.pooler_generation, n.pooler_hash, n.pooler_vrrp_state, n.pooler_ready, n.pooler_checked_at, n.provider, n.region, n.server_type, n.monthly_cost_minor, n.cost_currency, n.lifecycle, n.empty_since, n.keep, n.failure_domain, n.placement_group FROM nodes n
+SELECT n.id, n.name, n.private_addr, n.agent_port, n.role, n.agent_cert_fp, n.pg_admin_secret, n.capacity, n.status, n.last_heartbeat, n.created_at, n.agent_host, n.agent_version, n.registration_token, n.registration_expires_at, n.last_reachable_at, n.provider_server_id, n.pooler_generation, n.pooler_hash, n.pooler_vrrp_state, n.pooler_ready, n.pooler_checked_at, n.provider, n.region, n.server_type, n.monthly_cost_minor, n.cost_currency, n.lifecycle, n.empty_since, n.keep, n.failure_domain, n.placement_group, n.retiring_at, n.retiring_from FROM nodes n
 WHERE n.role IN ('dedicated', 'both') AND n.status = 'healthy' AND n.lifecycle = 'active' AND n.agent_cert_fp IS NOT NULL
   AND n.region = $1
 ORDER BY (SELECT count(*) FROM instances i WHERE i.node_id = n.id AND i.kind = 'dedicated' AND i.deleted_at IS NULL), n.created_at
@@ -586,6 +586,8 @@ func (q *Queries) PickDedicatedNode(ctx context.Context, region string) (Node, e
 		&i.Keep,
 		&i.FailureDomain,
 		&i.PlacementGroup,
+		&i.RetiringAt,
+		&i.RetiringFrom,
 	)
 	return i, err
 }
@@ -815,7 +817,7 @@ INSERT INTO nodes (name, private_addr, role, pg_admin_secret, capacity)
 VALUES ($1, $2, $3, $4, '{}')
 ON CONFLICT (name) DO UPDATE
 SET private_addr = EXCLUDED.private_addr, pg_admin_secret = EXCLUDED.pg_admin_secret
-RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group
+RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from
 `
 
 type UpsertNodeParams struct {
@@ -866,6 +868,8 @@ func (q *Queries) UpsertNode(ctx context.Context, arg UpsertNodeParams) (Node, e
 		&i.Keep,
 		&i.FailureDomain,
 		&i.PlacementGroup,
+		&i.RetiringAt,
+		&i.RetiringFrom,
 	)
 	return i, err
 }

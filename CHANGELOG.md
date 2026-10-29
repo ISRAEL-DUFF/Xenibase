@@ -39,6 +39,17 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The empty-node sweep no longer deletes a server something was just
+  placed on.** It read what was on each node once, then deleted the
+  server, retired its clusters and removed the node, while placement still
+  offered the node (an empty one first, as the emptiest), so a project
+  created in between lost its database. Now the sweep first takes the
+  node out of placement (lifecycle **retiring**, under the node's row
+  lock, which a new project's placement also takes), and on a sweep at
+  least 10 minutes later counts again under the lock: if anything is
+  there, or the node was marked keep, it goes back into service;
+  otherwise its clusters are retired, then its server deleted (retried by
+  the next sweep if that fails), then the node removed.
 - **The capacity budget is a ceiling across proposals.** The budget check
   added a proposal's server to the nodes' monthly cost only, and a started
   proposal has no node until its operation runs, so one evaluation over
@@ -680,6 +691,10 @@ bundle share one version (spec §11.5).
   the new `files_share_backups` alert.
 
 ### Upgrading
+- Migration 00094 adds the node lifecycle `retiring`, with
+  `nodes.retiring_at` and `nodes.retiring_from`: an empty node out of
+  placement whose server the next sweep deletes. The API's node
+  `lifecycle` can now be `retiring`.
 - Migration 00093 adds `backups.verified_at`, when a backup's restore test
   passed. Earlier backups have none; an archive in progress at the upgrade
   tests its backup again before dropping the database.

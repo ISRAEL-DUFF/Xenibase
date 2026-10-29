@@ -175,6 +175,39 @@ SELECT n.id,
 FROM nodes n
 WHERE n.status <> 'removed' AND n.role <> 'pooler';
 
+-- name: LockNodeForRetire :one
+-- The empty-node sweep holds a node's row while it counts what is on it
+-- and changes its lifecycle; a project placed on the node holds it FOR
+-- SHARE (LockNodeForPlacement).
+SELECT * FROM nodes WHERE id = @id AND status <> 'removed' FOR UPDATE;
+
+-- name: LockNodeForPlacement :one
+-- A project's placement on a node holds the node's row until it commits,
+-- so the empty-node sweep either counts the project or has already taken
+-- the node out (lifecycle 'retiring').
+SELECT lifecycle FROM nodes WHERE id = @id AND status <> 'removed' FOR SHARE;
+
+-- name: NodeOccupancyOf :one
+-- tenant: system - the empty-node sweep counts again what holds one node, under its lock.
+SELECT
+  (SELECT count(*) FROM projects p JOIN instances i ON i.id = p.instance_id
+     WHERE i.node_id = @id AND p.deleted_at IS NULL AND i.deleted_at IS NULL)::int AS projects,
+  (SELECT count(*) FROM instances i WHERE i.node_id = @id AND i.deleted_at IS NULL AND i.kind = 'dedicated')::int AS dedicated,
+  (SELECT count(*) FROM retired_databases r JOIN instances i ON i.id = r.instance_id
+     WHERE i.node_id = @id AND r.dropped_at IS NULL)::int AS retired,
+  (SELECT count(*) FROM instance_members m WHERE m.node_id = @id AND m.deleted_at IS NULL)::int AS members,
+  (SELECT count(*) FROM etcd_members e WHERE e.node_id = @id)::int AS etcd;
+
+-- name: SetNodeRetiring :execrows
+-- Takes an empty node out of placement before its server is deleted.
+UPDATE nodes SET retiring_from = lifecycle, lifecycle = 'retiring', retiring_at = @retiring_at
+WHERE id = @id AND lifecycle IN ('active', 'draining') AND status <> 'removed';
+
+-- name: ReturnRetiringNode :execrows
+-- Puts a retiring node back as it was: something was placed on it.
+UPDATE nodes SET lifecycle = coalesce(retiring_from, 'active'), retiring_from = NULL, retiring_at = NULL, empty_since = NULL
+WHERE id = @id AND lifecycle = 'retiring';
+
 -- name: RetireNodeSharedClusters :exec
 -- tenant: system - capacity automation retiring an empty node's shared clusters.
 -- An empty node's shared clusters go with it.

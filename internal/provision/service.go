@@ -53,7 +53,15 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrNoCapacity means no shared instance can take a new project.
 	ErrNoCapacity = errors.New("no shared cluster available")
+
+	// errNodeRetiring: the node picked for a project was taken out of
+	// placement (by the empty-node sweep) before the project was recorded.
+	errNodeRetiring = errors.New("the node is being retired")
 )
+
+// nodeRetiring is the lifecycle of a node the empty-node sweep has taken
+// out of placement (capacity automation).
+const nodeRetiring = "retiring"
 
 // Config holds the connection details handed to clients and those the
 // control plane uses to smoke-test the poolers.
@@ -427,13 +435,16 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 	var profile Profile
 	var inst store.Instance
 	defaults := store.DefaultSharedSettings()
+	pickShared := func() (store.Instance, error) {
+		inst, err := store.New(s.db).PickSharedInstance(ctx, store.PickSharedInstanceParams{OrgID: &p.OrgID, PgVersion: int32(p.PgVersion), Region: p.Region})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return inst, fmt.Errorf("%w (no shared cluster in %s runs Postgres %d)", ErrNoCapacity, p.Region, p.PgVersion)
+		}
+		return inst, err
+	}
 	switch tier {
 	case TierShared:
-		inst, err = store.New(s.db).PickSharedInstance(ctx, store.PickSharedInstanceParams{OrgID: &p.OrgID, PgVersion: int32(p.PgVersion), Region: p.Region})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Created{}, fmt.Errorf("%w (no shared cluster in %s runs Postgres %d)", ErrNoCapacity, p.Region, p.PgVersion)
-		}
-		if err != nil {
+		if inst, err = pickShared(); err != nil {
 			return Created{}, err
 		}
 	case TierDedicated:
@@ -480,6 +491,18 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		var out Created
 		err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 			q := store.New(tx)
+			// The node stays as it is until this commits: the empty-node
+			// sweep, which takes it out of placement under its lock, either
+			// counts this project or has taken the node out already.
+			nodeID := inst.NodeID
+			if tier == TierDedicated {
+				nodeID = *p.NodeID
+			}
+			if lc, err := q.LockNodeForPlacement(ctx, nodeID); errors.Is(err, pgx.ErrNoRows) || (err == nil && lc == nodeRetiring) {
+				return errNodeRetiring
+			} else if err != nil {
+				return err
+			}
 			instanceID := inst.ID
 			if tier == TierDedicated {
 				iid := uuid.New()
@@ -545,6 +568,15 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		})
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && attempt < 5 {
+			continue
+		}
+		if errors.Is(err, errNodeRetiring) {
+			if tier != TierShared || attempt >= 5 {
+				return Created{}, fmt.Errorf("%w: the node chosen for the project is being retired; try again", ErrNoCapacity)
+			}
+			if inst, err = pickShared(); err != nil {
+				return Created{}, err
+			}
 			continue
 		}
 		if err != nil {

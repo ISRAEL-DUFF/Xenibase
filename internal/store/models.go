@@ -732,6 +732,8 @@ type Node struct {
 	Keep                  bool
 	FailureDomain         *string
 	PlacementGroup        *string
+	RetiringAt            *time.Time
+	RetiringFrom          *string
 }
 
 type OauthClient struct {

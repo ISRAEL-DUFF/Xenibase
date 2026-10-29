@@ -380,6 +380,13 @@ func (s *Service) Rebalance(ctx context.Context) (uuid.UUID, int, error) {
 // sweepEmpty records when nodes became empty and deletes provider servers
 // that stayed empty (V3 §5.3). Manual machines are only flagged: someone
 // decommissions them. Nodes marked keep are left alone.
+//
+// Deleting takes two sweeps. The first takes the node out of placement
+// (lifecycle retiring, startRetire); after RetireGrace, which lets
+// anything placed there just before land, the second counts again and
+// retires the node's clusters and deletes its server, or puts the node
+// back if something is there (finishRetire). Both count under the node's
+// row lock, which a new project's placement holds too.
 func (s *Service) sweepEmpty(ctx context.Context) error {
 	st, err := s.Settings(ctx)
 	if err != nil {
@@ -405,7 +412,13 @@ func (s *Service) sweepEmpty(ctx context.Context) error {
 		if !ok || n.Lifecycle == "provisioning" || n.Role == "edge" {
 			continue // an edge node holds no databases: it is never "empty"
 		}
-		empty := o.Projects == 0 && o.Dedicated == 0 && o.Retired == 0 && o.Members == 0 && o.Etcd == 0
+		if n.Lifecycle == NodeRetiring {
+			if n.RetiringAt == nil || now.Sub(*n.RetiringAt) >= s.cfg.RetireGrace {
+				errs = append(errs, s.finishRetire(ctx, n.ID, n.Name))
+			}
+			continue
+		}
+		empty := isEmpty(store.NodeOccupancyOfRow{Projects: o.Projects, Dedicated: o.Dedicated, Retired: o.Retired, Members: o.Members, Etcd: o.Etcd})
 		switch {
 		case !empty && n.EmptySince != nil:
 			errs = append(errs, q.SetNodeEmptySince(ctx, store.SetNodeEmptySinceParams{ID: n.ID}))
@@ -413,20 +426,94 @@ func (s *Service) sweepEmpty(ctx context.Context) error {
 			errs = append(errs, q.SetNodeEmptySince(ctx, store.SetNodeEmptySinceParams{ID: n.ID, EmptySince: &now}))
 		case empty && !n.Keep && n.Provider != cloud.Manual && n.ProviderServerID != nil &&
 			now.Sub(*n.EmptySince) >= time.Duration(st.DeleteEmptyAfterHours)*time.Hour:
-			errs = append(errs, s.deleteNode(ctx, n.ID, *n.ProviderServerID, n.Name))
+			errs = append(errs, s.startRetire(ctx, n.ID, n.Name))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// deleteNode deletes an empty node's server and takes the node out.
-func (s *Service) deleteNode(ctx context.Context, id uuid.UUID, serverID, name string) error {
+// NodeRetiring is the lifecycle of an empty node taken out of placement
+// before its server is deleted.
+const NodeRetiring = "retiring"
+
+func isEmpty(o store.NodeOccupancyOfRow) bool {
+	return o.Projects == 0 && o.Dedicated == 0 && o.Retired == 0 && o.Members == 0 && o.Etcd == 0
+}
+
+// startRetire takes an empty node out of placement, after counting what
+// is on it again under its lock: from then on nothing new is placed there.
+func (s *Service) startRetire(ctx context.Context, id uuid.UUID, name string) error {
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		n, err := q.LockNodeForRetire(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n.Keep || (n.Lifecycle != "active" && n.Lifecycle != "draining") {
+			return nil
+		}
+		o, err := q.NodeOccupancyOf(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !isEmpty(o) {
+			return q.SetNodeEmptySince(ctx, store.SetNodeEmptySinceParams{ID: id})
+		}
+		now := s.cfg.Now()
+		if _, err := q.SetNodeRetiring(ctx, store.SetNodeRetiringParams{ID: id, RetiringAt: &now}); err != nil {
+			return err
+		}
+		s.log.Info("retiring empty node: nothing new is placed on it, and its server is deleted", "node", name, "after", s.cfg.RetireGrace)
+		return nil
+	})
+}
+
+// finishRetire deletes a retiring node's server once nothing is on it:
+// under the node's lock it counts again and retires the node's shared
+// clusters, then deletes the server, then removes the node. If something
+// was placed on it meanwhile, or it is now to be kept, it goes back into
+// service instead. A server delete that fails is tried again by the next
+// sweep (the node stays retiring, its clusters retired).
+func (s *Service) finishRetire(ctx context.Context, id uuid.UUID, name string) error {
+	serverID := ""
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		n, err := q.LockNodeForRetire(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n.Lifecycle != NodeRetiring {
+			return nil // drained, or put back by hand, meanwhile
+		}
+		o, err := q.NodeOccupancyOf(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !isEmpty(o) || n.Keep || n.Provider == cloud.Manual || n.ProviderServerID == nil {
+			if _, err := q.ReturnRetiringNode(ctx, id); err != nil {
+				return err
+			}
+			s.log.Warn("empty node not deleted: something was placed on it, or it is kept; it is back in service",
+				"node", name, "projects", o.Projects, "dedicated", o.Dedicated, "retired", o.Retired, "members", o.Members, "etcd", o.Etcd, "keep", n.Keep)
+			return nil
+		}
+		if err := q.RetireNodeSharedClusters(ctx, id); err != nil {
+			return err
+		}
+		serverID = *n.ProviderServerID
+		return nil
+	})
+	if err != nil || serverID == "" {
+		return err
+	}
 	if err := s.provider.DeleteServer(ctx, serverID); err != nil {
 		return fmt.Errorf("delete server %s of %s: %w", serverID, name, err)
-	}
-	q := store.New(s.db)
-	if err := q.RetireNodeSharedClusters(ctx, id); err != nil {
-		return err
 	}
 	if err := s.nodes.RemoveNode(ctx, id); err != nil {
 		return err

@@ -70,7 +70,11 @@ type Config struct {
 	JoinTimeout time.Duration
 	// Poll is how often the provisioning flow checks for the agent (5 s).
 	Poll time.Duration
-	Now  func() time.Time
+	// RetireGrace is how long an empty node is out of placement before its
+	// server is deleted (10 minutes): placements that chose the node just
+	// before land meanwhile, and are counted.
+	RetireGrace time.Duration
+	Now         func() time.Time
 }
 
 // Service runs capacity automation.
@@ -99,6 +103,9 @@ func New(db *pgxpool.Pool, ns *nodes.Service, ded *dedicated.Service, provider c
 	}
 	if cfg.Poll <= 0 {
 		cfg.Poll = 5 * time.Second
+	}
+	if cfg.RetireGrace <= 0 {
+		cfg.RetireGrace = 10 * time.Minute
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

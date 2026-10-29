@@ -159,10 +159,14 @@ The settings (Platform → Capacity → Settings) are:
   projects are never among them.
 - **Empty nodes:** a node with no projects, dedicated instances, HA
   members, etcd member, or move copies is marked empty. The copies a move
-  keeps are kept for 48 hours. A server from a provider is deleted after
-  24 hours empty, and the node is removed. Manual machines are only
-  flagged: decommission them yourself. Mark a node **Keep** (Capacity →
-  Cost) to leave it alone.
+  keeps are kept for 48 hours. After 24 hours empty a provider's node is
+  **retiring**: nothing new is placed on it. At least 10 minutes later the
+  next sweep counts again; if something landed there after all, or the
+  node is now marked keep, it goes back into service, and otherwise its
+  clusters are retired, its server is deleted and the node is removed (a
+  failed delete is tried again by the next sweep). Manual machines are
+  only flagged: decommission them yourself. Mark a node **Keep** (Capacity
+  → Cost) to leave it alone.
 
 ## Cost attribution
 

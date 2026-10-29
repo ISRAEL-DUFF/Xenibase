@@ -7065,8 +7065,11 @@ export interface components {
             region?: string;
             /** @description manual (registered by hand) or the cloud provider that created it. */
             provider?: string;
-            /** @enum {string} */
-            lifecycle?: "active" | "provisioning" | "draining";
+            /**
+             * @description retiring is an empty node out of placement whose server is about to be deleted.
+             * @enum {string}
+             */
+            lifecycle?: "active" | "provisioning" | "draining" | "retiring";
             server_type?: string | null;
             /** Format: int64 */
             monthly_cost_minor?: number | null;

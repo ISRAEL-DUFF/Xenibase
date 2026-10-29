@@ -122,7 +122,7 @@ func (s *Service) Look(ctx context.Context) (Outlook, []store.CapacityNodesRow, 
 			ded[n.Region] = &RegionDedicated{Region: n.Region, Largest: largest.Name}
 			order = append(order, n.Region)
 		}
-		if n.Lifecycle == "draining" || n.AgentCertFp == nil {
+		if n.Lifecycle == "draining" || n.Lifecycle == NodeRetiring || n.AgentCertFp == nil {
 			continue
 		}
 		m := hostMetrics(n.Capacity)

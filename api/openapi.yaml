@@ -10661,7 +10661,8 @@ components:
           description: manual (registered by hand) or the cloud provider that created it.
         lifecycle:
           type: string
-          enum: [active, provisioning, draining]
+          description: retiring is an empty node out of placement whose server is about to be deleted.
+          enum: [active, provisioning, draining, retiring]
         server_type:
           type: string
           nullable: true
