@@ -87,15 +87,25 @@ func (q *Queries) InstanceBusy(ctx context.Context, instanceID uuid.UUID) (bool,
 }
 
 const instancesBehind = `-- name: InstancesBehind :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections, switchover_started_at FROM instances
-WHERE deleted_at IS NULL AND status = 'running'
-  AND pg_release IS NOT NULL AND pg_release_available IS NOT NULL AND pg_release <> pg_release_available
-ORDER BY kind = 'shared', created_at
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections, switchover_started_at FROM instances i
+WHERE i.deleted_at IS NULL AND i.status = 'running'
+  AND i.pg_release IS NOT NULL AND i.pg_release_available IS NOT NULL AND i.pg_release <> i.pg_release_available
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT m.error, m.to_release FROM minor_upgrades m
+      WHERE m.instance_id = i.id AND m.finished_at IS NOT NULL
+      ORDER BY m.started_at DESC LIMIT 1
+    ) last
+    WHERE last.error IS NOT NULL AND last.to_release = i.pg_release_available)
+ORDER BY i.kind = 'shared', i.created_at
 `
 
 // InstancesBehind lists running instances whose image has another release;
 // the caller keeps the ones where it is newer. Dedicated instances go
-// first: each restart there pauses one project, not a cluster's worth.
+// first: each restart there pauses one project, not a cluster's worth. An
+// instance whose last upgrade to that release failed is left out, so the
+// sweep moves on to the others; a newer release, or the admin's Run now,
+// tries it again.
 // tenant: system - the maintenance sweep reads every running instance.
 func (q *Queries) InstancesBehind(ctx context.Context) ([]Instance, error) {
 	rows, err := q.db.Query(ctx, instancesBehind)

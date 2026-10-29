@@ -188,7 +188,16 @@ each restart the poolers hold the projects' clients, so the restart (about
 a second or two) looks like a short pause rather than an outage. An
 instance whose projects are in the middle of something (a move, a restore,
 a queued operation) waits for the next sweep. The window can be disabled,
-and **Upgrade now** restarts one instance at once. The panel lists the
+and **Upgrade now** restarts one instance at once.
+
+If the new release won't start on an instance (it fails to create, exits,
+or isn't ready within 10 minutes), the agent starts the old container again,
+which it keeps stopped until the new one is ready, so the instance comes
+back on its old release. The failure is in the history with its error, a
+**Minor upgrade failed** alert fires, and the sweep moves on to the other
+instances: it doesn't try that instance again until its image holds a newer
+release, or you press **Upgrade now**. If even the old container can't be
+started, the error says the instance is down. The panel lists the
 instances still behind and the last 20 restarts, with how long clients were
 held.
 

@@ -19,6 +19,17 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A failed minor upgrade left the instance down and then looked done.**
+  The agent removed the old container before creating the new one, so a
+  release that would not start left nothing running, the sweep retried the
+  same instance every 5 minutes, and the next release check read the
+  missing or crash-looping container as upgraded. The agent now keeps the
+  old container, stopped, until the new one is ready and starts it again
+  otherwise; a release is reported only for a running container. The
+  failure is recorded, a **Minor upgrade failed** alert fires, and the
+  sweep moves on to other instances, trying that one again only for a
+  newer release or **Upgrade now**. See `docs/moves.md` ("Minor upgrades
+  and the maintenance window").
 - **The HA watcher paused healthy projects when xenibase-server lost sight
   of their primary,** and ran on every server without a lock. It now pauses
   the poolers only when the members that answer agree there is no running

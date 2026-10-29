@@ -507,7 +507,9 @@ func (s *Service) recordRunning(ctx context.Context, inst store.Instance, agent 
 // Recreate replaces an instance's container with one from the node's
 // current image, on the same volume (spec §11.3: Postgres minor upgrades
 // by restarting from the UI), then updates the pooler route if its
-// address changed.
+// address changed. When the new container fails the agent starts the old
+// one again; its address is then recorded the same way, and the error
+// says if the instance is down.
 func (s *Service) Recreate(ctx context.Context, inst store.Instance) (agentapi.Instance, error) {
 	spec, err := s.instanceSpec(ctx, inst)
 	if err != nil {
@@ -520,6 +522,17 @@ func (s *Service) Recreate(ctx context.Context, inst store.Instance) (agentapi.I
 	}
 	res, err := agent.CreateInstance(ctx, spec)
 	if err != nil {
+		cur, ierr := agent.Instance(context.WithoutCancel(ctx), agentKey(inst))
+		switch {
+		case ierr != nil:
+			return res, fmt.Errorf("%w; the instance's state is unknown: %w", err, ierr)
+		case !cur.Running:
+			return res, fmt.Errorf("%w; the instance is down (container %s)", err, cur.State)
+		}
+		if rerr := s.recordRunning(context.WithoutCancel(ctx), inst, agent, cur); rerr == nil &&
+			(inst.Host == nil || *inst.Host != cur.Host || int(inst.Port) != cur.Port) {
+			_ = s.projects.SyncPooler(context.WithoutCancel(ctx), nil, "pooler", "instance address changed")
+		}
 		return res, err
 	}
 	if err := s.recordRunning(ctx, inst, agent, res); err != nil {

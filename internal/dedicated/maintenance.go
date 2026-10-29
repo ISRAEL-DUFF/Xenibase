@@ -127,6 +127,13 @@ func (s *Service) CheckReleases(ctx context.Context, before time.Time) error {
 			errs = append(errs, fmt.Errorf("instance %s: %w", inst.ID, err))
 			continue
 		}
+		if !res.Running {
+			// A missing or stopped container runs no release: recording
+			// none would drop it from the instances behind, and a failed
+			// upgrade would look done.
+			errs = append(errs, fmt.Errorf("instance %s: the container is %s", inst.ID, res.State))
+			continue
+		}
 		if err := q.SetInstanceRelease(ctx, store.SetInstanceReleaseParams{
 			ID: inst.ID, PgRelease: nonEmpty(res.Version), PgReleaseAvailable: nonEmpty(res.ImageVersion),
 		}); err != nil {
