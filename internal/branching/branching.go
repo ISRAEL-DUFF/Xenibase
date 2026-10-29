@@ -510,13 +510,43 @@ func (s *Service) reopen(ctx context.Context, p store.Project, status string) er
 	return store.New(s.db).SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: status})
 }
 
-// Detach turns a branch into an ordinary standalone project.
-func (s *Service) Detach(ctx context.Context, id uuid.UUID) (store.Project, error) {
-	p, err := store.New(s.db).DetachBranch(ctx, id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return p, fmt.Errorf("%w: %w", provision.ErrInvalid, ErrNotBranch)
-	}
-	return p, err
+// DetachParams asks for a branch to become a standalone project.
+type DetachParams struct {
+	ID uuid.UUID
+	// Actor is who asks. Detaching makes a new project of the organisation,
+	// so they need org.create_project, as for any new project.
+	Actor authz.Actor
+	// CheckCreateProject, when set, applies the projects quota (tenancy),
+	// which branches don't count towards.
+	CheckCreateProject func(ctx context.Context, orgID uuid.UUID) error
+}
+
+// Detach turns a branch into an ordinary standalone project, under its
+// row lock: it must be active with no operation pending (a reset in flight
+// would refill it from its former parent).
+func (s *Service) Detach(ctx context.Context, p DetachParams) (store.Project, error) {
+	var out store.Project
+	err := s.projects.WithIdleProject(ctx, p.ID, []string{provision.StatusActive}, func(tx pgx.Tx, b store.Project) error {
+		if b.ParentProjectID == nil {
+			return fmt.Errorf("%w: %w", provision.ErrInvalid, ErrNotBranch)
+		}
+		q := store.New(tx)
+		d, err := authz.Can(ctx, q, p.Actor, authz.OrgCreateProject, authz.Resource{OrgID: b.OrgID})
+		if err != nil {
+			return err
+		}
+		if !d.Allowed {
+			return fmt.Errorf("%w: detaching makes a standalone project, which needs permission to create projects in the organisation", ErrForbidden)
+		}
+		if p.CheckCreateProject != nil {
+			if err := p.CheckCreateProject(ctx, b.OrgID); err != nil {
+				return err
+			}
+		}
+		out, err = q.DetachBranch(ctx, b.ID)
+		return err
+	})
+	return out, err
 }
 
 // SetExpiry moves a branch's expiry (nil: keep it); the 24-hour warning

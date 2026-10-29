@@ -33,7 +33,8 @@ func (s *Server) branchError(w http.ResponseWriter, what string, err error) {
 	case errors.Is(err, branching.ErrForbidden):
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	default:
-		s.provisionError(w, what, err)
+		// Quotas, then provisioning's errors.
+		s.tenancyError(w, what, err)
 	}
 }
 
@@ -203,7 +204,13 @@ func (s *Server) DetachBranch(w http.ResponseWriter, r *http.Request, id gen.Pro
 		return
 	}
 	auditFrom(r.Context()).target("project", id.String())
-	p, err := s.branches.Detach(r.Context(), id)
+	// The checks a new project gets: org.create_project and the projects
+	// quota, under the branch's lock.
+	dp := branching.DetachParams{ID: id, Actor: accessFrom(r.Context()).Actor}
+	if s.tenancy != nil {
+		dp.CheckCreateProject = s.tenancy.CheckCreateProject
+	}
+	p, err := s.branches.Detach(r.Context(), dp)
 	if err != nil {
 		s.branchError(w, "detach branch", err)
 		return

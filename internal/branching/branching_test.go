@@ -10,7 +10,9 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
+	"github.com/israel-duff/xenibase/internal/tenancy"
 )
 
 // TestResetChecksTheParent: a reset copies the parent again, so the caller
@@ -90,7 +92,79 @@ func TestResetChecksTheParent(t *testing.T) {
 	}
 }
 
-// TestBranchInAnotherOrganisationIsNotFilled: a branch whose parent is in
+// TestDetachIsANewProject: detaching makes a standalone project, so it
+// gets the checks a new project gets (org.create_project and the projects
+// quota), and it waits for the branch to be idle and active.
+func TestDetachIsANewProject(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	ten := tenancy.New(h.db, h.s.projects, nil, tenancy.Config{}, quiet)
+	dev, admin := h.user(t, authz.OrgMember), h.user(t, authz.OrgAdmin)
+	parent := h.project(t, "Shop", nil)
+	branch := h.project(t, "pr-1", &parent)
+	h.member(t, parent, dev, authz.ProjectDeveloper)
+	h.member(t, branch, dev, authz.ProjectAdmin)
+	detach := func(actor authz.Actor) error {
+		t.Helper()
+		_, err := h.s.Detach(ctx, DetachParams{ID: branch.ID, Actor: actor, CheckCreateProject: ten.CheckCreateProject})
+		return err
+	}
+	stillBranch := func(what string) {
+		t.Helper()
+		if h.get(t, branch.ID).ParentProjectID == nil {
+			t.Fatalf("%s: the branch was detached", what)
+		}
+	}
+
+	// Members may not create projects here: a developer can't detach.
+	if _, err := h.db.Exec(ctx, `UPDATE organizations SET settings = '{"members_can_create_projects": false}' WHERE id = $1`, h.org); err != nil {
+		t.Fatal(err)
+	}
+	if err := detach(session(dev)); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a developer who may not create projects: %v", err)
+	}
+	stillBranch("a developer who may not create projects")
+
+	// The projects quota counts the parent; the detached branch would be
+	// one more.
+	if _, err := h.db.Exec(ctx, `UPDATE organizations SET limit_overrides = '{"projects": 1}' WHERE id = $1`, h.org); err != nil {
+		t.Fatal(err)
+	}
+	var qe *tenancy.QuotaError
+	if err := detach(session(admin)); !errors.As(err, &qe) || qe.Limit != store.LimitProjects {
+		t.Fatalf("detach beyond the projects quota: %v", err)
+	}
+	stillBranch("beyond the quota")
+	if _, err := h.db.Exec(ctx, `UPDATE organizations SET limit_overrides = '{"projects": 2}' WHERE id = $1`, h.org); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not while a reset is in flight, nor while the branch isn't active.
+	if _, err := h.s.Reset(ctx, ResetParams{BranchID: branch.ID, Source: SourceLive, Actor: session(admin)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := detach(session(admin)); !errors.Is(err, provision.ErrConflict) {
+		t.Fatalf("detach during a reset: %v", err)
+	}
+	stillBranch("during a reset")
+	if _, err := h.db.Exec(ctx, `DELETE FROM operations WHERE project_id = $1`, branch.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := detach(session(admin)); !errors.Is(err, provision.ErrConflict) {
+		t.Fatalf("detach of a restoring branch: %v", err)
+	}
+	h.idle(t, branch)
+
+	p, err := h.s.Detach(ctx, DetachParams{ID: branch.ID, Actor: session(admin), CheckCreateProject: ten.CheckCreateProject})
+	if err != nil || p.ParentProjectID != nil || p.ExpiresAt != nil {
+		t.Fatalf("detach: %+v %v", p, err)
+	}
+	if _, err := h.s.Detach(ctx, DetachParams{ID: branch.ID, Actor: session(admin)}); !errors.Is(err, ErrNotBranch) {
+		t.Fatalf("detach a standalone project: %v", err)
+	}
+}
+
+// TestBranchInAnotherOrganisationIsNotFilled:a branch whose parent is in
 // another organisation (split by a transfer before transfers refused it)
 // is neither reset nor filled from the other organisation's data.
 func TestBranchInAnotherOrganisationIsNotFilled(t *testing.T) {

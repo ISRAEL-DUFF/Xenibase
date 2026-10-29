@@ -112,6 +112,9 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   *contains sensitive data* needs the parent's admin role. Removing
   someone from a project removes them from its branches too.
 - **Detach** makes it an ordinary project (which can then be promoted).
+  It counts as a new project: it needs permission to create projects in
+  the organisation and room in its projects quota, and waits until the
+  branch is active with nothing in progress.
 - **With backend services** on the parent, the branch gets an API of its
   own: a new URL (ref), new publishable and secret keys and a new signing
   key, so neither's keys or users' tokens work on the other. It keeps the

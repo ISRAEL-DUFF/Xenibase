@@ -34,6 +34,13 @@ bundle share one version (spec §11.5).
   parent is in another organisation is no longer filled or reset (detach
   or delete it), and a parent's branch count only counts its own
   organisation's branches.
+- **Detaching a branch now gets a new project's checks.** It needed only
+  the developer role on the branch, so create-then-detach went past the
+  projects quota, and a developer could own a project in an organisation
+  whose members may not create them. Detach now needs `org.create_project`
+  and room in the projects quota (409 `quota_exceeded`), and runs under the
+  branch's lock: it is refused (409) while a reset or anything else is in
+  progress, or the branch isn't active.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
