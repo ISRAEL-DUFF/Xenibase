@@ -43,6 +43,7 @@ type Service struct {
 	ca        *agentca.CA
 	certs     *clientCerts // xenibase-server's client certificate
 	bootstrap string       // install-time token, see Register
+	bootNode  string       // the only node it registers
 	home      string       // the home region (V3 §6.1)
 	log       *slog.Logger
 
@@ -76,15 +77,28 @@ func (s *Service) regionOr(r string) string {
 }
 
 // NewService returns a Service. bootstrapToken (XENIBASE_AGENT_BOOTSTRAP_TOKEN)
-// lets the install bundle's own agent register the local node without an
+// lets the install bundle's own agent register the local node (named
+// "local" unless SetBootstrapNode says otherwise) once, without an
 // operator; empty disables it.
 func NewService(db *pgxpool.Pool, ca *agentca.CA, bootstrapToken string, log *slog.Logger) (*Service, error) {
 	certs, err := newClientCerts(ca.ServerClientCertAt, time.Now, log)
 	if err != nil {
 		return nil, err
 	}
-	return &Service{db: db, ca: ca, certs: certs, bootstrap: bootstrapToken, log: log, health: map[uuid.UUID]Status{}}, nil
+	return &Service{db: db, ca: ca, certs: certs, bootstrap: bootstrapToken, bootNode: "local", log: log, health: map[uuid.UUID]Status{}}, nil
 }
+
+// SetBootstrapNode names the node the bootstrap token registers: the
+// bundle's local node (XENIBASE_SHARED_NODE_NAME).
+func (s *Service) SetBootstrapNode(name string) {
+	if name != "" {
+		s.bootNode = name
+	}
+}
+
+// bootstrapUsedKey is the settings row recording that the bootstrap token
+// registered its node. From then on it registers nothing.
+const bootstrapUsedKey = "agent_bootstrap_used"
 
 // newToken returns a registration token, its hash, and its expiry (a day).
 func newToken() (token, hash string, exp time.Time, err error) {
@@ -129,14 +143,32 @@ func (s *Service) Register(ctx context.Context, req agentapi.RegisterRequest) (a
 		q := store.New(tx)
 		var node store.Node
 		var err error
-		if s.bootstrap != "" && req.Node != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.bootstrap)) == 1 {
+		bootstrap := s.bootstrap != "" && req.Node != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.bootstrap)) == 1
+		if bootstrap {
+			// The bootstrap token registers one node, once, and only while
+			// it has never had an agent: it never expires and sits in the
+			// bundle's .env, so it must not claim a node an operator or
+			// capacity automation added, or bring back a removed one.
+			// Re-registering needs a token from the UI.
+			if req.Node != s.bootNode {
+				return fmt.Errorf("%w: the bootstrap token only registers node %q", ErrBadToken, s.bootNode)
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('xenibase_agent_bootstrap'))`); err != nil {
+				return err
+			}
+			if _, err := q.GetSetting(ctx, bootstrapUsedKey); err == nil {
+				return fmt.Errorf("%w: the bootstrap token has already registered node %q; issue a new token from the UI", ErrBadToken, req.Node)
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
 			node, err = q.GetNodeByName(ctx, req.Node)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("%w: no node named %q", ErrBadToken, req.Node)
 			}
+			if err == nil && node.Status == "removed" {
+				return fmt.Errorf("%w: node %q was removed", ErrBadToken, req.Node)
+			}
 			if err == nil && node.AgentCertFp != nil {
-				// The bootstrap token only claims nodes without an agent;
-				// re-registering needs a token from the UI.
 				return fmt.Errorf("%w: node %q already has an agent; issue a new token from the UI", ErrBadToken, req.Node)
 			}
 		} else {
@@ -158,6 +190,12 @@ func (s *Service) Register(ctx context.Context, req agentapi.RegisterRequest) (a
 			ID: node.ID, AgentCertFp: &fp, AgentHost: &req.AdvertiseHost, AgentPort: int32(req.AdvertisePort), AgentVersion: &v,
 		}); err != nil {
 			return err
+		}
+		if bootstrap {
+			used, _ := json.Marshal(map[string]any{"node_id": node.ID, "used_at": time.Now().UTC()})
+			if err := q.PutSetting(ctx, store.PutSettingParams{Key: bootstrapUsedKey, Value: used}); err != nil {
+				return err
+			}
 		}
 		out = agentapi.RegisterResponse{NodeID: node.ID.String(), CertPEM: string(certPEM), CAPEM: string(s.ca.CertPEM())}
 		s.log.Info("agent registered", "node", node.Name, "advertise", fmt.Sprintf("%s:%d", req.AdvertiseHost, req.AdvertisePort), "fingerprint", fp)

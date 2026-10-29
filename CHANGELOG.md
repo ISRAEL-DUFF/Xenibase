@@ -29,6 +29,11 @@ bundle share one version (spec §11.5).
   start for 30 days and never renewed, so a server that ran longer lost
   every agent. It is now reissued with 7 days left, and the new
   `agent_client_cert` alert fires if under 3 days remain.
+- **The agent bootstrap token registers the local node once.**
+  `XENIBASE_AGENT_BOOTSTRAP_TOKEN` could claim any node without an agent by
+  name, including one just added and a removed one. It now registers only
+  the bundle's local node (`XENIBASE_SHARED_NODE_NAME`), never a removed
+  node, and only once; afterwards use a token from Nodes → Re-register.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 

@@ -902,6 +902,7 @@ func setupBackups(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, ke
 	ns, err := nodes.NewService(pool, ca, cfg.Backups.AgentBootstrapToken, log)
 	if err == nil {
 		ns.SetHomeRegion(cfg.Cloud.Region)
+		ns.SetBootstrapNode(cfg.Shared.NodeName)
 	}
 	if err != nil {
 		return nil, nil, err
