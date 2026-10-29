@@ -61,7 +61,12 @@ func (s *Service) Types(ctx context.Context, p store.Project, lang, pkg string) 
 	if svc, err := store.New(s.db).GetProjectServices(ctx, p.ID); err == nil {
 		ref = svc.Ref
 	}
-	return typegen.Generate(cat, lang, typegen.Options{Ref: ref, Package: pkg})
+	out, err := typegen.Generate(cat, lang, typegen.Options{Ref: ref, Package: pkg})
+	if err != nil {
+		// A name the language can't carry, or a package name that isn't one.
+		return "", fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	return out, nil
 }
 
 // Finding is one thing the security advisor noticed.

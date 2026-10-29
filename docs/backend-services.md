@@ -353,6 +353,13 @@ xenibase gen types --lang go --project my-app --package db -o db/types.go
 The same files download from Project → Settings → API → Generate types, or
 `GET /api/v1/projects/{id}/services/types?lang=ts|dart|go`.
 
+Table and column names appear in the files only as escaped strings; field and
+class names keep their letters and digits (`price$usd` becomes `PriceUsd`, a
+Dart field named `class` becomes `class_`, and a second name that comes out
+the same gets a number). Go's JSON tags can't hold some characters (quotes,
+a comma, a backslash, control characters), so Go generation refuses a column
+with one, naming it (`400`); rename the column or use TypeScript or Dart.
+
 ## Security advisor
 
 Project → Settings → API → Security advisor (or

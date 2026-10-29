@@ -72,6 +72,15 @@ bundle share one version (spec §11.5).
   values as its own role (planning costs a small fraction of the read).
   Set-returning functions now go through the guard too, and an exact count
   over the limit is not run (`count: null`, as when it times out).
+- **Generated types could carry code from a column's name.** `xenibase gen
+  types` wrote table and column names into the Go, TypeScript and Dart files
+  as they were, in identifiers, tags, comments and strings, so whoever could
+  create a column could, with a 37-byte name, add `init` functions to every
+  program built with the generated Go package, and a `$` or `'` broke the
+  Dart file. Names now appear only escaped, identifiers are made from their
+  letters and digits (numbered when two clash, kept off reserved words), and
+  Go generation refuses, with a `400` naming it, a column its JSON tags can't
+  carry.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
