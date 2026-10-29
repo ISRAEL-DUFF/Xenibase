@@ -855,7 +855,9 @@ client.channel("todos")
 A channel can carry database changes, broadcast and presence at once.
 Signed-in clients send their access token in the join (supabase-js does);
 a channel may be told a new one with an `access_token` message before
-the old expires, and a channel whose token has expired is closed.
+the old expires, and a channel whose token has expired is closed within
+10 seconds (at once if a message is due to it or it sends one). A
+connection opened with a bearer token takes that token's expiry.
 
 ### Database changes
 
@@ -880,7 +882,9 @@ see the row:
   session ids aside) in one query per group, and sends a subscriber the
   row as they see it. Anon and signed-in users can subscribe only to
   tables with row-level security on (or listed as public tables); the
-  secret key sees everything.
+  secret key sees everything. Turning row-level security off closes their
+  subscriptions to the table at its next change (a `system` message with
+  `status` `error`); subscribe again once it is back on.
 - **Deletes** carry the primary key only (`old_record`), and reach only
   subscribers the edge sent the row to before: a client that loads rows
   over the data API and then subscribes gets deletes for rows that change
@@ -903,7 +907,8 @@ Broadcast sends a message to everyone on a channel (`self: true` to get
 your own back, `ack: true` to have the edge confirm it); presence keeps
 who is on a channel with each client's state (`track`, `untrack`,
 `presence_state`, `presence_diff`). Clients on different xenibase-edge
-processes reach each other through `NOTIFY` on the project's database, and
+processes reach each other through `NOTIFY` on the project's database (a
+large message in several), and
 a process that stops is dropped from presence within about 35 seconds.
 
 A server can broadcast over HTTP with the secret key:
@@ -915,8 +920,10 @@ curl -X POST https://<ref>.<domain>/realtime/v1/api/broadcast -H "apikey: $SECRE
 
 Broadcasts on topics listed in Project → Realtime → Broadcast history
 (`xb_realtime.persisted_topics`) are kept 7 days and read with
-`GET /realtime/v1/history/<topic>?after=<id>&limit=` (add `private=true`
-for a private channel's history, which needs its read policy).
+`GET /realtime/v1/history/<topic>?after=<id>&limit=`: that is the public
+channel's history; add `private=true` for the private channel's, which
+needs its read policy (or the secret key). Broadcasts kept before this
+release are treated as private.
 
 ### Private channels
 
@@ -933,7 +940,9 @@ CREATE POLICY members_send ON xb_realtime.channel_access FOR INSERT TO <db>_user
   WITH CHECK (EXISTS (SELECT 1 FROM room_members m WHERE m.room = topic AND m.user_id = xb_auth.uid()));
 ```
 
-The edge checks them in a transaction it rolls back when a client joins.
+The edge checks them in a transaction it rolls back when a client joins,
+when it sends a new access token, and again every minute: a user your
+policies no longer allow is closed out of the channel.
 A private channel and a public one of the same name don't hear each other.
 
 ### Limits and use
@@ -941,12 +950,22 @@ A private channel and a public one of the same name don't hear each other.
 | | Personal | Pro | Team |
 | --- | --- | --- | --- |
 | Concurrent connections (per edge process) | 100 | 1,000 | 5,000 |
-| Messages a month | 1 million, then refused | metered | metered |
+| Messages a month | 1 million, then refused (open connections are closed) | metered | metered |
 
 Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects
-and refetches). A connection joins at most 100 channels, sends at most 600
-broadcasts and presence updates a minute, and a message is at most 256 KB. Messages to and from clients (`realtime_messages`) and
+and refetches). Open connections are closed (code 1008) when the key they
+were opened with is revoked or rotated away, when the organisation is
+suspended, and when backend services are turned off. A connection joins at most 100 channels, sends at most 600
+broadcasts and presence updates a minute, and a broadcast or presence
+message is at most 32 KB (other frames 64 KB). A channel may have at most 20
+`postgres_changes` subscriptions and a connection 100, and a client that
+has 4 MB waiting for it is disconnected. A project's clients may
+send at most 1 MB of broadcasts and presence a second through each
+xenibase-edge process, and a topic kept as history keeps at most 256 KB a
+minute per process; past these a broadcast is refused with a
+`rate_limited` error reply (`429` over HTTP, with how many were sent). Messages to and from clients (`realtime_messages`: broadcasts,
+presence and database changes; heartbeats, joins and replies are free) and
 connection time (`realtime_connection_minutes`) are metered.
 
 ## Settings

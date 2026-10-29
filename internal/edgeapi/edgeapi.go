@@ -154,7 +154,8 @@ type Project struct {
 	SpendCapped bool `json:"spend_capped,omitempty"`
 	// RequestsBlocked says the organisation's plan's monthly data API
 	// requests are used up (V4.1 §3): data, storage and realtime answer
-	// 429 plan_limit_reached until the month ends; sign-in carries on.
+	// 429 plan_limit_reached until the month ends, and open realtime
+	// connections are closed; sign-in carries on.
 	RequestsBlocked bool `json:"requests_blocked,omitempty"`
 	// MAUBlocked says the plan's monthly active users are used up: users in
 	// MAUCounted (a bloom filter of this month's counted users) still sign
@@ -172,8 +173,8 @@ type RealtimeConfig struct {
 	// MaxConnections is concurrent WebSocket connections per edge process
 	// (0: unlimited).
 	MaxConnections int `json:"max_connections,omitempty"`
-	// MessagesBlocked refuses new connections and stops delivery: the
-	// month's messages are used up.
+	// MessagesBlocked refuses new connections and HTTP broadcasts and
+	// closes open connections: the month's messages are used up.
 	MessagesBlocked bool `json:"messages_blocked,omitempty"`
 	// MaxChangesPerSecond is the database changes delivered per second
 	// before they are coalesced into a resync signal; MaxGroups the

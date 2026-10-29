@@ -277,7 +277,7 @@ numbers below are from the review).
 | Signed file URLs | HMAC-SHA256 with the project's own storage secret over kind, project, bucket, path and expiry, compared in constant time | `FuzzSignedURL` (another project's secret, project, bucket, path or kind, and every one-byte change, refuse), `TestTokens`, `TestStorage` |
 | Files served from the API origin | `X-Content-Type-Options: nosniff`, a sandboxing `Content-Security-Policy`, and only images, audio, video, PDF and plain text inline; everything else downloads. Paths with `..`, `.`, empty segments, control characters or invalid UTF-8 are refused | `TestStorage`, `TestPathsAndBuckets`, `TestDetectMIME` |
 | Browser access | Allowed origins per project; CORS never allows credentials; the edge sets no cookies | `TestEdgeFoundation` |
-| Abuse and cost | Per-IP and per-key limits on keyed and keyless requests, auth limits per endpoint group, realtime sends per connection, render concurrency per process, body limits on every endpoint, a 256 KB WebSocket frame limit; spend caps tighten all of them (V4-M37) | `TestEdgeFoundation`, `TestAuthCore`, `TestSpendCapBackendServices`, `TestLimiter` |
+| Abuse and cost | Per-IP and per-key limits on keyed and keyless requests, auth limits per endpoint group, realtime sends per connection, render concurrency per process, body limits on every endpoint, a 64 KB WebSocket frame limit (32 KB for broadcast and presence) and bounds on a connection's subscriptions and send queue; spend caps tighten all of them (V4-M37) | `TestEdgeFoundation`, `TestAuthCore`, `TestSpendCapBackendServices`, `TestLimiter` |
 | The feed and reports | Signed with `XENIBASE_EDGE_SECRET` and a timestamp; the edge never reads the metadata database | `TestEdgeFoundation` |
 
 ### Found and fixed

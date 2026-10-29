@@ -485,6 +485,21 @@ func TestRealtime(t *testing.T) {
 	// ---- Heartbeats ------------------------------------------------------------------
 	ref := alice.send("phoenix", "heartbeat", map[string]any{})
 	alice.next(5*time.Second, "heartbeat reply", func(m rtMessage) bool { return m.Event == "phx_reply" && m.Ref != nil && *m.Ref == ref })
+
+	// ---- Row-level security turned off after subscribing ----------------------------
+	if _, err := app.Exec(ctx, `ALTER TABLE todos DISABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Exec(ctx, `INSERT INTO todos (owner, body) VALUES ($1, 'bob after rls')`, rp.bobID); err != nil {
+		t.Fatal(err)
+	}
+	alice.next(10*time.Second, "the subscription closed for want of row-level security", func(m rtMessage) bool {
+		return m.Event == "system" && strings.Contains(string(m.Payload), "no longer has row-level security")
+	})
+	alice.quiet(time.Second, "bob's row at alice without row-level security", isChange("INSERT", "bob after rls"))
+	if _, err := app.Exec(ctx, `ALTER TABLE todos ENABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func isBroadcast(event string) func(rtMessage) bool {
@@ -619,6 +634,14 @@ func TestRealtimeBroadcast(t *testing.T) {
 	}
 	if code, _, body := rp.ed.Do(rp.ref, "GET", "/realtime/v1/history/vip?private=true", nil, "apikey", rp.pub, "Authorization", "Bearer "+rp.alice); code != 403 {
 		t.Fatalf("history as a non-member: %d %s", code, body)
+	}
+	// The public channel's history, which anyone with the key reads, has
+	// none of the private channel's.
+	if code, _, body := rp.ed.Do(rp.ref, "GET", "/realtime/v1/history/vip", nil, "apikey", rp.pub); code != 200 || strings.Contains(body, "for members") {
+		t.Fatalf("the public history of a private topic: %d %s", code, body)
+	}
+	if code, _, body := rp.ed.Do(rp.ref, "GET", "/realtime/v1/history/vip?private=true", nil, "apikey", rp.sec); code != 200 || !strings.Contains(body, "for members") {
+		t.Fatalf("history with the secret key: %d %s", code, body)
 	}
 	if code, _, body := rp.ed.Do(rp.ref, "POST", "/realtime/v1/api/broadcast", strings.NewReader(`{"messages":[{"topic":"room1","event":"notice","payload":{"text":"from the server"}}]}`),
 		"apikey", rp.pub, "Content-Type", "application/json"); code != 403 {

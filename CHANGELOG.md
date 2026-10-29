@@ -63,6 +63,76 @@ bundle share one version (spec §11.5).
   allowance, and so did every API server serving "Run now". The limit is
   now counted from the organisation's HTTP job runs in the last hour, under
   a per-organisation lock, when each run is dispatched.
+- **The Personal plan's monthly realtime messages now stop connections
+  already open.** Using them up (or the month's API requests) only refused
+  new connections, so clients that stayed connected kept sending and
+  receiving for the rest of the month. The edge now closes the project's
+  open connections when either limit is reached (WebSocket code 1008) and
+  refuses HTTP broadcasts with `429 realtime_quota_exceeded`.
+- **Revoking a key, suspending an organisation or turning services off now
+  closes open realtime connections.** They were checked only when they
+  opened: a connection made with a since-revoked secret key kept receiving
+  every change and could join private channels, a suspended organisation's
+  clients carried on, and turning services off left broadcasts and the
+  edge's database connection running. The edge now closes such connections
+  (WebSocket code 1008, with the reason) as soon as the change reaches it,
+  within 10 seconds at most, and stops listening to a project whose
+  services are off. A spend cap still leaves open connections alone.
+- **Realtime channels follow their user's token and the channel policies
+  while open.** A private channel's policies were asked only at join, so a
+  member removed from a room kept hearing it, and a new `access_token`
+  switched user without asking them; an expired token closed a channel only
+  at its table's next change, never for broadcast or presence, and never on
+  a connection opened with a bearer token. Now a channel is closed within
+  10 seconds of its token expiring (at once if a message is due to it or
+  it sends one), a connection's bearer token expires its channels too, a new
+  token is checked against the policies, and private channels are checked
+  again every minute.
+- **A realtime connection's memory is bounded.** A join could bind any
+  number of database-change subscriptions, each remembering up to 10,000
+  rows for deletes, so one client with the publishable key could make the
+  edge hold gigabytes; and a client that stopped reading could have 64 MB
+  queued for it. A channel now binds at most **20** subscriptions and a
+  connection **100** (refused in the join's reply), a connection's
+  subscriptions remember 20,000 rows between them, a frame is at most
+  **64 KB** (256 KB before; the connection is closed with 1009), and a
+  client with 4 MB waiting is disconnected as too slow.
+- **Realtime broadcasts can no longer fill the project's database.** With
+  the publishable key, a client could send 600 broadcasts of 256 KB a
+  minute, and with a second edge process listening each one over 7,800
+  bytes was written to `xb_realtime.relay` (about 150 MB a minute per
+  connection through the shared cluster's WAL), and to `broadcast_history`
+  on a persisted topic. A broadcast or presence message is now at most
+  **32 KB** (from clients and over HTTP; 256 KB before), a project's
+  clients may send at most 1 MB of them a second through each edge
+  process, and a persisted topic keeps at most 256 KB a minute per process;
+  past these the sender gets `too_large` or `rate_limited` (`413` or `429`
+  over HTTP). Large messages now cross between edge processes as several
+  `NOTIFY`s, with no table row.
+- **Realtime subscriptions no longer outlive their table's row-level
+  security.** It was checked only when a client subscribed, so after the
+  owner turned it off (a migration that does so for a moment was enough)
+  every anon and user subscriber received every row until they
+  disconnected. Each batch of changes now checks it again; when it is off,
+  and the table isn't listed as public, those subscriptions are closed
+  with a `system` error and the channel stays joined.
+- **A private channel's broadcast history is no longer readable with the
+  publishable key.** History was kept by topic name alone and checked the
+  read policy only when asked for `private=true`, so
+  `GET /realtime/v1/history/<topic>` without it returned a private
+  channel's messages and senders to anyone. Each kept broadcast now records
+  which channel it was sent on: the plain request reads the public
+  channel's, `private=true` the private channel's, after its read policy.
+  Broadcasts kept before this release don't say, so they are treated as
+  private until they expire. The secret key can now read a private
+  channel's history (it got 403).
+- **Heartbeats are no longer billed as realtime messages.** Every frame a
+  client sent and every message queued to it counted, heartbeats and their
+  replies included, so an idle connection cost about 207,000 messages a
+  month and five idle browser tabs used up a Personal organisation's
+  million. Only broadcasts, presence and database changes count now;
+  heartbeats, joins, leaves, token updates, replies and status messages
+  are free, so `realtime_messages` drops for most projects.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
