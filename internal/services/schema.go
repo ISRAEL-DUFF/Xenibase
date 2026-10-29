@@ -537,6 +537,20 @@ var schemaVersions = []schemaVersion{
 		// they lead to.
 		`ALTER TABLE xb_auth.mfa_factors ADD COLUMN IF NOT EXISTS failed_attempts int NOT NULL DEFAULT 0`,
 		`ALTER TABLE xb_auth.mfa_factors ADD COLUMN IF NOT EXISTS locked_until timestamptz`,
+		// Requests for email and phone codes, a day's worth, whether or not
+		// the address or number has a user, so the limits on them don't tell
+		// which do. Targets are kept as hashes.
+		`CREATE TABLE IF NOT EXISTS xb_auth.code_requests (
+		  id          bigserial PRIMARY KEY,
+		  target_hash text NOT NULL,
+		  kind        text NOT NULL,
+		  at          timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS code_requests_target ON xb_auth.code_requests (target_hash, at)`,
+		`CREATE INDEX IF NOT EXISTS code_requests_at ON xb_auth.code_requests (at)`,
+		`REVOKE ALL ON xb_auth.code_requests FROM PUBLIC`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON xb_auth.code_requests TO {{edge}}`,
+		`GRANT USAGE ON SEQUENCE xb_auth.code_requests_id_seq TO {{edge}}`,
 	}},
 }
 

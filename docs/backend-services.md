@@ -604,8 +604,10 @@ templates (Authentication → Emails: plain text with `{{.Code}}`,
   (its outbound allow-list); a failed test says only that it
   failed, with the reason in the server's log. A provider's `base_url`
   follows the same rule.
-- One address gets at most one code a minute; sends are counted in the
-  usage (`message_sends`) and shown with failures.
+- One address gets at most one code a minute, counted on requests whether
+  or not the address has a user (so the limit doesn't tell who has an
+  account); sends are counted in the usage (`message_sends`) and shown
+  with failures.
 
 A Flutter sample that signs in with a WhatsApp code and Google and reads
 org-scoped rows is in [examples/flutter-auth](examples/flutter-auth/).

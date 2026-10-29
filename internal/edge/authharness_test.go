@@ -302,7 +302,9 @@ func (x *authEdge) exec(sql string, args ...any) {
 // later moves the project's auth records back by d, as if d had passed.
 func (x *authEdge) later(d time.Duration) {
 	x.t.Helper()
-	x.exec(`UPDATE xb_auth.one_time_codes SET created_at = created_at - $1::interval`, strconv.Itoa(int(d.Seconds()))+" seconds")
+	ago := strconv.Itoa(int(d.Seconds())) + " seconds"
+	x.exec(`UPDATE xb_auth.one_time_codes SET created_at = created_at - $1::interval`, ago)
+	x.exec(`UPDATE xb_auth.code_requests SET at = at - $1::interval`, ago)
 }
 
 // signIn signs the user in with a password.

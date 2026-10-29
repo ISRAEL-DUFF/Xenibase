@@ -31,6 +31,15 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The one-code-a-minute limit no longer tells which addresses have
+  users.** It counted codes sent, and only a real user is sent one, so two
+  `POST /recover` calls in a minute answered 200 then 429 for an address
+  with an account and 200 twice for one without; `signin/otp` without user
+  creation did the same for addresses and phone numbers. Requests for
+  codes are now recorded (as hashes of the address or number, kept a day,
+  in `xb_auth.code_requests`, project schema version 10) before the user
+  is looked up, and the limit counts requests, so every address gets 200
+  then 429.
 - **A project's own SMTP server and SMS provider go through the outbound
   rules.** Webhooks could reach only public addresses, but a project
   admin could point the project's SMTP host at a private address (say

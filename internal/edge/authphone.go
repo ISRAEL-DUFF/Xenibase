@@ -106,19 +106,22 @@ func (e *Edge) sendPhone(ctx context.Context, p *project, channel, kind, phone s
 	return err
 }
 
-// phoneTooSoon refuses a code for phone if one went out within phoneEvery.
+// phoneTooSoon refuses a code of kinds for phone if one was asked for
+// within phoneEvery, and otherwise records this request (as tooSoon).
 func phoneTooSoon(ctx context.Context, tx pgx.Tx, phone string, kinds []string) (*apiErr, error) {
-	last, err := projauth.LastCodeAt(ctx, tx, phone, kinds)
-	if err != nil || last == nil {
+	last, err := projauth.LastCodeRequest(ctx, tx, phone, kinds)
+	if err != nil {
 		return nil, err
 	}
-	if wait := phoneEvery - time.Since(*last); wait > 0 {
-		a := refuse(http.StatusTooManyRequests, "over_sms_send_rate_limit",
-			fmt.Sprintf("a code was just sent to this number; wait %d seconds", int(wait.Seconds())+1))
-		a.retryAfter = int(wait.Seconds()) + 1
-		return a, nil
+	if last != nil {
+		if wait := phoneEvery - time.Since(*last); wait > 0 {
+			a := refuse(http.StatusTooManyRequests, "over_sms_send_rate_limit",
+				fmt.Sprintf("a code was just sent to this number; wait %d seconds", int(wait.Seconds())+1))
+			a.retryAfter = int(wait.Seconds()) + 1
+			return a, nil
+		}
 	}
-	return nil, nil
+	return nil, projauth.RecordCodeRequest(ctx, tx, phone, kinds[0])
 }
 
 // newPhoneCode makes and sends a code of kind to phone for user uid;
@@ -211,6 +214,9 @@ func (e *Edge) signupPhone(c *call, raw, channel, password string, data json.Raw
 			}
 			t, err := e.startSession(ctx, c, tx, u, "password")
 			out = &t
+			return err
+		}
+		if err := projauth.RecordCodeRequest(ctx, tx, phone, projauth.CodePhoneSignup); err != nil {
 			return err
 		}
 		return e.newPhoneCode(ctx, c, tx, u.ID, projauth.CodePhoneSignup, channel, phone, hash)

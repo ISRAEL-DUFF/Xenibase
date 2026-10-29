@@ -667,12 +667,38 @@ func newCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target stri
 	return Code{Code: code, Token: tok}, err
 }
 
-// LastCodeAt is when a code of one of kinds was last made for target.
-func LastCodeAt(ctx context.Context, q Querier, target string, kinds []string) (*time.Time, error) {
+// Code requests are kept a day, by a hash of the address or number, for
+// every request for a code whether or not the target has a user: limits
+// counted on them answer the same for an address with an account as for
+// one without.
+
+func targetHash(target string) string {
+	h := sha256.Sum256([]byte("target:" + NormalizeEmail(target)))
+	return hex.EncodeToString(h[:])
+}
+
+// LastCodeRequest is when a code of one of kinds was last asked for to
+// target. It holds other requests for target until the transaction ends,
+// so two at once can't both pass a limit.
+func LastCodeRequest(ctx context.Context, q Querier, target string, kinds []string) (*time.Time, error) {
+	h := targetHash(target)
+	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "xb_auth.code_requests:"+h); err != nil {
+		return nil, err
+	}
 	var at *time.Time
-	err := q.QueryRow(ctx, `SELECT max(created_at) FROM xb_auth.one_time_codes WHERE target = $1 AND kind = ANY($2)`,
-		NormalizeEmail(target), kinds).Scan(&at)
+	err := q.QueryRow(ctx, `SELECT max(at) FROM xb_auth.code_requests WHERE target_hash = $1 AND kind = ANY($2)`, h, kinds).Scan(&at)
 	return at, err
+}
+
+// RecordCodeRequest records a request for a code of kind to target (and
+// forgets a few requests over a day old).
+func RecordCodeRequest(ctx context.Context, q Querier, target, kind string) error {
+	if _, err := q.Exec(ctx, `DELETE FROM xb_auth.code_requests WHERE id = ANY (ARRAY(SELECT id FROM xb_auth.code_requests
+		WHERE at < now() - interval '25 hours' ORDER BY at LIMIT 20 FOR UPDATE SKIP LOCKED))`); err != nil {
+		return err
+	}
+	_, err := q.Exec(ctx, `INSERT INTO xb_auth.code_requests (target_hash, kind) VALUES ($1, $2)`, targetHash(target), kind)
+	return err
 }
 
 // Verified is a code or link used: whose, for what, sent where.
@@ -714,9 +740,8 @@ func VerifyCode(ctx context.Context, q Querier, target string, kinds []string, c
 		return Verified{}, err
 	}
 	if attempts >= MaxCodeTries {
-		// Used up: refused even when right. It stays until it expires, so the
-		// one-code-a-minute rule (LastCodeAt) still sees it and a new code
-		// can't be had at once for five more guesses.
+		// Used up: refused even when right, until it expires or a new code
+		// replaces it (no sooner than the one-a-minute rule allows).
 		return Verified{}, nil
 	}
 	if subtle.ConstantTimeCompare([]byte(codeHash(id, strings.TrimSpace(code))), []byte(hash)) != 1 {

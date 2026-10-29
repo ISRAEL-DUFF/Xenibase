@@ -619,19 +619,23 @@ func (e *Edge) sendEmail(ctx context.Context, p *project, kind, linkType, to str
 	return err
 }
 
-// tooSoon refuses a code for target if one went out within emailEvery.
+// tooSoon refuses a code of kinds for target if one was asked for within
+// emailEvery, and otherwise records this request (of kinds[0]). Requests
+// count whether or not target has a user, so the answer doesn't tell.
 func tooSoon(ctx context.Context, tx pgx.Tx, target string, kinds []string) (*apiErr, error) {
-	last, err := projauth.LastCodeAt(ctx, tx, target, kinds)
-	if err != nil || last == nil {
+	last, err := projauth.LastCodeRequest(ctx, tx, target, kinds)
+	if err != nil {
 		return nil, err
 	}
-	if wait := emailEvery - time.Since(*last); wait > 0 {
-		a := refuse(http.StatusTooManyRequests, "over_email_send_rate_limit",
-			fmt.Sprintf("a code was just sent to this address; wait %d seconds", int(wait.Seconds())+1))
-		a.retryAfter = int(wait.Seconds()) + 1
-		return a, nil
+	if last != nil {
+		if wait := emailEvery - time.Since(*last); wait > 0 {
+			a := refuse(http.StatusTooManyRequests, "over_email_send_rate_limit",
+				fmt.Sprintf("a code was just sent to this address; wait %d seconds", int(wait.Seconds())+1))
+			a.retryAfter = int(wait.Seconds()) + 1
+			return a, nil
+		}
 	}
-	return nil, nil
+	return nil, projauth.RecordCodeRequest(ctx, tx, target, kinds[0])
 }
 
 // ---- Sign-up and sign-in --------------------------------------------------------
@@ -740,6 +744,9 @@ func (e *Edge) signup(c *call) {
 			return err
 		}
 		if a.EmailConfirm {
+			if err := projauth.RecordCodeRequest(ctx, tx, email, projauth.CodeSignup); err != nil {
+				return err
+			}
 			code, err := projauth.NewPasswordCode(ctx, tx, u.ID, projauth.CodeSignup, email, projauth.CodeTTL, hash)
 			if err != nil {
 				return err
