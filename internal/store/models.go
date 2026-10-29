@@ -175,6 +175,7 @@ type Backup struct {
 	CopyStatus      *string
 	CopiedAt        *time.Time
 	CopyError       *string
+	VerifiedAt      *time.Time
 }
 
 type BackupKey struct {

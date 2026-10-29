@@ -13,7 +13,7 @@ paused, even though the billing migration gives it a Free billing account.
 | --- | --- |
 | 6 days without client connections | The org's owners and admins (and the project's admins) are told the project will be paused in 24 hours. |
 | 7 days without client connections, and 24 hours since the warning | **Paused.** Its pooler route points at the waker and its database refuses connections. The data stays where it was. |
-| Paused for 90 days | **Archived.** A logical backup is taken, verified by restoring it into a scratch database, and the database is dropped. Roles, credentials and the connection string are kept. |
+| Paused for 90 days | **Archived.** A logical backup is taken, verified by restoring it into a scratch database, and the database is dropped. Roles, credentials and the connection string are kept. The database is dropped only once the backup records that its restore passed: an archive retried after a crash during the verification tests the backup again first, and one whose backup fails stays paused with its database. |
 | 30 days and 7 days before a year archived | A deletion notice. If the sweep runs late, only the most urgent notice goes out. |
 | A year archived | **Deleted**, like any project. The archive backup is kept for 30 more days. |
 

@@ -89,11 +89,19 @@ type Mailer interface {
 	Send(ctx context.Context, m mail.Message) error
 }
 
+// archiver takes and verifies archive backups (backup.Service).
+type archiver interface {
+	Archive(ctx context.Context, p store.Project, opID *uuid.UUID, log *jobs.StepLogger) (store.Backup, error)
+	VerifyArchive(ctx context.Context, p store.Project, b store.Backup, log *jobs.StepLogger) (store.Backup, error)
+}
+
 // Service runs the Free tier lifecycle.
 type Service struct {
 	db       *pgxpool.Pool
 	projects *provision.Service
 	backups  *backup.Service
+	// archives is backups, or a stand-in in tests without node agents.
+	archives archiver
 	mail     Mailer
 	cfg      Config
 	log      *slog.Logger
@@ -102,7 +110,7 @@ type Service struct {
 // New returns the service.
 func New(db *pgxpool.Pool, projects *provision.Service, backups *backup.Service, m Mailer, cfg Config, log *slog.Logger) *Service {
 	cfg.setDefaults()
-	return &Service{db: db, projects: projects, backups: backups, mail: m, cfg: cfg, log: log}
+	return &Service{db: db, projects: projects, backups: backups, archives: backups, mail: m, cfg: cfg, log: log}
 }
 
 // Kinds returns the operation kinds this service runs.

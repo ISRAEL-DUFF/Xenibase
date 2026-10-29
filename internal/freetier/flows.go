@@ -132,19 +132,34 @@ func (s *Service) runArchive(ctx context.Context, op store.Operation, log *jobs.
 	q := store.New(s.db)
 	opID := op.ID
 	b, err := q.BackupForOperation(ctx, store.BackupForOperationParams{OperationID: &opID, Kind: backup.Archive})
-	if errors.Is(err, pgx.ErrNoRows) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		// The route still points at the waker, so no client reaches the
 		// database while the dump runs.
 		if err := s.setConnections(ctx, p, true); err != nil {
 			return err
 		}
-		if b, err = s.backups.Archive(ctx, p, &opID, log); err != nil {
+		if b, err = s.archives.Archive(ctx, p, &opID, log); err != nil {
 			return err
 		}
-	} else if err != nil {
+	case err != nil:
 		return err
-	} else if err := log.Info(ctx, "backup", "archive backup already taken by an earlier attempt"); err != nil {
-		return err
+	case b.VerifiedAt == nil:
+		// An earlier attempt stopped during the verification, or failed
+		// it and couldn't delete the backup: verify it before dropping.
+		if err := log.Info(ctx, "backup", "an earlier attempt's archive backup is not verified; verifying it again"); err != nil {
+			return err
+		}
+		if b, err = s.archives.VerifyArchive(ctx, p, b, log); err != nil {
+			return err
+		}
+	default:
+		if err := log.Info(ctx, "backup", "archive backup already taken and verified by an earlier attempt"); err != nil {
+			return err
+		}
+	}
+	if b.VerifiedAt == nil {
+		return fmt.Errorf("the archive backup %s is not verified; %s is kept", b.ID, p.DbName)
 	}
 	// Archived first: should the drop fail, a later unarchive recreates the
 	// database from the backup either way.

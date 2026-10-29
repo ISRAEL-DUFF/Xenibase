@@ -607,7 +607,7 @@ func (q *Queries) ListInvitationsForEmail(ctx context.Context, email string) ([]
 }
 
 const listOrgBackups = `-- name: ListOrgBackups :many
-SELECT b.id, b.project_id, b.kind, b.object_key, b.size_bytes, b.checksum, b.started_at, b.finished_at, b.status, b.expires_at, b.storage_target_id, b.operation_id, b.key_wrapped, b.error, b.deleted_at, b.encryption_key_id, b.walg_prefix, b.copy_of, b.copy_target_id, b.copy_status, b.copied_at, b.copy_error, p.name AS project_name, (p.deleted_at IS NOT NULL)::bool AS project_deleted,
+SELECT b.id, b.project_id, b.kind, b.object_key, b.size_bytes, b.checksum, b.started_at, b.finished_at, b.status, b.expires_at, b.storage_target_id, b.operation_id, b.key_wrapped, b.error, b.deleted_at, b.encryption_key_id, b.walg_prefix, b.copy_of, b.copy_target_id, b.copy_status, b.copied_at, b.copy_error, b.verified_at, p.name AS project_name, (p.deleted_at IS NOT NULL)::bool AS project_deleted,
        t.name AS target_name, t.org_id AS target_org_id, k.fingerprint AS key_fingerprint
 FROM backups b JOIN projects p ON p.id = b.project_id
 LEFT JOIN storage_targets t ON t.id = b.storage_target_id
@@ -652,6 +652,7 @@ type ListOrgBackupsRow struct {
 	CopyStatus      *string
 	CopiedAt        *time.Time
 	CopyError       *string
+	VerifiedAt      *time.Time
 	ProjectName     string
 	ProjectDeleted  bool
 	TargetName      *string
@@ -700,6 +701,7 @@ func (q *Queries) ListOrgBackups(ctx context.Context, arg ListOrgBackupsParams) 
 			&i.CopyStatus,
 			&i.CopiedAt,
 			&i.CopyError,
+			&i.VerifiedAt,
 			&i.ProjectName,
 			&i.ProjectDeleted,
 			&i.TargetName,

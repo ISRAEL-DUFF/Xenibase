@@ -39,6 +39,15 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **An archive retry no longer drops a Free project's database on an
+  unverified backup.** The archive backup was marked succeeded before its
+  restore test ran, and deleted only if the test failed and the delete
+  worked. When the server stopped during the test (a deploy, a crash), or
+  the delete failed, the next attempt found the backup and dropped the
+  database on it unverified. A backup now records when its restore test
+  passed (`backups.verified_at`), the archive drops the database only on a
+  verified one, and a retry that finds an unverified backup tests it again
+  first; if that fails the database stays and the project stays paused.
 - **A new delivering server no longer starts with a full webhook rate.**
   The per-organisation delivery rate was a token bucket in the delivering
   server's memory, so a server that took over after a failover or a restart
@@ -650,6 +659,9 @@ bundle share one version (spec §11.5).
   the new `files_share_backups` alert.
 
 ### Upgrading
+- Migration 00093 adds `backups.verified_at`, when a backup's restore test
+  passed. Earlier backups have none; an archive in progress at the upgrade
+  tests its backup again before dropping the database.
 - Backend services' schema version 7 runs on every enabled project with its
   next reconcile (within seconds of the upgrade). It revokes the request
   roles' `EXECUTE` on functions an extension installed; the data API no

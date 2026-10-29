@@ -458,7 +458,8 @@ func (s *Service) verifyRestore(ctx context.Context, p store.Project, b store.Ba
 }
 
 // Archive takes p's archive backup (V3 §4.3) and verifies it by restoring
-// it into a scratch database. The database must accept connections.
+// it into a scratch database (VerifyArchive). The database must accept
+// connections. The backup it returns has VerifiedAt set.
 func (s *Service) Archive(ctx context.Context, p store.Project, opID *uuid.UUID, log *jobs.StepLogger) (store.Backup, error) {
 	if _, err := s.PlacementFor(ctx, p); err != nil {
 		return store.Backup{}, jobs.Permanent(fmt.Errorf("no backup storage to archive to: %w", err))
@@ -467,11 +468,33 @@ func (s *Service) Archive(ctx context.Context, p store.Project, opID *uuid.UUID,
 	if err != nil {
 		return b, err
 	}
-	if err := s.verifyRestore(ctx, p, b, log); err != nil {
-		_ = s.deleteObject(context.WithoutCancel(ctx), b)
+	return s.VerifyArchive(ctx, p, b, log)
+}
+
+// VerifyArchive restores archive backup b of p into a scratch database
+// and reads it back, then records on the backup that it was verified: an
+// archive drops the database only after that (V3 §4.3). A backup that
+// fails is deleted, so a retry takes a new one; should the delete fail
+// too, the backup stays unverified and the retry verifies it again. A
+// backup verified already is returned as it is.
+func (s *Service) VerifyArchive(ctx context.Context, p store.Project, b store.Backup, log *jobs.StepLogger) (store.Backup, error) {
+	if b.VerifiedAt != nil {
+		return b, nil
+	}
+	if err := s.verify(ctx, p, b, log); err != nil {
+		if derr := s.deleteObject(context.WithoutCancel(ctx), b); derr != nil {
+			_ = log.Warn(context.WithoutCancel(ctx), "verify", "delete the unverified archive backup: %v; a retry verifies it again", derr)
+		}
 		return store.Backup{}, fmt.Errorf("verify the archive backup: %w", err)
 	}
-	return b, nil
+	v, err := store.New(s.db).MarkBackupVerified(ctx, b.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.Backup{}, fmt.Errorf("the archive backup %s is no longer there to mark verified", b.ID)
+	}
+	if err != nil {
+		return store.Backup{}, fmt.Errorf("record the archive backup's verification: %w", err)
+	}
+	return v, nil
 }
 
 // RestoreArchive creates p's database again and restores archive backup
