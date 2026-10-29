@@ -233,9 +233,14 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 		}
 		log.Info("operation succeeded")
 	case ctx.Err() != nil:
-		// Shutting down: hand the operation back for another worker now.
+		// Shutting down: hand the operation back for another worker now,
+		// with the attempt given back (a clean shutdown is not a crash).
 		_ = steps.Warn(fctx, "queue", "interrupted by worker shutdown; requeued")
-		r.retry(fctx, op, err, time.Now())
+		if _, werr := r.q.RequeueInterruptedOperation(fctx, store.RequeueInterruptedOperationParams{
+			ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error(),
+		}); werr != nil {
+			log.Error("requeue interrupted operation", "err", werr)
+		}
 	case IsPermanent(err) || int(op.Attempts) >= maxAttempts:
 		r.fail(fctx, kind, op, steps, err)
 	default:

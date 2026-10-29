@@ -221,6 +221,36 @@ func TestShutdownRequeues(t *testing.T) {
 	if got.Status != jobs.StatusQueued || got.LockedBy != nil {
 		t.Fatalf("operation not requeued on shutdown: %+v", got)
 	}
+	// A clean shutdown is not a crash: the attempt is given back.
+	if got.Attempts != 0 {
+		t.Fatalf("attempts = %d after an interrupted first attempt, want 0", got.Attempts)
+	}
+}
+
+// An operation interrupted by shutdown on its last attempt runs again on
+// the next server instead of failing as over the limit.
+func TestShutdownOnLastAttemptRunsAgain(t *testing.T) {
+	pool := storetest.New(t)
+	started := make(chan struct{}, 1)
+	var runs atomic.Int64
+	kinds := map[string]jobs.Kind{"once": {MaxAttempts: 1, Handler: func(ctx context.Context, _ store.Operation, _ *jobs.StepLogger) error {
+		if runs.Add(1) == 1 {
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}}
+	_, stop := start(t, pool, fastConfig("old"), kinds)
+	op := enqueue(t, pool, "once", nil)
+	<-started
+	stop()
+
+	start(t, pool, fastConfig("new"), kinds)
+	done := waitTerminal(t, pool, op.ID)
+	if done.Status != jobs.StatusSucceeded || done.Attempts != 1 || runs.Load() != 2 {
+		t.Fatalf("status=%s attempts=%d runs=%d", done.Status, done.Attempts, runs.Load())
+	}
 }
 
 func TestStream(t *testing.T) {

@@ -305,6 +305,36 @@ func (q *Queries) ReclaimStaleOperations(ctx context.Context, staleBefore time.T
 	return items, nil
 }
 
+const requeueInterruptedOperation = `-- name: RequeueInterruptedOperation :execrows
+UPDATE operations
+SET status = 'queued', attempts = GREATEST(attempts - 1, 0), error = $1::text, run_after = now(), locked_by = NULL, locked_at = NULL
+WHERE id = $2 AND locked_by = $3::text AND attempts = $4::int AND status = 'running'
+`
+
+type RequeueInterruptedOperationParams struct {
+	Error   string
+	ID      uuid.UUID
+	Worker  string
+	Attempt int32
+}
+
+// RequeueInterruptedOperation hands back an attempt that a clean shutdown
+// cut short, and gives the attempt back: only crashes count toward the
+// limit.
+// tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
+func (q *Queries) RequeueInterruptedOperation(ctx context.Context, arg RequeueInterruptedOperationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueInterruptedOperation,
+		arg.Error,
+		arg.ID,
+		arg.Worker,
+		arg.Attempt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const retryOperation = `-- name: RetryOperation :execrows
 UPDATE operations
 SET status = 'queued', error = $1::text, run_after = $2, locked_by = NULL, locked_at = NULL

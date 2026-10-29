@@ -41,7 +41,11 @@ What happens:
    replaces them, which compose doesn't notice). Connected clients
    reconnect (a second or two).
 4. The bundled agent restarts with the new version. Running operations are
-   resumed by the new server: every step is idempotent.
+   resumed by the new server: every step is idempotent. The old server
+   hands back the attempt it was running when it stops, so a restart does
+   not use up an attempt (an operation on its last attempt runs again
+   rather than failing). Only a server that crashes or is killed before it
+   could hand back costs the operation an attempt.
 5. Migrations may queue one-off `apply_settings` operations (for example,
    00018 gives older shared projects their `temp_file_limit`); they finish
    in the background and show on Operations.

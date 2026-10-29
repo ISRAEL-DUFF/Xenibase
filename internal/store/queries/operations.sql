@@ -66,6 +66,15 @@ UPDATE operations
 SET status = 'queued', error = @error::text, run_after = @run_after, locked_by = NULL, locked_at = NULL
 WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
+-- RequeueInterruptedOperation hands back an attempt that a clean shutdown
+-- cut short, and gives the attempt back: only crashes count toward the
+-- limit.
+-- name: RequeueInterruptedOperation :execrows
+-- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
+UPDATE operations
+SET status = 'queued', attempts = GREATEST(attempts - 1, 0), error = @error::text, run_after = now(), locked_by = NULL, locked_at = NULL
+WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
+
 -- ReclaimStaleOperations requeues running operations whose worker stopped
 -- heartbeating (crashed or partitioned), so they resume elsewhere.
 -- name: ReclaimStaleOperations :many
