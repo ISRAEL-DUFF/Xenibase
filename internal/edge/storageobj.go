@@ -623,6 +623,9 @@ func (e *Edge) putObject(c *call, req Request, bucket, path string, upsert bool,
 		e.storageError(c, err)
 		return
 	}
+	if replaced(o) {
+		e.publicGone(c.p, b, path)
+	}
 	c.json(http.StatusOK, map[string]any{"id": o.ID, "key": o.Bucket + "/" + o.Path, "bucket": o.Bucket, "path": o.Path,
 		"size": o.Size, "mime_type": o.MIMEType, "etag": o.ETag, "checksum": o.Checksum})
 }
@@ -844,6 +847,9 @@ func (e *Edge) moveOrCopy(c *call, req Request, copyIt bool) {
 			e.storageError(c, err)
 			return
 		}
+		if from, err := e.bucket(ctx, c.p, in.Bucket); err == nil {
+			e.publicGone(c.p, from, in.From)
+		}
 		c.json(http.StatusOK, map[string]any{"message": "moved", "object": o})
 		return
 	}
@@ -867,6 +873,9 @@ func (e *Edge) moveOrCopy(c *call, req Request, copyIt bool) {
 	if err != nil {
 		e.storageError(c, err)
 		return
+	}
+	if replaced(o) {
+		e.publicGone(c.p, dst, in.To)
 	}
 	c.json(http.StatusOK, map[string]any{"message": "copied", "object": o})
 }
@@ -908,6 +917,13 @@ func (e *Edge) remove(c *call, req Request, bucket string, paths []string, singl
 	}
 	if len(deleted) > 0 {
 		e.collectSoon(c.p)
+		if b, err := e.bucket(ctx, c.p, bucket); err == nil {
+			gone := make([]string, 0, len(deleted))
+			for _, o := range deleted {
+				gone = append(gone, o.Path)
+			}
+			e.publicGone(c.p, b, gone...)
+		}
 	}
 	if single {
 		if len(deleted) == 0 {
@@ -919,6 +935,10 @@ func (e *Edge) remove(c *call, req Request, bucket string, paths []string, singl
 	}
 	c.json(http.StatusOK, deleted)
 }
+
+// replaced reports whether an upsert's row replaced one (which keeps its
+// created_at) rather than adding it.
+func replaced(o *Object) bool { return o.CreatedAt.Before(o.UpdatedAt) }
 
 // ---- Clean-up ------------------------------------------------------------------
 

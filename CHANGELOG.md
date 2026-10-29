@@ -354,6 +354,14 @@ bundle share one version (spec §11.5).
   size against the quota (direct and dashboard uploads count them too, and
   starting one takes its turn on the project's usage row), and a project
   may have 100 open at once (`429 too_many_uploads`).
+- **A CDN purge was tried once, and only when a bucket went private.** A
+  purge Cloudflare refused was only logged, so the CDN could keep serving
+  the now-private files for the bucket's cache time (up to a year), and
+  deleting, replacing or moving a public bucket's file, or deleting or
+  emptying the bucket, purged nothing. Every such change now purges the
+  files' URLs (and their image renders'), and a purge waits in the new
+  `cdn_purges` table until Cloudflare takes it: the storage sweep retries
+  it from every minute to every hour.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -372,6 +380,8 @@ bundle share one version (spec §11.5).
   they can't be used once. Apps sign a new URL; they last 2 hours at most.
   A project's signed uploads fail until its schema reaches version 8, which
   the backend services reconciler applies within minutes of the upgrade.
+- Migration 00083 adds `cdn_purges`, the CDN purges the storage sweep
+  retries.
 
 ## v4.2.4
 

@@ -782,7 +782,10 @@ buckets, `private` otherwise, for the bucket's cache time), and
 `Content-Disposition: attachment` with `?download` (or `?download=<name>`). Put a CDN in front of
 the edge's hostname to cache public files; with Cloudflare, set
 `XENIBASE_CDN_CLOUDFLARE_ZONE_ID` and `XENIBASE_CDN_CLOUDFLARE_TOKEN` (a token
-with Cache Purge) on xenibase-server so a bucket made private is purged.
+with Cache Purge) on xenibase-server so files that leave a public bucket's
+URLs are purged: the bucket made private, deleted or emptied, or a file
+deleted, replaced or moved. A purge Cloudflare refuses is retried every
+few minutes until it succeeds.
 
 ### Image transforms
 

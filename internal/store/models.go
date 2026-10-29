@@ -285,6 +285,16 @@ type CapacityProposal struct {
 	UpdatedAt        time.Time
 }
 
+type CdnPurge struct {
+	ID        int64
+	ProjectID uuid.UUID
+	Prefixes  []string
+	Attempts  int32
+	LastError *string
+	NextAt    time.Time
+	CreatedAt time.Time
+}
+
 type CostAllocation struct {
 	Day         pgtype.Date
 	OrgID       uuid.UUID

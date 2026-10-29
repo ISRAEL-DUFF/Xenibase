@@ -82,6 +82,9 @@ func (s *Service) StorageSweep(ctx context.Context) error {
 	if err := s.cleanupDeleted(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	if err := s.RetryCDNPurges(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -496,11 +499,17 @@ func (s *Service) ReconcileStorageNow(ctx context.Context, projectID uuid.UUID) 
 	return ErrNotFound
 }
 
-// StorageEvent acts on an edge's storage change: a bucket made private
-// leaves the CDN's cache (V4 §5.4).
+// StorageEvent acts on an edge's storage change: what left a public
+// bucket's URLs (the bucket made private, deleted or emptied, objects
+// deleted, replaced or moved away) leaves the CDN's cache (V4 §5.4).
 func (s *Service) StorageEvent(ctx context.Context, ev edgeapi.StorageEvent) error {
-	if ev.Event != edgeapi.EventBucketPrivate {
+	switch ev.Event {
+	case edgeapi.EventBucketPrivate, edgeapi.EventBucketDeleted, edgeapi.EventBucketEmptied, edgeapi.EventObjectsChanged:
+	default:
 		return fmt.Errorf("%w: unknown storage event %q", ErrInvalid, ev.Event)
+	}
+	if !files.BucketRe.MatchString(ev.Bucket) {
+		return fmt.Errorf("%w: not a bucket: %q", ErrInvalid, ev.Bucket)
 	}
 	svc, err := store.New(s.db).ProjectServicesByRef(ctx, ev.Ref)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -513,23 +522,107 @@ func (s *Service) StorageEvent(ctx context.Context, ev edgeapi.StorageEvent) err
 	if err != nil {
 		return err
 	}
-	return s.PurgeBucket(ctx, ev.Ref, p.Region, ev.Bucket)
+	if ev.Event != edgeapi.EventObjectsChanged {
+		return s.PurgeBucket(ctx, p.ID, ev.Ref, p.Region, ev.Bucket)
+	}
+	for _, path := range ev.Paths {
+		if !files.ValidPath(path) {
+			return fmt.Errorf("%w: not an object path: %q", ErrInvalid, path)
+		}
+	}
+	return s.PurgeObjects(ctx, p.ID, ev.Ref, p.Region, ev.Bucket, ev.Paths)
 }
 
+// publicRoutes are the keyless routes a public bucket's files and renders
+// are served (and cached) at.
+var publicRoutes = []string{"public", "object/public", "render/public", "render/image/public", "render"}
+
+// purgeEachUpTo is the most objects purged one by one; more purge the
+// whole bucket (Cloudflare takes 30 prefixes a request).
+const purgeEachUpTo = 20
+
 // PurgeBucket removes a bucket's public files from the CDN's cache.
-func (s *Service) PurgeBucket(ctx context.Context, ref, region, bucket string) error {
-	if s.CDN == nil {
-		return nil
-	}
+func (s *Service) PurgeBucket(ctx context.Context, projectID uuid.UUID, ref, region, bucket string) error {
 	base := strings.TrimPrefix(s.URL(ref, region), "https://")
-	if base == "" {
+	if s.CDN == nil || base == "" {
 		return nil
 	}
 	var prefixes []string
-	for _, p := range []string{"public", "object/public", "render/public", "render/image/public", "render"} {
+	for _, p := range publicRoutes {
 		prefixes = append(prefixes, base+"/storage/v1/"+p+"/"+bucket+"/")
 	}
-	return s.CDN.PurgePrefixes(ctx, prefixes)
+	return s.purge(ctx, projectID, prefixes)
+}
+
+// PurgeObjects removes public files' URLs, and their renders', from the
+// CDN's cache: an object's path is a prefix of every URL it is served at.
+func (s *Service) PurgeObjects(ctx context.Context, projectID uuid.UUID, ref, region, bucket string, paths []string) error {
+	if len(paths) > purgeEachUpTo {
+		return s.PurgeBucket(ctx, projectID, ref, region, bucket)
+	}
+	base := strings.TrimPrefix(s.URL(ref, region), "https://")
+	if s.CDN == nil || base == "" || len(paths) == 0 {
+		return nil
+	}
+	var prefixes []string
+	for _, path := range paths {
+		for _, p := range publicRoutes {
+			prefixes = append(prefixes, base+"/storage/v1/"+p+"/"+bucket+"/"+files.EscapePath(path))
+		}
+	}
+	return s.purge(ctx, projectID, prefixes)
+}
+
+// purge queues prefixes for the CDN and tries them at once; one the CDN
+// doesn't take now stays queued for the sweep (RetryCDNPurges).
+func (s *Service) purge(ctx context.Context, projectID uuid.UUID, prefixes []string) error {
+	q := store.New(s.db)
+	id, err := q.EnqueueCDNPurge(ctx, store.EnqueueCDNPurgeParams{ProjectID: projectID, Prefixes: prefixes})
+	if err != nil {
+		return err
+	}
+	pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := s.CDN.PurgePrefixes(pctx, prefixes); err != nil {
+		s.log.Warn("CDN purge failed; the storage sweep retries it", "project_id", projectID, "err", err)
+		msg := err.Error()
+		return q.FailCDNPurge(context.WithoutCancel(ctx), store.FailCDNPurgeParams{ID: id, LastError: &msg})
+	}
+	return q.FinishCDNPurge(context.WithoutCancel(ctx), id)
+}
+
+// RetryCDNPurges tries the purges the CDN hasn't taken yet, each again
+// after a backoff of up to an hour, until it does.
+func (s *Service) RetryCDNPurges(ctx context.Context) error {
+	q := store.New(s.db)
+	if _, err := q.DropStaleCDNPurges(ctx); err != nil {
+		return err
+	}
+	if s.CDN == nil {
+		return nil
+	}
+	due, err := q.ClaimCDNPurges(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, p := range due {
+		pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := s.CDN.PurgePrefixes(pctx, p.Prefixes)
+		cancel()
+		if err != nil {
+			msg := err.Error()
+			errs = append(errs, fmt.Errorf("CDN purge (attempt %d): %w", p.Attempts+2, err))
+			if ferr := q.FailCDNPurge(ctx, store.FailCDNPurgeParams{ID: p.ID, LastError: &msg}); ferr != nil {
+				errs = append(errs, ferr)
+			}
+			continue
+		}
+		if err := q.FinishCDNPurge(ctx, p.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // CDNPurger removes cached URLs from the CDN in front of the edges.

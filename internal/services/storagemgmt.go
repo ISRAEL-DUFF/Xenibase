@@ -293,7 +293,7 @@ func (s *Service) UpdateBucket(ctx context.Context, projectID uuid.UUID, id stri
 		return Bucket{}, err
 	}
 	if old.Public && !public {
-		if err := s.PurgeBucket(ctx, sc.svc.Ref, sc.p.Region, id); err != nil {
+		if err := s.PurgeBucket(ctx, projectID, sc.svc.Ref, sc.p.Region, id); err != nil {
 			s.log.Warn("purge a bucket made private from the CDN", "project_id", projectID, "bucket", id, "err", err)
 		}
 	}
@@ -312,16 +312,22 @@ func (s *Service) DeleteBucket(ctx context.Context, projectID uuid.UUID, id stri
 			return err
 		}
 	}
-	tag, err := sc.conn.Exec(ctx, `DELETE FROM xb_storage.buckets WHERE id = $1`, id)
+	var public bool
+	err = sc.conn.QueryRow(ctx, `DELETE FROM xb_storage.buckets WHERE id = $1 RETURNING public`, id).Scan(&public)
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) && pe.Code == "23503" {
 		return fmt.Errorf("%w: the bucket still has files; empty it first", ErrConflict)
 	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: no bucket %s", ErrNotFound, id)
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: no bucket %s", ErrNotFound, id)
+	if public {
+		if err := s.PurgeBucket(ctx, projectID, sc.svc.Ref, sc.p.Region, id); err != nil {
+			s.log.Warn("purge a deleted public bucket from the CDN", "project_id", projectID, "bucket", id, "err", err)
+		}
 	}
 	return nil
 }
@@ -455,7 +461,23 @@ func (s *Service) UploadFile(ctx context.Context, projectID uuid.UUID, bucket, p
 		_ = sc.client.Delete(context.WithoutCancel(ctx), files.ObjectKey(sc.prefix(), version))
 		return nil, err
 	}
+	// A replaced public file leaves the CDN's cache (an upsert that
+	// replaced a row keeps its created_at).
+	if b.Public && o.CreatedAt.Before(o.UpdatedAt) {
+		if err := s.PurgeObjects(ctx, projectID, sc.svc.Ref, sc.p.Region, bucket, []string{path}); err != nil {
+			s.log.Warn("purge a replaced public file from the CDN", "project_id", projectID, "bucket", bucket, "err", err)
+		}
+	}
 	return o, nil
+}
+
+// trimmed is paths without a folder's trailing slash.
+func trimmed(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, strings.TrimSuffix(p, "/"))
+	}
+	return out
 }
 
 type hashing struct {
@@ -504,7 +526,20 @@ func (s *Service) DeleteFiles(ctx context.Context, projectID uuid.UUID, bucket s
 		return 0, err
 	}
 	defer sc.close()
+	b, err := s.bucketInfo(ctx, sc.conn, bucket)
+	if err != nil {
+		return 0, err
+	}
 	var n int64
+	// A public bucket's deleted files leave the CDN's cache (a folder's
+	// path is a prefix of its files').
+	defer func() {
+		if b.Public && n > 0 {
+			if err := s.PurgeObjects(ctx, projectID, sc.svc.Ref, sc.p.Region, bucket, trimmed(paths)); err != nil {
+				s.log.Warn("purge deleted public files from the CDN", "project_id", projectID, "bucket", bucket, "err", err)
+			}
+		}
+	}()
 	// A folder's path takes everything under it.
 	for _, p := range paths {
 		tag, err := sc.conn.Exec(ctx, `DELETE FROM xb_storage.objects WHERE bucket = $1 AND (path = $2 OR path LIKE $3 ESCAPE '\')`,

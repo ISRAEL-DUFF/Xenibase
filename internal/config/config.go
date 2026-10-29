@@ -64,7 +64,7 @@ type Config struct {
 	Support Support
 	// AuthPhone is the platform's SMS and WhatsApp for auth codes (V4 §6.2).
 	AuthPhone AuthPhone
-	// CDN is purged when a public bucket goes private (V4 §5.4).
+	// CDN is purged of files that leave a public bucket's URLs (V4 §5.4).
 	CDN CDN
 	// Cloud configures the provider servers are created with (V3 §5.1).
 	Cloud Cloud

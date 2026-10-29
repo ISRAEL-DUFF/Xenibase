@@ -352,6 +352,11 @@ func (e *Edge) completeUpload(c *call, id uuid.UUID) {
 		e.storageError(c, err)
 		return
 	}
+	if replaced(o) {
+		if b, err := e.bucket(ctx, c.p, s.Bucket); err == nil {
+			e.publicGone(c.p, b, s.Path)
+		}
+	}
 	c.json(http.StatusOK, map[string]any{"id": o.ID, "key": o.Bucket + "/" + o.Path, "bucket": o.Bucket, "path": o.Path,
 		"size": o.Size, "mime_type": o.MIMEType, "etag": o.ETag})
 }

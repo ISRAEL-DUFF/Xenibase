@@ -95,7 +95,8 @@ type Service struct {
 	// Files resolves the object store for files of projects in a region
 	// (V4 §5.1); nil turns storage off.
 	Files func(ctx context.Context, region string, residency bool) (storage.Target, error)
-	// CDN purges public files when their bucket goes private (V4 §5.4).
+	// CDN purges the URLs public files leave (V4 §5.4): a bucket
+	// made private or deleted, an object deleted, replaced or moved.
 	CDN CDNPurger
 	// StorageGrace is how long replaced and deleted files' bytes stay for
 	// downloads in flight (a minute by default; tests shorten it).
