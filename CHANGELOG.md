@@ -64,6 +64,12 @@ bundle share one version (spec §11.5).
   but never checked, so every branch could be reset at once, each a full
   dump of the parent with a live source. A reset beyond the plan's limit
   is refused with 409 `quota_exceeded`, as a new branch is.
+- **A branch create that failed after it went live no longer drops it.**
+  Backend services were turned on after the branch was published, so a
+  failure there retried the whole create, dropping the live database under
+  its clients, and a second failure left an active branch whose API keys
+  never worked. They are now turned on before the branch is published, and
+  a retry that finds the branch active only queues its file copy.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

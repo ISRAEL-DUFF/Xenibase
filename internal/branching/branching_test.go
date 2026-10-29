@@ -13,6 +13,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/provision"
+	"github.com/israel-duff/xenibase/internal/services"
 	"github.com/israel-duff/xenibase/internal/store"
 	"github.com/israel-duff/xenibase/internal/tenancy"
 )
@@ -166,7 +167,7 @@ func TestDetachIsANewProject(t *testing.T) {
 	}
 }
 
-// TestBranchInAnotherOrganisationIsNotFilled:a branch whose parent is in
+// TestBranchInAnotherOrganisationIsNotFilled: a branch whose parent is in
 // another organisation (split by a transfer before transfers refused it)
 // is neither reset nor filled from the other organisation's data.
 func TestBranchInAnotherOrganisationIsNotFilled(t *testing.T) {
@@ -253,7 +254,84 @@ func TestSweepChecksTheLockedRow(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-// TestResetCopiesFilesAgain:a branch made with copy_files remembers it,
+// fakeAPI records what runCreate and runReset ask of backend services.
+type fakeAPI struct {
+	enabled int
+	files   []services.BranchFiles
+}
+
+func (f *fakeAPI) PrepareBranch(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (*services.BranchAPI, error) {
+	return nil, nil
+}
+
+func (f *fakeAPI) EnableBranch(context.Context, store.Project, *jobs.StepLogger) error {
+	f.enabled++
+	return nil
+}
+
+func (f *fakeAPI) BranchFiles(_ context.Context, _ store.Project, _ uuid.UUID, bf services.BranchFiles, _ *jobs.StepLogger) error {
+	f.files = append(f.files, bf)
+	return nil
+}
+
+// TestCreateRetryAfterPublishKeepsTheBranch: a create that failed after
+// Publish is retried on a branch that is active, routed and in use; the
+// retry must not recreate its database under its clients, only finish.
+func TestCreateRetryAfterPublishKeepsTheBranch(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	api := &fakeAPI{}
+	h.s.API = api
+	owner := h.user(t, authz.OrgOwner)
+	parent := h.project(t, "Shop", nil)
+	c, _, err := h.s.Create(ctx, CreateParams{ParentID: parent.ID, Name: "pr-1", CopyFiles: true, CreatedBy: &owner},
+		Resolved{Parent: parent, Source: SourceLive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := c.Project
+	t.Cleanup(func() {
+		_, _ = h.cluster.Exec(context.Background(), "DROP DATABASE IF EXISTS "+provision.Ident(b.DbName)+" WITH (FORCE)")
+		_, _ = h.cluster.Exec(context.Background(), "DROP OWNED BY "+provision.Ident(b.OwnerRole))
+		_, _ = h.cluster.Exec(context.Background(), "DROP ROLE IF EXISTS "+provision.Ident(b.OwnerRole))
+	})
+	op, log := h.claim(t, c.Operation)
+	// The first attempt got as far as Publish: the branch's database holds
+	// its copy, and the branch is active.
+	if err := h.s.projects.Prepare(ctx, b, log); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := h.s.projects.AdminConn(ctx, b.InstanceID, b.DbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE TABLE items (id int)`); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close(ctx)
+	if err := store.New(h.db).SetProjectStatus(ctx, store.SetProjectStatusParams{ID: b.ID, Status: provision.StatusActive}); err != nil {
+		t.Fatal(err)
+	}
+
+	op.Attempts = 2
+	if err := h.s.runCreate(ctx, op, log); err != nil {
+		t.Fatalf("the retry: %v", err)
+	}
+	conn, err = h.s.projects.AdminConn(ctx, b.InstanceID, b.DbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	var kept bool
+	if err := conn.QueryRow(ctx, `SELECT to_regclass('items') IS NOT NULL`).Scan(&kept); err != nil || !kept {
+		t.Fatalf("the retry recreated the active branch's database: %v %v", kept, err)
+	}
+	if api.enabled != 0 || len(api.files) != 1 || !api.files[0].Copy {
+		t.Fatalf("the retry's backend services: enabled %d times, files %+v", api.enabled, api.files)
+	}
+}
+
+// TestResetCopiesFilesAgain: a branch made with copy_files remembers it,
 // and its resets copy the parent's files again.
 func TestResetCopiesFilesAgain(t *testing.T) {
 	h := newHarness(t)

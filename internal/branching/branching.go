@@ -235,6 +235,11 @@ func (s *Service) runCreate(ctx context.Context, op store.Operation, log *jobs.S
 	if err != nil {
 		return err
 	}
+	// A retry after Publish finds the branch filled, routed and serving:
+	// it is never recreated under its clients, only what follows runs.
+	if p.Status == provision.StatusActive {
+		return s.created(ctx, p, params, log)
+	}
 	password, err := s.projects.Password(op)
 	if err != nil {
 		return err
@@ -251,13 +256,22 @@ func (s *Service) runCreate(ctx context.Context, op store.Operation, log *jobs.S
 	if err := s.fill(ctx, p, params, log); err != nil {
 		return err
 	}
-	if err := s.projects.Publish(ctx, p, password, log); err != nil {
-		return err
-	}
+	// The API goes on before the branch is published: a failure is retried
+	// on a database no one uses yet, and rolled back with the branch.
 	if s.API != nil {
 		if err := s.API.EnableBranch(ctx, p, log); err != nil {
 			return fmt.Errorf("backend services: %w", err)
 		}
+	}
+	if err := s.projects.Publish(ctx, p, password, log); err != nil {
+		return err
+	}
+	return s.created(ctx, p, params, log)
+}
+
+// created finishes a published branch: its files, in the background.
+func (s *Service) created(ctx context.Context, p store.Project, params fillParams, log *jobs.StepLogger) error {
+	if s.API != nil {
 		if err := s.API.BranchFiles(ctx, p, params.Parent, services.BranchFiles{Copy: params.CopyFiles}, log); err != nil {
 			return fmt.Errorf("files: %w", err)
 		}
