@@ -208,8 +208,10 @@ Shared-tier projects are measured every minute:
   **Reclaim space** (Project Settings → Database) to give the space back.
 
 Locks lift at the next check once the project is under the limit.
-Statements running over 10 minutes are cancelled and transactions idle
-over 5 minutes are ended; the project's Metrics page lists them.
+Statements running over 10 minutes are cancelled, a statement that keeps
+running after its cancel (PL/pgSQL can catch it) is ended with its session
+15 seconds later, and transactions idle over 5 minutes are ended; the
+project's Metrics page lists them.
 
 Dedicated instances beyond an org's allowance become requests (Dedicated
 requests) for you to approve or reject. An org can be given its own

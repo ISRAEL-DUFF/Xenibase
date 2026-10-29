@@ -451,6 +451,40 @@ func TestReaperEndsLongStatements(t *testing.T) {
 	if q := list.Items[0].Query; list.Items[0].Kind != gen.Statement || q == nil || !strings.Contains(*q, "pg_sleep(1800)") {
 		t.Fatalf("latest reaped: %+v", list.Items[0])
 	}
+
+	// A block that catches the cancel keeps running the same statement;
+	// the next pass ends its session.
+	trapped := make(chan error, 1)
+	go func() {
+		_, err := long.Exec(ctx, `DO $$ BEGIN LOOP BEGIN PERFORM pg_sleep(1800); EXCEPTION WHEN query_canceled THEN NULL; END; END LOOP; END $$`)
+		trapped <- err
+	}()
+	time.Sleep(500 * time.Millisecond)
+	e.TenancyAdvance(11 * time.Minute)
+	for pass, want := range []string{"statement", "statement_terminated"} {
+		reaped, err := e.Tenancy.Reap(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var kinds []string
+		for _, r := range reaped {
+			if r.ProjectID == c.Project.Id {
+				kinds = append(kinds, r.Kind)
+			}
+		}
+		if strings.Join(kinds, ",") != want {
+			t.Fatalf("pass %d over the trapping block: %v, want %s", pass+1, kinds, want)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	select {
+	case err := <-trapped:
+		if err == nil {
+			t.Fatal("the trapping block finished normally")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the block that caught the cancel is still running")
+	}
 }
 
 // TestUsageRecordsAWeekOfHourlyStorage is M9's fourth done-when (V2 §10.9):

@@ -11381,7 +11381,8 @@ export interface components {
         };
         ReapedSession: {
             /** @enum {string} */
-            kind: "statement" | "idle_in_transaction";
+            /** @description statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended. */
+            kind: "statement" | "statement_terminated" | "idle_in_transaction";
             role: string;
             duration_s: number;
             query?: string | null;

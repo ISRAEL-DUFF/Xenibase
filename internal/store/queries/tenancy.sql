@@ -53,8 +53,15 @@ SELECT COALESCE(sum(s.v), 0)::float8 FROM (
   FROM projects p WHERE p.org_id = @org_id AND p.deleted_at IS NULL AND p.tier = 'shared') s;
 
 -- name: InsertReapedSession :exec
-INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query)
-VALUES (@project_id, @org_id, @kind, @role_name, @duration_s, sqlc.narg(query));
+INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query, pid, started_at)
+VALUES (@project_id, @org_id, @kind, @role_name, @duration_s, sqlc.narg(query), sqlc.narg(pid), sqlc.narg(started_at));
+
+-- name: ReapedStatementCancelled :one
+-- Whether the reaper already cancelled this backend's statement (the same
+-- pid and query_start), so a statement still running caught the cancel.
+SELECT EXISTS (SELECT 1 FROM reaped_sessions
+  WHERE project_id = @project_id AND org_id = @org_id AND kind = 'statement'
+    AND pid = @pid AND started_at = @started_at)::bool;
 
 -- name: ListReapedSessions :many
 SELECT * FROM reaped_sessions WHERE project_id = @project_id AND org_id = @org_id

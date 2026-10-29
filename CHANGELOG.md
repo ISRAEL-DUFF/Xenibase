@@ -660,6 +660,15 @@ bundle share one version (spec §11.5).
   settings row, which a rotation re-seals like every other secret, so they
   do not change. `rotate.Verify` opens the seed and fails when projects
   exist without one.
+- **The statement reaper ends a statement that catches its cancel.**
+  PL/pgSQL can trap `query_canceled`, so a block that caught it kept
+  running the same statement after the reaper's cancel: every 15 seconds
+  the reaper cancelled it again and logged another row, and a tenant could
+  keep a heavy statement running on a shared cluster indefinitely. The
+  reaper now records the backend and the statement's start with each
+  cancel, and on a later pass terminates a backend still running a
+  statement it cancelled. The project's reaped log shows it as
+  `statement_terminated` ("statement ended").
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
@@ -709,6 +718,11 @@ bundle share one version (spec §11.5).
   started makes the seed from the old key itself, and refuses when
   `XENIBASE_MASTER_KEY_PREVIOUS` lists more than one key, since it cannot
   tell which one the servers used (`docs/operations.md`, "Secrets").
+- Migration 00089 adds `reaped_sessions.pid` and `started_at` and the
+  `statement_terminated` kind, which `GET /api/v1/projects/{id}/reaped`
+  can now return. A statement cancelled before the upgrade has no `pid`
+  recorded, so if it caught the cancel it is cancelled once more, then
+  ended on the following pass.
 
 ## v4.2.4
 

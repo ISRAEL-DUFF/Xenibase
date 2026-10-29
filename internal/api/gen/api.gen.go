@@ -2272,8 +2272,9 @@ func (e ReadReplicaStatus) Valid() bool {
 
 // Defines values for ReapedSessionKind.
 const (
-	IdleInTransaction ReapedSessionKind = "idle_in_transaction"
-	Statement         ReapedSessionKind = "statement"
+	IdleInTransaction   ReapedSessionKind = "idle_in_transaction"
+	Statement           ReapedSessionKind = "statement"
+	StatementTerminated ReapedSessionKind = "statement_terminated"
 )
 
 // Valid indicates whether the value is a known member of the ReapedSessionKind enum.
@@ -2282,6 +2283,8 @@ func (e ReapedSessionKind) Valid() bool {
 	case IdleInTransaction:
 		return true
 	case Statement:
+		return true
+	case StatementTerminated:
 		return true
 	default:
 		return false
@@ -8367,14 +8370,16 @@ type RealtimeTable struct {
 
 // ReapedSession defines model for ReapedSession.
 type ReapedSession struct {
-	CreatedAt time.Time         `json:"created_at"`
-	DurationS int               `json:"duration_s"`
-	Kind      ReapedSessionKind `json:"kind"`
-	Query     *string           `json:"query,omitempty"`
-	Role      string            `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	DurationS int       `json:"duration_s"`
+
+	// Kind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+	Kind  ReapedSessionKind `json:"kind"`
+	Query *string           `json:"query,omitempty"`
+	Role  string            `json:"role"`
 }
 
-// ReapedSessionKind defines model for ReapedSession.Kind.
+// ReapedSessionKind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
 type ReapedSessionKind string
 
 // ReapedSessionList defines model for ReapedSessionList.

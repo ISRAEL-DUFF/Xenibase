@@ -1180,6 +1180,8 @@ type ReapedSession struct {
 	DurationS int32
 	Query     *string
 	CreatedAt time.Time
+	Pid       *int32
+	StartedAt *time.Time
 }
 
 type RebalanceMove struct {

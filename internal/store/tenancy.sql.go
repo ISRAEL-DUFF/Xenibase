@@ -690,8 +690,8 @@ func (q *Queries) InsertPlan(ctx context.Context, arg InsertPlanParams) (QuotaPl
 }
 
 const insertReapedSession = `-- name: InsertReapedSession :exec
-INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query, pid, started_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type InsertReapedSessionParams struct {
@@ -701,6 +701,8 @@ type InsertReapedSessionParams struct {
 	RoleName  string
 	DurationS int32
 	Query     *string
+	Pid       *int32
+	StartedAt *time.Time
 }
 
 func (q *Queries) InsertReapedSession(ctx context.Context, arg InsertReapedSessionParams) error {
@@ -711,6 +713,8 @@ func (q *Queries) InsertReapedSession(ctx context.Context, arg InsertReapedSessi
 		arg.RoleName,
 		arg.DurationS,
 		arg.Query,
+		arg.Pid,
+		arg.StartedAt,
 	)
 	return err
 }
@@ -836,7 +840,7 @@ func (q *Queries) ListPlans(ctx context.Context) ([]QuotaPlan, error) {
 }
 
 const listReapedSessions = `-- name: ListReapedSessions :many
-SELECT id, project_id, org_id, kind, role_name, duration_s, query, created_at FROM reaped_sessions WHERE project_id = $1 AND org_id = $2
+SELECT id, project_id, org_id, kind, role_name, duration_s, query, created_at, pid, started_at FROM reaped_sessions WHERE project_id = $1 AND org_id = $2
 ORDER BY created_at DESC, id DESC LIMIT $3
 `
 
@@ -864,6 +868,8 @@ func (q *Queries) ListReapedSessions(ctx context.Context, arg ListReapedSessions
 			&i.DurationS,
 			&i.Query,
 			&i.CreatedAt,
+			&i.Pid,
+			&i.StartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1501,6 +1507,33 @@ func (q *Queries) ProjectPoolerNames(ctx context.Context) ([]ProjectPoolerNamesR
 		return nil, err
 	}
 	return items, nil
+}
+
+const reapedStatementCancelled = `-- name: ReapedStatementCancelled :one
+SELECT EXISTS (SELECT 1 FROM reaped_sessions
+  WHERE project_id = $1 AND org_id = $2 AND kind = 'statement'
+    AND pid = $3 AND started_at = $4)::bool
+`
+
+type ReapedStatementCancelledParams struct {
+	ProjectID uuid.UUID
+	OrgID     uuid.UUID
+	Pid       *int32
+	StartedAt *time.Time
+}
+
+// Whether the reaper already cancelled this backend's statement (the same
+// pid and query_start), so a statement still running caught the cancel.
+func (q *Queries) ReapedStatementCancelled(ctx context.Context, arg ReapedStatementCancelledParams) (bool, error) {
+	row := q.db.QueryRow(ctx, reapedStatementCancelled,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Pid,
+		arg.StartedAt,
+	)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const reinstateOrg = `-- name: ReinstateOrg :execrows
