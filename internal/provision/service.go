@@ -249,6 +249,11 @@ type CreateParams struct {
 	NodeID   *uuid.UUID
 	Profile  string
 	VolumeGB int
+	// Size, for a dedicated project, gives its instance's CPUs and memory
+	// instead of naming a profile: a restore or detached replica takes its
+	// source's, which after a resize may match no profile. It overrides
+	// Profile.
+	Size *Profile
 	// InstanceID, for a dedicated project, is its instance's id (default:
 	// new): a detached read replica's instance keeps its member's id,
 	// which names its container and volume (V4 §7).

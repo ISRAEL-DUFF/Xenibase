@@ -171,12 +171,23 @@ func settings(p provision.Profile, maxConnections int) map[string]string {
 
 // Validate implements provision.InstanceManager.
 func (s *Service) Validate(ctx context.Context, p *provision.CreateParams) (provision.Profile, error) {
-	if p.Profile == "" {
-		p.Profile = DefaultProfile
-	}
-	prof, ok := ProfileByName(p.Profile)
-	if !ok {
-		return prof, fmt.Errorf("%w: unknown profile %q", provision.ErrInvalid, p.Profile)
+	var prof provision.Profile
+	if p.Size != nil {
+		// A size given outright (a resized source's), named as the
+		// instance row will be.
+		if p.Size.CPUs <= 0 || p.Size.MemoryMB <= 0 {
+			return prof, fmt.Errorf("%w: an instance needs CPUs and memory", provision.ErrInvalid)
+		}
+		prof = provision.Profile{Name: profileName(Size{CPUs: p.Size.CPUs, MemoryMB: p.Size.MemoryMB}), CPUs: p.Size.CPUs, MemoryMB: p.Size.MemoryMB}
+		p.Profile = prof.Name
+	} else {
+		if p.Profile == "" {
+			p.Profile = DefaultProfile
+		}
+		var ok bool
+		if prof, ok = ProfileByName(p.Profile); !ok {
+			return prof, fmt.Errorf("%w: unknown profile %q", provision.ErrInvalid, p.Profile)
+		}
 	}
 	if p.VolumeGB == 0 {
 		p.VolumeGB = DefaultVolumeGB

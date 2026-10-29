@@ -116,7 +116,7 @@ func (s *Service) Move(ctx context.Context, mp MoveParams) (store.Operation, err
 			if mp.Size != nil {
 				size = *mp.Size
 			}
-			cp := provision.CreateParams{NodeID: &mp.NodeID, Profile: DefaultProfile, VolumeGB: size.DiskGB}
+			cp := provision.CreateParams{NodeID: &mp.NodeID, Size: &provision.Profile{CPUs: size.CPUs, MemoryMB: size.MemoryMB}, VolumeGB: size.DiskGB}
 			if _, err := s.Validate(ctx, &cp); err != nil {
 				return nil, err
 			}

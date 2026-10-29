@@ -28,6 +28,7 @@ type moveEnv struct {
 	*env
 	cluster *pgx.Conn
 	bouncer *fakeBouncer
+	ps      *provision.Service
 	source  store.Instance
 	target  store.Instance
 	project store.Project
@@ -64,6 +65,7 @@ func setupMove(t *testing.T, status string) *moveEnv {
 	}
 	ps := provision.NewService(db, kr, pm, provision.Config{AdminSSLMode: "disable"}, quiet)
 	e := &env{db: db, svc: dedicated.New(db, kr, ns, ps, secrets{}, dedicated.Config{}, quiet)}
+	ps.Instances = e.svc
 
 	n := e.node(t, "node1", "healthy")
 	src := e.instance(t, n, "dedicated", "1 day")
@@ -101,7 +103,7 @@ func setupMove(t *testing.T, status string) *moveEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = cluster.Exec(context.Background(), "DROP ROLE IF EXISTS "+provision.Ident(owner)) })
-	return &moveEnv{env: e, cluster: cluster, bouncer: fb, source: src, target: dst, project: p, port: int32(cfg.Port)}
+	return &moveEnv{env: e, cluster: cluster, bouncer: fb, ps: ps, source: src, target: dst, project: p, port: int32(cfg.Port)}
 }
 
 // reachable points the source at the test server, or at a closed port.

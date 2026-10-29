@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -92,9 +93,8 @@ func (s *Service) PITR(ctx context.Context, p PITRParams) (provision.Created, er
 		Region: src.Region, DataResidency: src.DataResidency, // a restore stays in the source's region
 		Params: map[string]any{"mode": ModePITR, "pitr": plan},
 	}
-	if inst.Profile != nil {
-		cp.Profile = *inst.Profile
-	}
+	// The source's size, a profile's or a resize's ("custom").
+	cp.Size = dedicated.SizeProfile(inst)
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)
 	}

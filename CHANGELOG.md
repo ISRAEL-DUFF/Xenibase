@@ -128,6 +128,12 @@ bundle share one version (spec §11.5).
   whole copy. A move, promotion, demotion or major upgrade now opens writes
   again at the start of any attempt after the first that finds the project
   not yet cut over.
+- **A resized project could not be restored to a point in time or have a
+  read replica detached.** Both copied the source's profile name, `custom`
+  after a resize to a size no profile has, and the create refused it as an
+  unknown profile. They now pass the source's CPUs and memory as the size,
+  as a node move does; a node move's capacity check is now of the real size
+  too.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

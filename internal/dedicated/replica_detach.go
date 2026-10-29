@@ -100,9 +100,8 @@ func (s *Service) DetachReplica(ctx context.Context, d DetachParams) (provision.
 		Region: node.Region, DataResidency: src.DataResidency && node.Region == src.Region,
 		Params: map[string]any{"detach": detachParams{SourceProject: src.ID, SourceInstance: inst.ID, Replica: r.ID}},
 	}
-	if inst.Profile != nil {
-		cp.Profile = *inst.Profile
-	}
+	// The source's size, a profile's or a resize's.
+	cp.Size = SizeProfile(inst)
 	cp.MinMaxConnections = int(inst.MaxConnections)
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)
