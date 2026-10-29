@@ -328,9 +328,18 @@ type createParams struct {
 }
 
 type rotateParams struct {
-	Verifier         string    `json:"verifier"`
-	PreviousVerifier string    `json:"previous_verifier"`
-	Secrets          opSecrets `json:"secrets"`
+	Secrets rotateSecrets `json:"secrets"`
+}
+
+// rotateSecrets adds the owner's new and previous SCRAM verifiers to the
+// handoff. They are not the password, but a verifier lets its holder pose
+// as the server and recover the client key from one login, so they go with
+// the rest of secrets when the operation ends, and the API never returns
+// them (they used to stay in params, shown to anyone with project.view).
+type rotateSecrets struct {
+	opSecrets
+	Verifier         string `json:"verifier"`
+	PreviousVerifier string `json:"previous_verifier"`
 }
 
 func passwordAAD(projectID uuid.UUID, purpose string) []byte {
@@ -547,7 +556,7 @@ func (s *Service) Rotate(ctx context.Context, projectID uuid.UUID, by *uuid.UUID
 	err = s.withIdleProject(ctx, projectID, []string{StatusActive}, func(tx pgx.Tx, p store.Project) error {
 		op, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{
 			Kind: KindRotate, ProjectID: &p.ID, CreatedBy: by,
-			Params: rotateParams{Verifier: verifier, PreviousVerifier: p.ScramVerifier, Secrets: sec},
+			Params: rotateParams{Secrets: rotateSecrets{opSecrets: sec, Verifier: verifier, PreviousVerifier: p.ScramVerifier}},
 		})
 		out = Rotated{Project: p, Operation: op, Password: password}
 		return err

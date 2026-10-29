@@ -303,10 +303,16 @@ type Switched struct {
 }
 
 type switchParams struct {
-	OwnerRole string    `json:"owner_role"`
-	Verifier  string    `json:"verifier"`
-	Until     time.Time `json:"until"`
-	Secrets   opSecrets `json:"secrets"`
+	OwnerRole string        `json:"owner_role"`
+	Until     time.Time     `json:"until"`
+	Secrets   switchSecrets `json:"secrets"`
+}
+
+// switchSecrets adds the new owner's SCRAM verifier to the handoff, so it
+// is scrubbed with it (see rotateSecrets).
+type switchSecrets struct {
+	opSecrets
+	Verifier string `json:"verifier"`
 }
 
 // ErrNotLegacy means a project has no V1 credentials to switch from.
@@ -346,7 +352,7 @@ func (s *Service) SwitchCredentials(ctx context.Context, projectID uuid.UUID, gr
 		}
 		op, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{
 			Kind: KindSwitchCredentials, ProjectID: &p.ID, CreatedBy: by,
-			Params: switchParams{OwnerRole: OwnerRoleName(p.DbName), Verifier: verifier, Until: until, Secrets: sec},
+			Params: switchParams{OwnerRole: OwnerRoleName(p.DbName), Until: until, Secrets: switchSecrets{opSecrets: sec, Verifier: verifier}},
 		})
 		out = Switched{Project: p, Operation: op, Password: password, Until: until}
 		return err
@@ -365,7 +371,7 @@ func (s *Service) runSwitchCredentials(ctx context.Context, op store.Operation, 
 	if err := json.Unmarshal(op.Params, &params); err != nil || params.OwnerRole == "" {
 		return jobs.Permanent(fmt.Errorf("invalid params: %w", err))
 	}
-	password, err := s.openPassword(p.ID, KindSwitchCredentials, params.Secrets)
+	password, err := s.openPassword(p.ID, KindSwitchCredentials, params.Secrets.opSecrets)
 	if err != nil {
 		return jobs.Permanent(err)
 	}
@@ -378,7 +384,7 @@ func (s *Service) runSwitchCredentials(ctx context.Context, op store.Operation, 
 		return jobs.Permanent(err)
 	}
 	next := p
-	next.OwnerRole, next.ScramVerifier = params.OwnerRole, params.Verifier
+	next.OwnerRole, next.ScramVerifier = params.OwnerRole, params.Secrets.Verifier
 	if err := s.ensureRole(ctx, next, settings, log); err != nil {
 		return err
 	}

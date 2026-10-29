@@ -55,12 +55,19 @@ bundle share one version (spec §11.5).
   agent only reports its state; `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`
   keeps agent-side assignment (faster failover while the control plane is
   down). See `docs/upgrade.md`.
+- **Password rotations no longer keep SCRAM verifiers.** A rotation kept the
+  owner's new and previous verifiers in its parameters forever (a credential
+  switch the new owner's), and the API returned them to anyone who could
+  view the project. They now travel with the operation's secrets, removed
+  when it ends; migration 00062 removes those already stored.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
+- Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
+  verifiers from finished password rotations and credential switches.
 
 ## v4.2.4
 
