@@ -180,6 +180,12 @@ func run() error {
 	if err := store.Migrate(ctx, pool, log); err != nil {
 		return err
 	}
+	// What Derive keys on (the backend services' and console logins'
+	// passwords, file URL keys, the pooler admin's salt): a sealed seed, so
+	// a rotation of the master key leaves them as they are.
+	if err := rotate.LoadDeriveSeed(ctx, pool, keyring, cfg.MasterKey); err != nil {
+		return err
+	}
 
 	// Background services stop when bgCtx is cancelled, after HTTP drains.
 	bgCtx, stopBG := context.WithCancel(context.WithoutCancel(ctx))
@@ -1035,8 +1041,8 @@ func connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 }
 
 // rotateMasterKey implements -rotate-master-key (spec §7.3): re-encrypt
-// everything under the primary key, then prove the primary key alone opens
-// it all.
+// everything under the primary key, the derive seed included, then prove
+// the primary key alone opens it all. Derived values do not change.
 func rotateMasterKey(cfg config.Config, keyring *crypto.Keyring, log *slog.Logger) error {
 	if len(cfg.PreviousMasterKeys) == 0 {
 		return errors.New("set the old key in XENIBASE_MASTER_KEY_PREVIOUS and the new one in XENIBASE_MASTER_KEY")
@@ -1050,6 +1056,11 @@ func rotateMasterKey(cfg config.Config, keyring *crypto.Keyring, log *slog.Logge
 	defer pool.Close()
 	if err := store.Migrate(ctx, pool, log); err != nil {
 		return err
+	}
+	// An install that never started this release has no derive seed yet:
+	// make it from the old key first, so the derived passwords stay.
+	if err := rotate.PrepareDeriveSeed(ctx, pool, cfg.PreviousMasterKeys); err != nil {
+		return fmt.Errorf("rotation not started: %w", err)
 	}
 	res, err := rotate.Run(ctx, pool, keyring)
 	if err != nil {

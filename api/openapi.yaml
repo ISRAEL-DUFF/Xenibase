@@ -18708,7 +18708,8 @@ components:
       properties:
         kind:
           type: string
-          enum: [statement, idle_in_transaction]
+          description: statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+          enum: [statement, statement_terminated, idle_in_transaction]
         role:
           type: string
         duration_s:

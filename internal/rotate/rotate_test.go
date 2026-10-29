@@ -52,6 +52,7 @@ var sealedSettings = []struct {
 	{"alerts", "settings.alerts.webhook_secret", []string{"webhook_secret"}},
 	{"alerts", "settings.alerts.smtp_password", []string{"smtp", "password"}},
 	{"mail", "settings.mail.password", []string{"password"}},
+	{"derive_seed", "settings.derive_seed", []string{"sealed"}},
 }
 
 // TestRotateEveryKind seals one value of every kind with the old key,

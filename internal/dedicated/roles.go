@@ -194,8 +194,31 @@ func (s *Service) SyncOwnedRoles(ctx context.Context, p store.Project) (OwnedRol
 	if err != nil {
 		return res, err
 	}
+	q := store.New(s.db)
+	have, err := q.OwnedLoginVerifiers(ctx, p.ID)
+	if err != nil {
+		return res, err
+	}
+	// While the project's logins are switched off (a suspension, a hard
+	// lock), the recorded logins are NOLOGIN because SetLogins made them
+	// so: they stay recorded, so switching the logins back on finds them.
+	off := false
+	if gate := s.projects.LoginGate; gate != nil {
+		ok, err := gate(ctx, p)
+		if err != nil {
+			return res, err
+		}
+		off = !ok
+	}
+	recorded := map[string]bool{}
+	for _, h := range have {
+		recorded[h.RoleName] = true
+	}
 	want := map[string]string{}
 	for _, o := range owned {
+		if off && recorded[o.Name] {
+			o.Login = true
+		}
 		if o.Login && (o.ConnLimit < 0 || o.ConnLimit > set.ConnectionLimit) {
 			// V2 §10.4's limit, which the owner could lift again: the next
 			// sweep puts it back.
@@ -215,11 +238,6 @@ func (s *Service) SyncOwnedRoles(ctx context.Context, p store.Project) (OwnedRol
 			return res, err
 		}
 		want[o.Name] = *o.Password
-	}
-	q := store.New(s.db)
-	have, err := q.OwnedLoginVerifiers(ctx, p.ID)
-	if err != nil {
-		return res, err
 	}
 	same := len(have) == len(want)
 	for _, h := range have {

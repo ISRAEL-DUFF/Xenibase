@@ -4,7 +4,7 @@
 -- name: SharedProjectSizes :many
 -- size_bytes is -1 for a project not measured in the last 30 minutes.
 -- tenant: system - storage enforcement checks every shared-tier project.
-SELECT p.id, p.org_id, p.name, p.db_name, p.storage_state,
+SELECT p.id, p.org_id, p.name, p.db_name, p.instance_id, p.storage_state,
        COALESCE((SELECT m.value FROM metric_points m
         WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'size_bytes' AND m.resolution = '1m'
           AND m.ts > now() - interval '30 minutes'
@@ -53,8 +53,15 @@ SELECT COALESCE(sum(s.v), 0)::float8 FROM (
   FROM projects p WHERE p.org_id = @org_id AND p.deleted_at IS NULL AND p.tier = 'shared') s;
 
 -- name: InsertReapedSession :exec
-INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query)
-VALUES (@project_id, @org_id, @kind, @role_name, @duration_s, sqlc.narg(query));
+INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query, pid, started_at)
+VALUES (@project_id, @org_id, @kind, @role_name, @duration_s, sqlc.narg(query), sqlc.narg(pid), sqlc.narg(started_at));
+
+-- name: ReapedStatementCancelled :one
+-- Whether the reaper already cancelled this backend's statement (the same
+-- pid and query_start), so a statement still running caught the cancel.
+SELECT EXISTS (SELECT 1 FROM reaped_sessions
+  WHERE project_id = @project_id AND org_id = @org_id AND kind = 'statement'
+    AND pid = @pid AND started_at = @started_at)::bool;
 
 -- name: ListReapedSessions :many
 SELECT * FROM reaped_sessions WHERE project_id = @project_id AND org_id = @org_id
@@ -248,15 +255,42 @@ FROM projects p WHERE p.id = b.project_id AND p.org_id = @org_id AND b.status IN
 
 -- name: OrgDedicatedUse :one
 -- The org's live dedicated instances and their total size: its dedicated
--- projects' instances, and those a demotion keeps stopped for 48 hours (the
--- allowance is released once they are destroyed, V2 s5.2).
-SELECT count(*)::int AS instances, COALESCE(sum(i.cpu_limit), 0)::float8 AS cpus,
-       COALESCE(sum(i.mem_limit_mb), 0)::int AS mem_mb, COALESCE(sum(i.volume_gb), 0)::int AS disk_gb
-FROM instances i
-WHERE i.kind = 'dedicated' AND i.deleted_at IS NULL AND (
-  EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.org_id = @org_id AND p.deleted_at IS NULL AND p.tier = 'dedicated')
-  OR EXISTS (SELECT 1 FROM retired_databases r JOIN projects p ON p.id = r.project_id
-             WHERE r.instance_id = i.id AND r.dropped_at IS NULL AND r.reason = 'demotion' AND p.org_id = @org_id));
+-- projects' instances, those a demotion keeps stopped for 48 hours (the
+-- allowance is released once they are destroyed, V2 s5.2), the target of
+-- a promotion queued or running (its project is still shared), and its read
+-- replicas, each the size of its primary (V4 s7), from the operation that
+-- creates one until it is deleted, failed or detached (a detached
+-- replica's instance is its new project's, counted above).
+WITH sized AS (
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM instances i
+  WHERE i.kind = 'dedicated' AND i.deleted_at IS NULL AND (
+    EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.org_id = @org_id AND p.deleted_at IS NULL AND p.tier = 'dedicated')
+    OR EXISTS (SELECT 1 FROM retired_databases r JOIN projects p ON p.id = r.project_id
+               WHERE r.instance_id = i.id AND r.dropped_at IS NULL AND r.reason = 'demotion' AND p.org_id = @org_id)
+    OR EXISTS (SELECT 1 FROM operations o JOIN projects p ON p.id = o.project_id
+               WHERE o.kind = 'promote' AND o.status IN ('queued', 'running') AND o.params->>'target_instance' = i.id::text
+                 AND p.org_id = @org_id AND p.deleted_at IS NULL AND p.tier = 'shared'))
+  UNION ALL
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM read_replicas r JOIN projects p ON p.id = r.project_id JOIN instances i ON i.id = p.instance_id
+  WHERE p.org_id = @org_id AND p.deleted_at IS NULL AND r.status NOT IN ('detached', 'failed', 'deleted')
+    AND NOT EXISTS (SELECT 1 FROM instances x WHERE x.id = r.id)
+  UNION ALL
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM operations o JOIN projects p ON p.id = o.project_id JOIN instances i ON i.id = p.instance_id
+  WHERE p.org_id = @org_id AND p.deleted_at IS NULL AND o.kind = 'create_replica' AND o.status IN ('queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM read_replicas r WHERE r.id::text = o.params->>'replica')
+)
+SELECT count(*)::int AS instances, COALESCE(sum(cpu_limit), 0)::float8 AS cpus,
+       COALESCE(sum(mem_limit_mb), 0)::int AS mem_mb, COALESCE(sum(volume_gb), 0)::int AS disk_gb
+FROM sized;
+
+-- name: LockOrgForQuota :exec
+-- Takes the organisation's row lock for the rest of the transaction, so
+-- quota checks and the inserts they guard run one at a time per
+-- organisation (tenancy.claim).
+SELECT id FROM organizations WHERE id = @org_id FOR UPDATE;
 
 -- name: OrgLargestProject :one
 -- tenant: system - the org's largest measured shared project, joined by org_id.

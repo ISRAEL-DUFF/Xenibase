@@ -743,6 +743,83 @@ bundle share one version (spec §11.5).
   one an organisation is treated as without consent until an owner agrees
   again. **Pay from wallet** still works, and each invoice's email says the
   invoice won't be debited and where to agree.
+- **Rotating the master key no longer takes backend services offline.**
+  The edge and request roles' passwords, the console logins' passwords,
+  the keys that sign file URLs and the pooler admin's salt were derived
+  from the primary master key, so after `-rotate-master-key` the edge was
+  handed new passwords while the poolers and the instances still held the
+  verifiers made from the old ones, and every data API, auth, storage and
+  realtime request failed until the stored verifiers were cleared by hand;
+  signed file URLs stopped verifying too. They are now derived from a
+  derive seed, 32 bytes sealed under the master key in the `derive_seed`
+  settings row, which a rotation re-seals like every other secret, so they
+  do not change. `rotate.Verify` opens the seed and fails when projects
+  exist without one.
+- **The statement reaper ends a statement that catches its cancel.**
+  PL/pgSQL can trap `query_canceled`, so a block that caught it kept
+  running the same statement after the reaper's cancel: every 15 seconds
+  the reaper cancelled it again and logged another row, and a tenant could
+  keep a heavy statement running on a shared cluster indefinitely. The
+  reaper now records the backend and the statement's start with each
+  cancel, and on a later pass terminates a backend still running a
+  statement it cancelled. The project's reaped log shows it as
+  `statement_terminated` ("statement ended").
+- **The isolation check now audits the backend services' logins and every
+  database grant.** It looked at the owner, console and members' logins
+  only, so one of the five backend-service logins tenant SQL runs as on
+  the shared tier (`<db>_edge`, `_anon`, `_user`, `_service`,
+  `_auth_hook`) could keep `LOGIN` while its organisation was suspended,
+  lack its connection limit or `temp_file_limit`, gain an attribute or
+  join a predefined role, and the check passed; and it asked only whether
+  `PUBLIC` could connect, so `CONNECT` on one project's database granted
+  to another project's role passed too. The check now covers the five
+  logins (which must hold no role), requires every holder of `CONNECT` or
+  `TEMPORARY` on a project database to be one of that project's roles,
+  and, as V2 §10.4 asks, reports `SECURITY DEFINER` functions owned by
+  roles other than the tenant's, apart from Xenibase's own in the `xb_*`
+  and `xenibase` schemas with a pinned `search_path`. The live probes also
+  try a cross-project grant.
+- **One tenant can no longer fill a shared node's disk between size
+  samples.** Storage enforcement used only the 5-minute size sample, and
+  the soft lock lets a tenant write in a read-write transaction, so a
+  tenant at 99% could insert at disk speed for up to six minutes before
+  the hard lock, tens of gigabytes past its limit. Projects at the warning
+  or the soft lock are now measured with `pg_database_size` on every
+  enforcement pass (each minute); one that reaches 120%, or grows by 5% of
+  its limit while soft-locked, is hard-locked at once. A hard lock now
+  lifts only when the project is back under its limit (it used to drop to
+  the soft lock under 120%, letting the tenant write again).
+- **Shared-cluster tenants can no longer see each other's locks.**
+  `pg_locks` (over `pg_lock_status()`) stayed readable by `PUBLIC` after
+  the activity views were hidden, and lists every lock in the cluster with
+  its database, relation and backend, so a tenant could tell which other
+  projects were active, with how many sessions, and what they touched.
+  `SELECT` on `pg_locks` and `pg_prepared_xacts` and `EXECUTE` on
+  `pg_lock_status`, `pg_blocking_pids`, `pg_safe_snapshot_blocking_pids`,
+  `pg_isolation_test_session_is_blocked` and `pg_prepared_xact` are now
+  revoked from `PUBLIC` in every shared project database, and the
+  isolation check reports any of them readable. Query insights' locks view
+  is unchanged.
+- **Creates sent at once no longer go past the projects and branches
+  quotas or the dedicated allowance.** The quota was counted before the
+  create, outside the transaction that recorded it, so N requests sent
+  together each saw the same count and all succeeded: a Personal
+  organisation limited to 10 projects could hold 10 + N, and the same went
+  for branches, detached branches, dedicated projects, promotions and read
+  replicas. Each of these now counts again in the transaction that records
+  it, holding the organisation's row (`SELECT … FOR UPDATE`), and a create
+  past the limit answers `409 quota_exceeded`. Read replicas, and a queued
+  promotion's target instance, now count towards the dedicated allowance
+  (a replica as an instance the size of its primary); they were not
+  counted, so replicas could be added whatever the allowance.
+- **Suspension and hard locks now switch off the logins a dedicated
+  project's owner created.** With role management on, the owner's own
+  logins (an app login, say, recorded in `project_owned_logins`) were left
+  out of the logins a suspension or a hard storage lock switches off, so
+  they could still log in at the instance from the private network, and
+  sessions opened before kept running. They are now switched off and their
+  sessions ended with the project's other logins, and switched back on
+  with them; the role sync keeps them recorded meanwhile.
 
 ### Upgrading
 - Migration 00094 adds the node lifecycle `retiring`, with
@@ -792,6 +869,35 @@ bundle share one version (spec §11.5).
   `files_share_backups` alert fires for each region with backend services:
   give each a files target, copying `files/` across around the switch
   (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
+- The first server to start makes the derive seed. On an install with
+  projects it is the current master key, so every derived password and URL
+  key stays as it is; a new install gets random bytes. Upgrade before you
+  rotate the master key. A rotation run before any server of this release
+  started makes the seed from the old key itself, and refuses when
+  `XENIBASE_MASTER_KEY_PREVIOUS` lists more than one key, since it cannot
+  tell which one the servers used (`docs/operations.md`, "Secrets").
+- Migration 00089 adds `reaped_sessions.pid` and `started_at` and the
+  `statement_terminated` kind, which `GET /api/v1/projects/{id}/reaped`
+  can now return. A statement cancelled before the upgrade has no `pid`
+  recorded, so if it caught the cancel it is cancelled once more, then
+  ended on the following pass.
+- The isolation check audits more (the backend-service logins, every
+  grantee of `CONNECT` and `TEMPORARY`, `SECURITY DEFINER` functions), so
+  the first check after the upgrade can fail on something earlier checks
+  missed, such as a grant made by hand, and raise `isolation_check_failed`.
+  Its log names each finding.
+- Migration 00090 queues `apply_settings` for each active shared project,
+  which revokes `pg_locks` and the lock functions from `PUBLIC` in its
+  database (a project with an exclusive operation pending gets it from its
+  next `apply_settings`). Tenant SQL, including the SQL console, that
+  reads `pg_locks` or calls `pg_blocking_pids` on the shared tier now
+  answers "permission denied"; the project's Query insights → Locks view
+  shows its blocking chains instead.
+- Read replicas now count towards an organisation's dedicated allowance,
+  so the Usage & quotas page shows more in use where there are replicas,
+  and an organisation already at its allowance gets new replicas and
+  dedicated projects refused (or a promotion turned into a request) until
+  the allowance is raised.
 
 ## v4.2.4
 

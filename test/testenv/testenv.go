@@ -74,6 +74,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/regions"
+	"github.com/israel-duff/xenibase/internal/rotate"
 	"github.com/israel-duff/xenibase/internal/schedjobs"
 	"github.com/israel-duff/xenibase/internal/services"
 	"github.com/israel-duff/xenibase/internal/settings"
@@ -253,6 +254,10 @@ func Start(t testing.TB, opts Options) *Env {
 	}
 	keyring, err := crypto.NewKeyring(key)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// As the server does: Derive keys on the sealed seed (rotate.DeriveSeed).
+	if err := rotate.LoadDeriveSeed(context.Background(), db, keyring, key); err != nil {
 		t.Fatal(err)
 	}
 
