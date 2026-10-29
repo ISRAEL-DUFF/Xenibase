@@ -303,6 +303,10 @@ curl ".../data/v1/rpc/search_todos?q=milk&limit=5"   # STABLE or IMMUTABLE only
   ambiguous_function` when more than one fits.
 - `SECURITY DEFINER` functions run as their owner and skip row-level
   security: the security advisor lists them.
+- Functions an extension installed (`pg_stat_statements_reset`, PostGIS's)
+  are not served (`404 unknown_function`), and the request roles are not
+  granted them, so one an extension keeps from `PUBLIC` stays the
+  platform's. Wrap one in a function of your own to call it through the API.
 
 ## Generated types
 

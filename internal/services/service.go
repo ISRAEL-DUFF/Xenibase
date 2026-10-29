@@ -487,6 +487,11 @@ func (s *Service) applyExposure(ctx context.Context, p store.Project, schemas []
 		return err
 	}
 	defer conn.Close(context.Background())
+	return exposeOn(ctx, conn, p, schemas)
+}
+
+// exposeOn is applyExposure on an admin connection to p's database.
+func exposeOn(ctx context.Context, conn *pgx.Conn, p store.Project, schemas []string) error {
 	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		for _, sc := range schemas {
 			if sc == "public" {
@@ -744,7 +749,23 @@ func (s *Service) applySchema(ctx context.Context, p store.Project, all bool) er
 	if all {
 		from = 0
 	}
+	if err := applyVersionsOn(ctx, conn, p, from); err != nil {
+		return err
+	}
 	if all {
+		if err := exposeOn(ctx, conn, p, svc.ExposedSchemas); err != nil {
+			return err
+		}
+	}
+	return q.SetServicesRoles(ctx, store.SetServicesRolesParams{ProjectID: p.ID, EdgeVerifier: svc.EdgeVerifier, LoginVerifiers: svc.LoginVerifiers,
+		SchemaVersion: int32(SchemaVersion), RolesInstance: svc.RolesInstance})
+}
+
+// applyVersionsOn runs the schema versions after from on an admin
+// connection to p's database; from 0 re-runs them all, after taking the
+// xb_* schemas back from whoever restored them.
+func applyVersionsOn(ctx context.Context, conn *pgx.Conn, p store.Project, from int) error {
+	if from == 0 {
 		// A restore by the project's owner (a backup, a branch) recreates the
 		// xb_* schemas as the owner's: take them back.
 		if err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
@@ -769,13 +790,7 @@ func (s *Service) applySchema(ctx context.Context, p store.Project, all bool) er
 			return err
 		}
 	}
-	if all {
-		if err := s.applyExposure(ctx, p, svc.ExposedSchemas); err != nil {
-			return err
-		}
-	}
-	return q.SetServicesRoles(ctx, store.SetServicesRolesParams{ProjectID: p.ID, EdgeVerifier: svc.EdgeVerifier, LoginVerifiers: svc.LoginVerifiers,
-		SchemaVersion: int32(SchemaVersion), RolesInstance: svc.RolesInstance})
+	return nil
 }
 
 // Reconcile re-applies roles and schemas for enabled projects that moved

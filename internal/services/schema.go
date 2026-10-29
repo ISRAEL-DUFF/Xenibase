@@ -50,7 +50,7 @@ var schemaVersions = []schemaVersion{
 		`GRANT USAGE ON SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
-		`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
+		grantFunctionsStmt("public"),
 		`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{anon}}, {{user}}, {{service}}`,
 		`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {{anon}}, {{user}}, {{service}}`,
 		`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO {{anon}}, {{user}}, {{service}}`,
@@ -528,6 +528,43 @@ var schemaVersions = []schemaVersion{
 		  FROM PUBLIC, {{owner}}, {{anon}}, {{hook}}`,
 		`GRANT EXECUTE ON FUNCTION xb_auth.idempotency_claim(text, text), xb_auth.idempotency_store(text, int, text) TO {{user}}, {{service}}`,
 	}},
+	{7, []string{
+		// Before this version, GRANT EXECUTE ON ALL FUNCTIONS gave the request
+		// roles every function in an exposed schema, an extension's too, even
+		// one the extension keeps from PUBLIC because it acts on the whole
+		// instance (pg_stat_statements_reset). Take those grants back;
+		// version 1 and the exposure grants now leave extensions' functions
+		// out.
+		`DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS kind,
+      format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) AS fn, a.grantee::regrole AS grantee
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL aclexplode(p.proacl) a
+    WHERE EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+      AND a.privilege_type = 'EXECUTE' AND a.grantee IN ('{{anon}}'::regrole, '{{user}}'::regrole, '{{service}}'::regrole) LOOP
+    EXECUTE format('REVOKE EXECUTE ON %s %s FROM %s', r.kind, r.fn, r.grantee);
+  END LOOP;
+END $$`,
+	}},
+}
+
+// grantFunctionsStmt gives the request roles EXECUTE on schema's functions
+// (a literal: public, or {{schema}}) one by one, leaving out those an
+// extension installed. An extension that keeps a function from PUBLIC
+// means it: pg_stat_statements_reset empties every database's statistics,
+// and GRANT … ON ALL FUNCTIONS would hand it to anon.
+func grantFunctionsStmt(schema string) string {
+	return `DO $$
+DECLARE f text;
+BEGIN
+  FOR f IN SELECT format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid))
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.oid = '` + schema + `'::regnamespace AND p.prokind IN ('f', 'a', 'w')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO {{anon}}, {{user}}, {{service}}', f);
+  END LOOP;
+END $$`
 }
 
 // exposureStmts let the request roles use what the owner makes in an
@@ -536,7 +573,7 @@ var exposureStmts = []string{
 	`GRANT USAGE ON SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
 	`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
 	`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
-	`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
+	grantFunctionsStmt("{{schema}}"),
 	`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA {{schema}} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{anon}}, {{user}}, {{service}}`,
 	`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA {{schema}} GRANT USAGE, SELECT ON SEQUENCES TO {{anon}}, {{user}}, {{service}}`,
 	`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA {{schema}} GRANT EXECUTE ON FUNCTIONS TO {{anon}}, {{user}}, {{service}}`,

@@ -87,7 +87,10 @@ type Arg struct {
 }
 
 // Function is a function in an exposed schema the data API can call (V4
-// §3.4). Overloads are separate Functions with the same name.
+// §3.4). Overloads are separate Functions with the same name. An
+// extension's functions are left out: the API serves what the project
+// wrote, and an extension that keeps a function from PUBLIC
+// (pg_stat_statements_reset) means it.
 type Function struct {
 	Schema   string
 	Name     string
@@ -273,6 +276,7 @@ func introspectFunctions(ctx context.Context, tx Querier, cat *Catalog, byOID ma
 		  p.pronargdefaults, format_type(p.prorettype, NULL), rt.typcategory::text, rt.typname, rt.typrelid
 		FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_type rt ON rt.oid = p.prorettype
 		WHERE n.nspname = ANY($1) AND p.prokind = 'f' AND rt.typname NOT IN ('trigger', 'event_trigger', 'internal')
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
 		ORDER BY n.nspname, p.proname, p.oid LIMIT 5000`, cat.Schemas)
 	if err != nil {
 		return err

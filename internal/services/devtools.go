@@ -164,7 +164,9 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 	}
 	// SECURITY DEFINER functions callable through the API.
 	if err := q(`SELECT n.nspname, p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = ANY($1) AND p.prosecdef ORDER BY 1, 2`, []any{schemas}, func(r pgx.Rows) error {
+		WHERE n.nspname = ANY($1) AND p.prosecdef
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+		ORDER BY 1, 2`, []any{schemas}, func(r pgx.Rows) error {
 		var schema, name string
 		if err := r.Scan(&schema, &name); err != nil {
 			return err

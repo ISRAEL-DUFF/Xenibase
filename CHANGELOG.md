@@ -31,6 +31,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The publishable key could reset `pg_stat_statements` for the whole
+  instance.** Backend services granted the request roles `EXECUTE` on every
+  function in `public` and each exposed schema, including extensions'
+  functions locked from `PUBLIC`; with `pg_stat_statements` installed, anon
+  could call `POST /data/v1/rpc/pg_stat_statements_reset` and empty every
+  tenant's Query Insights on a shared cluster. Functions are now granted one
+  by one, leaving out any an extension owns (the owner's later functions
+  still get `EXECUTE` from the default privileges), schema version 7 takes
+  back the grants already made, and the data API, type generation and the
+  advisor leave extensions' functions out (`404 unknown_function`).
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
@@ -333,6 +343,11 @@ bundle share one version (spec §11.5).
   (`docs/disaster-recovery.md`).
 
 ### Upgrading
+- Backend services' schema version 7 runs on every enabled project with its
+  next reconcile (within seconds of the upgrade). It revokes the request
+  roles' `EXECUTE` on functions an extension installed; the data API no
+  longer serves them, so wrap one in a function of your own if an app calls
+  it.
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
 - Migrations 00068 and 00069 move children an earlier transfer left behind to
