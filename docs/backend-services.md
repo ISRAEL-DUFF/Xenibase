@@ -816,11 +816,13 @@ worker.
   `xb_storage.objects` queues the bytes to remove and keeps the project's
   totals.
 - **The sweep** (every 5 minutes, xenibase-server) removes queued bytes and
-  abandoned uploads, records storage used (`storage_gb_hours`) and the
-  month's downloads and transforms, and sends the edges each project's
-  remaining quota.
-- **The reconciler** (nightly) removes bytes with no row after 7 days and
-  counts rows whose bytes are missing; Project → Storage shows them.
+  abandoned uploads, records storage used (`storage_gb_hours`: files and
+  their cached image renders, also while backend services are off, since
+  turning them off keeps the files) and the month's downloads and
+  transforms, and sends the edges each project's remaining quota.
+- **The reconciler** (nightly, on one server) removes bytes with no row
+  after 7 days, counts rows whose bytes are missing (Project → Storage shows
+  them) and measures what the cached renders take.
 - **Deleting a project** removes its files once its final backup's
   retention ends (30 days).
 - **Branches and restores** copy the database, so file rows come along but

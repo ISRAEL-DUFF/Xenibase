@@ -362,6 +362,16 @@ bundle share one version (spec §11.5).
   files' URLs (and their image renders'), and a purge waits in the new
   `cdn_purges` table until Cloudflare takes it: the storage sweep retries
   it from every minute to every hour.
+- **Some stored files were never billed, and the storage reconciler could
+  never run.** File storage (`storage_gb_hours`) was metered only for
+  projects with backend services on, so turning them off, which keeps the
+  files, stopped the metering; cached image renders were never measured.
+  Every live project holding files is now metered each hour from its last
+  measurement, and the nightly reconciler measures the renders, which are
+  metered with the files. The reconciler's last run was kept in memory and
+  it waited a day from each start, so servers deployed more often never
+  ran it; the last run is now kept in the metadata database and one server
+  runs it each day.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -381,7 +391,10 @@ bundle share one version (spec §11.5).
   A project's signed uploads fail until its schema reaches version 8, which
   the backend services reconciler applies within minutes of the upgrade.
 - Migration 00083 adds `cdn_purges`, the CDN purges the storage sweep
-  retries.
+  retries; `project_storage.transform_bytes`, the cached renders' size; and
+  `storage_reconciler`, the reconciler's last run. The first server to
+  start runs the reconciler straight away. Projects whose backend services
+  are off have their files metered from the next sweep.
 
 ## v4.2.4
 

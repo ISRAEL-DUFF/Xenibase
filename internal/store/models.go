@@ -1101,6 +1101,7 @@ type ProjectStorage struct {
 	MissingSample  []string
 	OrphansRemoved int64
 	ReconciledAt   *time.Time
+	TransformBytes int64
 }
 
 type QuerySnapshot struct {
@@ -1317,6 +1318,11 @@ type StorageCleanup struct {
 	Attempts  int32
 	LastError *string
 	CreatedAt time.Time
+}
+
+type StorageReconciler struct {
+	ID        bool
+	LastRunAt time.Time
 }
 
 type StorageTarget struct {

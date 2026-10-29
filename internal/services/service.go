@@ -814,7 +814,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 func (s *Service) Run(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var swept, reconciled time.Time
+	var swept time.Time
 	for {
 		if time.Since(swept) >= StorageSweepEvery {
 			if err := s.StorageSweep(ctx); err != nil && ctx.Err() == nil {
@@ -828,14 +828,9 @@ func (s *Service) Run(ctx context.Context, every time.Duration) {
 			}
 			swept = time.Now()
 		}
-		if time.Since(reconciled) >= ReconcileStorageEvery {
-			// The first run waits a sweep, so a restart doesn't reconcile.
-			if !reconciled.IsZero() {
-				if err := s.ReconcileStorage(ctx); err != nil && ctx.Err() == nil {
-					s.log.Warn("storage reconcile", "err", err)
-				}
-			}
-			reconciled = time.Now()
+		// Nightly, on whichever server's turn comes first (V4 §5.6).
+		if _, err := s.ReconcileStorageDue(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("storage reconcile", "err", err)
 		}
 		if err := s.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			s.log.Warn("backend services reconcile", "err", err)

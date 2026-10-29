@@ -14,5 +14,18 @@ CREATE TABLE cdn_purges (
 );
 CREATE INDEX cdn_purges_due ON cdn_purges (next_at);
 
+-- What a project's cached image renders (files/<ref>/transforms/) take,
+-- measured by the nightly reconciler: metered with its files.
+ALTER TABLE project_storage ADD COLUMN transform_bytes bigint NOT NULL DEFAULT 0;
+
+-- When the storage reconciler last ran (V4 §5.6): one row, so it runs
+-- nightly on one server across restarts.
+CREATE TABLE storage_reconciler (
+  id          boolean PRIMARY KEY DEFAULT true CHECK (id),
+  last_run_at timestamptz NOT NULL
+);
+
 -- +goose Down
+DROP TABLE storage_reconciler;
+ALTER TABLE project_storage DROP COLUMN transform_bytes;
 DROP TABLE cdn_purges;
