@@ -78,8 +78,11 @@ proposal is provisioned by itself only when all of these hold:
 
 - automatic provisioning is on;
 - the provider can create servers;
-- the nodes' monthly cost plus the new server's stays within the
-  **monthly infrastructure budget**.
+- the nodes' monthly cost, plus the servers that started proposals are
+  still setting up, plus the new server's, stays within the **monthly
+  infrastructure budget**. Proposals are checked and started one at a
+  time across the control-plane servers, so two at once can't both fit
+  into the same headroom.
 
 The budget is zero until you set one, so nothing is bought until then.
 When the budget is in another currency than the servers, Xenibase converts

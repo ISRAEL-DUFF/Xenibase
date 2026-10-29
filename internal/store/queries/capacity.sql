@@ -51,11 +51,30 @@ WHERE id = @id AND status <> 'removed' RETURNING *;
 -- name: SetNodeEmptySince :exec
 UPDATE nodes SET empty_since = sqlc.narg(empty_since) WHERE id = @id;
 
--- name: NodeCostTotals :many
--- The monthly cost of every node in service, by currency.
-SELECT cost_currency AS currency, coalesce(sum(monthly_cost_minor), 0)::bigint AS monthly_minor
-FROM nodes WHERE status <> 'removed' AND monthly_cost_minor IS NOT NULL
-GROUP BY cost_currency;
+-- name: BudgetCostTotals :many
+-- What counts against the capacity budget, by currency: the monthly cost
+-- of every node in service, and of proposals approved or provisioning
+-- whose node isn't one of those yet (a started proposal has no node until
+-- its operation runs). One statement, so one snapshot: a proposal getting
+-- its node meanwhile counts once.
+SELECT c.currency, coalesce(sum(c.monthly_minor), 0)::bigint AS monthly_minor
+FROM (
+  SELECT n.cost_currency AS currency, n.monthly_cost_minor AS monthly_minor
+  FROM nodes n WHERE n.status <> 'removed' AND n.monthly_cost_minor IS NOT NULL
+  UNION ALL
+  SELECT p.currency, p.monthly_cost_minor
+  FROM capacity_proposals p
+  WHERE p.status IN ('approved', 'provisioning')
+    AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = p.node_id AND n.status <> 'removed' AND n.monthly_cost_minor IS NOT NULL)
+) c
+GROUP BY c.currency;
+
+-- name: LockCapacityBudget :exec
+-- Holds the budget until the transaction ends, so a budget check and the
+-- start it allows are one step across Evaluate passes and HostFor calls
+-- on every server. A waiter gives up after 30 seconds rather than hold
+-- its connection indefinitely.
+SELECT set_config('lock_timeout', '30s', true), pg_advisory_xact_lock(hashtext('xenibase_capacity_budget'));
 
 -- name: NextNodeNumber :one
 SELECT (count(*) + 1)::int FROM nodes WHERE name LIKE @prefix::text || '%';

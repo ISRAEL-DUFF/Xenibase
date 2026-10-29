@@ -39,6 +39,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The capacity budget is a ceiling across proposals.** The budget check
+  added a proposal's server to the nodes' monthly cost only, and a started
+  proposal has no node until its operation runs, so one evaluation over
+  several regions and tiers, or dedicated creations finding no host at
+  the same time, all saw the same headroom and all started: with nodes at
+  1,500 a month and a budget of 3,000, four servers of 1,000 made 5,500.
+  The check now counts approved and provisioning proposals without a node
+  yet, in the same statement as the nodes, and holds a lock across the
+  check and the start, so only what fits starts and the rest wait for
+  approval.
 - **A Free project whose organisation upgrades is no longer paused or
   archived on the way.** A pause or archive operation queued by the sweep
   re-checked only the project's activity when it ran, so an organisation

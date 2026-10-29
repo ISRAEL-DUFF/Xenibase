@@ -13,6 +13,50 @@ import (
 	"github.com/google/uuid"
 )
 
+const budgetCostTotals = `-- name: BudgetCostTotals :many
+SELECT c.currency, coalesce(sum(c.monthly_minor), 0)::bigint AS monthly_minor
+FROM (
+  SELECT n.cost_currency AS currency, n.monthly_cost_minor AS monthly_minor
+  FROM nodes n WHERE n.status <> 'removed' AND n.monthly_cost_minor IS NOT NULL
+  UNION ALL
+  SELECT p.currency, p.monthly_cost_minor
+  FROM capacity_proposals p
+  WHERE p.status IN ('approved', 'provisioning')
+    AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = p.node_id AND n.status <> 'removed' AND n.monthly_cost_minor IS NOT NULL)
+) c
+GROUP BY c.currency
+`
+
+type BudgetCostTotalsRow struct {
+	Currency     string
+	MonthlyMinor int64
+}
+
+// What counts against the capacity budget, by currency: the monthly cost
+// of every node in service, and of proposals approved or provisioning
+// whose node isn't one of those yet (a started proposal has no node until
+// its operation runs). One statement, so one snapshot: a proposal getting
+// its node meanwhile counts once.
+func (q *Queries) BudgetCostTotals(ctx context.Context) ([]BudgetCostTotalsRow, error) {
+	rows, err := q.db.Query(ctx, budgetCostTotals)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BudgetCostTotalsRow
+	for rows.Next() {
+		var i BudgetCostTotalsRow
+		if err := rows.Scan(&i.Currency, &i.MonthlyMinor); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const cancelNodeDrain = `-- name: CancelNodeDrain :execrows
 UPDATE rebalance_moves SET status = 'skipped', updated_at = now(), error = 'the drain was stopped'
 WHERE from_node = $1 AND kind = 'drain' AND status IN ('proposed', 'approved')
@@ -532,6 +576,19 @@ func (q *Queries) ListRebalanceMoves(ctx context.Context) ([]ListRebalanceMovesR
 	return items, nil
 }
 
+const lockCapacityBudget = `-- name: LockCapacityBudget :exec
+SELECT set_config('lock_timeout', '30s', true), pg_advisory_xact_lock(hashtext('xenibase_capacity_budget'))
+`
+
+// Holds the budget until the transaction ends, so a budget check and the
+// start it allows are one step across Evaluate passes and HostFor calls
+// on every server. A waiter gives up after 30 seconds rather than hold
+// its connection indefinitely.
+func (q *Queries) LockCapacityBudget(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockCapacityBudget)
+	return err
+}
+
 const lockCapacityProposal = `-- name: LockCapacityProposal :one
 SELECT id, region, tier, reason, provider, server_type, location, monthly_cost_minor, currency, status, auto, node_id, operation_id, error, decided_by, decided_at, created_at, updated_at FROM capacity_proposals WHERE id = $1 FOR UPDATE
 `
@@ -634,38 +691,6 @@ func (q *Queries) NextNodeNumber(ctx context.Context, prefix string) (int32, err
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
-}
-
-const nodeCostTotals = `-- name: NodeCostTotals :many
-SELECT cost_currency AS currency, coalesce(sum(monthly_cost_minor), 0)::bigint AS monthly_minor
-FROM nodes WHERE status <> 'removed' AND monthly_cost_minor IS NOT NULL
-GROUP BY cost_currency
-`
-
-type NodeCostTotalsRow struct {
-	Currency     string
-	MonthlyMinor int64
-}
-
-// The monthly cost of every node in service, by currency.
-func (q *Queries) NodeCostTotals(ctx context.Context) ([]NodeCostTotalsRow, error) {
-	rows, err := q.db.Query(ctx, nodeCostTotals)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []NodeCostTotalsRow
-	for rows.Next() {
-		var i NodeCostTotalsRow
-		if err := rows.Scan(&i.Currency, &i.MonthlyMinor); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const nodeMetricSeries = `-- name: NodeMetricSeries :many

@@ -307,8 +307,10 @@ func (s *Service) serverFor(ctx context.Context, t TierSettings) (cloud.ServerPr
 }
 
 // withinBudget reports whether adding monthly (in currency) keeps the
-// nodes' monthly cost within the budget.
-func (s *Service) withinBudget(ctx context.Context, st Settings, monthly int64, currency string) (bool, string) {
+// monthly cost of the nodes, and of the servers started proposals are
+// still setting up, within the budget. q is the transaction holding
+// LockCapacityBudget, so no other check passes on the same headroom.
+func (s *Service) withinBudget(ctx context.Context, q *store.Queries, st Settings, monthly int64, currency string) (bool, string) {
 	if st.MonthlyBudgetMinor <= 0 {
 		return false, "no monthly infrastructure budget is set"
 	}
@@ -325,7 +327,7 @@ func (s *Service) withinBudget(ctx context.Context, st Settings, monthly int64, 
 	if err != nil {
 		return false, err.Error()
 	}
-	rows, err := store.New(s.db).NodeCostTotals(ctx)
+	rows, err := q.BudgetCostTotals(ctx)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -337,7 +339,7 @@ func (s *Service) withinBudget(ctx context.Context, st Settings, monthly int64, 
 		total += v
 	}
 	if total > st.MonthlyBudgetMinor {
-		return false, fmt.Sprintf("the nodes would cost %s a month, over the budget of %s", money(total, st.BudgetCurrency), money(st.MonthlyBudgetMinor, st.BudgetCurrency))
+		return false, fmt.Sprintf("the nodes, with the servers being set up, would cost %s a month, over the budget of %s", money(total, st.BudgetCurrency), money(st.MonthlyBudgetMinor, st.BudgetCurrency))
 	}
 	return true, ""
 }
@@ -370,22 +372,44 @@ func (s *Service) propose(ctx context.Context, st Settings, region, tier, reason
 	if price.Currency == "" {
 		price.Currency = st.BudgetCurrency
 	}
+	// The budget check, the proposal and its start are one transaction
+	// under the budget lock: a concurrent Evaluate pass or HostFor call
+	// waits, then counts this proposal among the started ones.
+	var p store.CapacityProposal
 	auto := false
-	why := ""
-	switch {
-	case s.provider.Name() == cloud.Manual:
-		why = "servers are registered by hand: add a machine, then mark the proposal done"
-	case !st.AutoApply:
-		why = "automatic provisioning is off"
-	default:
-		auto, why = s.withinBudget(ctx, st, price.MonthlyMinor, price.Currency)
-	}
-	if !auto {
-		reason += " Waiting for approval: " + why + "."
-	}
-	p, err := store.New(s.db).InsertCapacityProposal(ctx, store.InsertCapacityProposalParams{
-		Region: region, Tier: tier, Reason: reason, Provider: s.provider.Name(), ServerType: price.Type, Location: price.Location,
-		MonthlyCostMinor: price.MonthlyMinor, Currency: price.Currency, Auto: auto,
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		if err := q.LockCapacityBudget(ctx); err != nil {
+			return fmt.Errorf("lock the capacity budget: %w", err)
+		}
+		why := ""
+		switch {
+		case s.provider.Name() == cloud.Manual:
+			why = "servers are registered by hand: add a machine, then mark the proposal done"
+		case !st.AutoApply:
+			why = "automatic provisioning is off"
+		default:
+			auto, why = s.withinBudget(ctx, q, st, price.MonthlyMinor, price.Currency)
+		}
+		if !auto {
+			reason += " Waiting for approval: " + why + "."
+		}
+		var err error
+		p, err = q.InsertCapacityProposal(ctx, store.InsertCapacityProposalParams{
+			Region: region, Tier: tier, Reason: reason, Provider: s.provider.Name(), ServerType: price.Type, Location: price.Location,
+			MonthlyCostMinor: price.MonthlyMinor, Currency: price.Currency, Auto: auto,
+		})
+		if err != nil {
+			return err
+		}
+		if !auto {
+			return nil
+		}
+		if _, err := startTx(ctx, tx, p.ID, nil); err != nil {
+			return err
+		}
+		p, err = q.GetCapacityProposal(ctx, p.ID)
+		return err
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil // one is already open
@@ -394,32 +418,36 @@ func (s *Service) propose(ctx context.Context, st Settings, region, tier, reason
 		return nil, err
 	}
 	s.log.Info("capacity proposal", "region", region, "tier", tier, "server_type", price.Type, "auto", auto, "reason", reason)
-	if auto {
-		if _, err := s.start(ctx, p.ID, nil); err != nil {
-			return &p, err
-		}
-		p, _ = store.New(s.db).GetCapacityProposal(ctx, p.ID)
-	}
 	return &p, nil
 }
 
-// start queues a proposal's provisioning.
+// start queues a proposal's provisioning, under the budget lock so that a
+// concurrent budget check counts it.
 func (s *Service) start(ctx context.Context, id uuid.UUID, by *uuid.UUID) (store.Operation, error) {
 	var op store.Operation
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if err := store.New(tx).LockCapacityBudget(ctx); err != nil {
+			return fmt.Errorf("lock the capacity budget: %w", err)
+		}
 		var err error
-		op, err = jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindProvision, CreatedBy: by, Params: provisionParams{ProposalID: id}})
-		if err != nil {
-			return err
-		}
-		if _, err := store.New(tx).StartCapacityProposal(ctx, store.StartCapacityProposalParams{ID: id, OperationID: &op.ID}); errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: the proposal isn't waiting", ErrConflict)
-		} else if err != nil {
-			return err
-		}
-		return nil
+		op, err = startTx(ctx, tx, id, by)
+		return err
 	})
 	return op, err
+}
+
+// startTx queues a proposal's provisioning in tx.
+func startTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, by *uuid.UUID) (store.Operation, error) {
+	op, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindProvision, CreatedBy: by, Params: provisionParams{ProposalID: id}})
+	if err != nil {
+		return op, err
+	}
+	if _, err := store.New(tx).StartCapacityProposal(ctx, store.StartCapacityProposalParams{ID: id, OperationID: &op.ID}); errors.Is(err, pgx.ErrNoRows) {
+		return op, fmt.Errorf("%w: the proposal isn't waiting", ErrConflict)
+	} else if err != nil {
+		return op, err
+	}
+	return op, nil
 }
 
 // Approve provisions a pending proposal (the platform admin, over the
