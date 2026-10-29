@@ -39,6 +39,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A billing member stays billing.** Accepting an invitation, or a
+  project transfer, turned a billing member into a plain member, so an
+  admin could invite a billing member's address with a project and take
+  their billing access while giving them the project, which only owners
+  may do. An existing member now keeps their role unless the new one is
+  higher (owner, then admin); inviting someone who is already a member is
+  refused (`409 conflict`: change their role or add them to a project
+  instead); and a project transferred into an organisation where one of
+  its members is billing leaves that member, with their database login on
+  it.
 - **A read-scoped token can no longer cut its user off.** Leaving an
   organisation (`POST /orgs/{org}/leave`) and revoking a token
   (`DELETE /tokens/{token_id}`) took only the `read` scope, so a leaked

@@ -79,7 +79,8 @@ Org owners and admins are admins of every project in the organisation.
 optionally project roles; **Project Settings → Members** adds someone to one project
 (they join the organisation as a member). Invitations last 7 days and can
 be revoked until they're accepted. If the address already has an account,
-accepting just adds the membership. An organisation can send 100
+accepting just adds the membership. Someone already in the organisation
+isn't invited again: change their role, or add them to a project, instead. An organisation can send 100
 invitations in any 24 hours, and each person 50 (the platform admin may
 change both); past that, wait for the time the error gives.
 

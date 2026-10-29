@@ -256,6 +256,12 @@ before.
   read-only token could make its user leave or revoke their admin tokens.
   Both now need `write`, except a token revoking itself
   (`TestReadTokensChangeNothing`).
+- **The billing role was lost on re-invitation or transfer** (low). An
+  admin could invite a billing member's address with a project, taking
+  their billing role and giving them project access, which only owners may
+  change. A billing member now stays billing, existing members can't be
+  invited, and a transferred project leaves its billing members
+  (`TestBillingIsKept`).
 - **Invitations were an unlimited mail relay with linked names** (medium).
   Organisation invitations are capped a day per organisation and per
   inviter, and user-chosen names in email are never links

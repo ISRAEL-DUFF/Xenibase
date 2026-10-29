@@ -574,7 +574,7 @@ INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, $3)
 ON CONFLICT (org_id, user_id) DO UPDATE SET role = CASE
   WHEN org_members.role = 'owner' OR EXCLUDED.role = 'owner' THEN 'owner'
   WHEN org_members.role = 'admin' OR EXCLUDED.role = 'admin' THEN 'admin'
-  ELSE 'member' END
+  ELSE org_members.role END
 `
 
 type InsertOrgMemberParams struct {
@@ -583,7 +583,9 @@ type InsertOrgMemberParams struct {
 	Role   string
 }
 
-// Adds a member; an existing member keeps the higher of the two roles.
+// Adds a member; an existing member keeps their role unless the new one is
+// higher (owner, then admin). Billing and member are not ranked: a billing
+// member stays billing, and a member doesn't become one.
 func (q *Queries) InsertOrgMember(ctx context.Context, arg InsertOrgMemberParams) error {
 	_, err := q.db.Exec(ctx, insertOrgMember, arg.OrgID, arg.UserID, arg.Role)
 	return err

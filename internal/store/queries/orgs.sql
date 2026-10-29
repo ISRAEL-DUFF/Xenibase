@@ -51,12 +51,14 @@ WHERE NOT EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = o.id) AND o.statu
 SELECT * FROM org_members WHERE org_id = @org_id AND user_id = @user_id;
 
 -- name: InsertOrgMember :exec
--- Adds a member; an existing member keeps the higher of the two roles.
+-- Adds a member; an existing member keeps their role unless the new one is
+-- higher (owner, then admin). Billing and member are not ranked: a billing
+-- member stays billing, and a member doesn't become one.
 INSERT INTO org_members (org_id, user_id, role) VALUES (@org_id, @user_id, @role)
 ON CONFLICT (org_id, user_id) DO UPDATE SET role = CASE
   WHEN org_members.role = 'owner' OR EXCLUDED.role = 'owner' THEN 'owner'
   WHEN org_members.role = 'admin' OR EXCLUDED.role = 'admin' THEN 'admin'
-  ELSE 'member' END;
+  ELSE org_members.role END;
 
 -- name: SetOrgMemberRole :execrows
 UPDATE org_members SET role = @role WHERE org_id = @org_id AND user_id = @user_id;

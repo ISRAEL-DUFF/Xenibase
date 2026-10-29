@@ -633,7 +633,10 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 	if p.Status != provision.StatusActive {
 		return fmt.Errorf("%w: the project is %s", ErrConflict, p.Status)
 	}
-	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	// Project members who are billing members of toOrg keep that role, and
+	// so lose the project there; their logins on it go after the move.
+	var billing []uuid.UUID
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		q := store.New(tx)
 		var parent *uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT parent_project_id FROM projects WHERE id = $1 AND org_id = $2 FOR UPDATE`, p.ID, p.OrgID).Scan(&parent); errors.Is(err, pgx.ErrNoRows) {
@@ -666,6 +669,11 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 			if err := q.InsertOrgMember(ctx, store.InsertOrgMemberParams{OrgID: toOrg, UserID: m.UserID, Role: authz.OrgMember}); err != nil {
 				return err
 			}
+			if dm, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: toOrg, UserID: m.UserID}); err != nil {
+				return err
+			} else if dm.Role == authz.OrgBilling {
+				billing = append(billing, m.UserID)
+			}
 		}
 		// Every table that carries the project's org_id (members, their
 		// logins, saved queries, reaped sessions, editor preferences,
@@ -673,6 +681,11 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 		// projects (id, org_id), ON UPDATE CASCADE (migration 00068).
 		if err := q.SetProjectOrg(ctx, store.SetProjectOrgParams{ID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
 			return err
+		}
+		for _, id := range billing {
+			if _, err := q.DeleteProjectMember(ctx, store.DeleteProjectMemberParams{ProjectID: p.ID, UserID: id, OrgID: toOrg}); err != nil {
+				return err
+			}
 		}
 		// Favourites of the project's saved queries go too.
 		if err := q.MoveProjectSavedQueryFavorites(ctx, store.MoveProjectSavedQueryFavoritesParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
@@ -686,6 +699,16 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 		_, err = q.RevokeEmptiedTokens(ctx, p.OrgID)
 		return err
 	})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, id := range billing {
+		if err := s.refreshAccess(ctx, toOrg, id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ---- Invitations ------------------------------------------------------------------
@@ -771,8 +794,13 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 			}
 		}
 		if existing, err := q.GetUserByEmail(ctx, email); err == nil {
-			if _, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: *p.OrgID, UserID: existing.ID}); err == nil && len(p.Projects) == 0 {
-				return Invited{}, fmt.Errorf("%w: %s is already a member", ErrConflict, email)
+			// A member's role changes with SetMemberRole, and their projects
+			// with AddProjectMember, whose rules (owners hand out billing,
+			// billing has no projects) an invitation would get round.
+			if _, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: *p.OrgID, UserID: existing.ID}); err == nil {
+				return Invited{}, fmt.Errorf("%w: %s is already a member; change their role or add them to projects instead", ErrConflict, email)
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return Invited{}, err
 			}
 		}
 		if err := s.checkInvitationLimits(ctx, q, *p.OrgID, p.InvitedBy); err != nil {
@@ -946,6 +974,11 @@ func (s *Service) accept(ctx context.Context, inv store.Invitation, signedIn *uu
 		}
 		if err := q.InsertOrgMember(ctx, store.InsertOrgMemberParams{OrgID: *inv.OrgID, UserID: u.ID, Role: *inv.OrgRole}); err != nil {
 			return err
+		}
+		if m, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: *inv.OrgID, UserID: u.ID}); err != nil {
+			return err
+		} else if m.Role == authz.OrgBilling {
+			return nil // made a billing member since: no project access (V3 §3.2)
 		}
 		for _, pr := range roles {
 			p, err := q.GetOrgProject(ctx, store.GetOrgProjectParams{ID: pr.ProjectID, OrgID: *inv.OrgID})
