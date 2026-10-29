@@ -19,6 +19,12 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **Master-key rotation re-encrypts everything sealed.** It skipped
+  per-project backup keys, Patroni secrets, webhook secrets and headers,
+  scheduled jobs, projects' auth SMTP settings and queued messages, device
+  sign-in tokens and the etcd CA key, and still reported success. If you
+  rotated before, run the rotation again with the old key in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (`docs/operations.md`, "Secrets").
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 

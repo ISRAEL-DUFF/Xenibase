@@ -21,20 +21,64 @@ import (
 	"github.com/israel-duff/xenibase/internal/crypto"
 )
 
-// The associated data each secret is sealed with. They must match the
-// packages that seal them (auth, backup, provision, agentca, alerts, mail);
-// TestRotation decrypts everything with the new key alone to prove it.
-func totpAAD(id uuid.UUID) []byte     { return []byte("operators.totp_secret:" + id.String()) }
-func recoveryAAD(id uuid.UUID) []byte { return []byte("users.recovery_codes:" + id.String()) }
-func storageAAD(id uuid.UUID) []byte  { return []byte("storage_targets.credentials:" + id.String()) }
-func nodeAAD(id uuid.UUID) []byte     { return []byte("nodes.pg_admin_secret:" + id.String()) }
-func instanceAAD(id uuid.UUID) []byte { return []byte("instances.admin_secret:" + id.String()) }
-
-// jwtKeyAAD matches services.JWTKeyAAD.
-func jwtKeyAAD(id uuid.UUID) []byte { return []byte("project_jwt_keys.private_enc:" + id.String()) }
-func opAAD(kind string, p uuid.UUID) []byte {
-	return []byte("operations.secrets.password:" + kind + ":" + p.String())
+// A sealed column: every non-null value in table.col was sealed with the
+// associated data aad followed by the row's key. The prefixes must match
+// the packages that seal them: TestEveryEncryptIsRotated reads every
+// Encrypt call in the module and fails on one rotate does not cover, and
+// TestRotateEveryKind opens one of each with the new key alone.
+type column struct {
+	what, table, key, col, aad string
+	// uuidKey: key is a uuid column (otherwise text).
+	uuidKey bool
 }
+
+var columns = []column{
+	// The V1 label is kept (auth.totpAAD).
+	{"user TOTP secret", "users", "id", "totp_secret", "operators.totp_secret:", true},
+	{"recovery codes", "users", "id", "recovery_codes", "users.recovery_codes:", true},
+	{"storage credentials", "storage_targets", "id", "credentials", "storage_targets.credentials:", true},
+	{"node admin credential", "nodes", "id", "pg_admin_secret", "nodes.pg_admin_secret:", true},
+	{"instance admin credential", "instances", "id", "admin_secret", "instances.admin_secret:", true},
+	{"instance Patroni secret", "instances", "id", "patroni_secret", "instances.patroni_secret:", true},
+	{"project signing key", "project_jwt_keys", "id", "private_enc", "project_jwt_keys.private_enc:", true},
+	{"project backup key", "backup_keys", "id", "key_enc", "backup_keys.key_enc:", true},
+	// Both of a webhook's signing secrets use one label.
+	{"webhook secret", "webhooks", "id", "secret_enc", "webhooks.secret:", true},
+	{"webhook previous secret", "webhooks", "id", "previous_secret_enc", "webhooks.secret:", true},
+	{"webhook headers", "webhooks", "id", "headers_enc", "webhooks.headers:", true},
+	{"scheduled job", "scheduled_jobs", "id", "spec_enc", "scheduled_jobs.spec:", true},
+	{"project auth SMTP settings", "project_auth_config", "project_id", "providers_enc", "project_auth_config.providers_enc:", true},
+	{"queued auth message", "auth_message_outbox", "id", "message_enc", "auth_email_outbox.message_enc:", true},
+	{"device sign-in token", "device_auth_requests", "device_code_hash", "sealed_token", "device:", false},
+}
+
+// Settings rows hold sealed blobs inside JSON (JSON encodes []byte as
+// base64).
+type setting struct {
+	what, key, aad string
+	path           []string
+}
+
+var settingBlobs = []setting{
+	{"agent CA key", "agent_ca", "settings.agent_ca.key", []string{"key_sealed"}},
+	{"etcd CA key", "etcd_ca", "settings.etcd_ca.key", []string{"key_sealed"}},
+	{"backup key", "backup_key", "settings.backup_key", []string{"sealed"}},
+	{"alert webhook secret", "alerts", "settings.alerts.webhook_secret", []string{"webhook_secret"}},
+	{"alert SMTP password", "alerts", "settings.alerts.smtp_password", []string{"smtp", "password"}},
+	{"SMTP password", "mail", "settings.mail.password", []string{"password"}},
+}
+
+// opAADPrefix starts the operation password handoff's associated data
+// (provision.passwordAAD): prefix, then kind, ":" and the project.
+const opAADPrefix = "operations.secrets.password:"
+
+func opAAD(kind string, p uuid.UUID) []byte {
+	return []byte(opAADPrefix + kind + ":" + p.String())
+}
+
+// clearedAADPrefix starts the sign-in challenges' associated data. A
+// rotation deletes them instead of re-encrypting them.
+const clearedAADPrefix = "auth_challenges."
 
 // Result counts what was looked at and rewritten, per kind of secret.
 type Result struct {
@@ -113,62 +157,34 @@ func walk(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring, m mode) (Res
 
 func collect(ctx context.Context, tx pgx.Tx) ([]secret, error) {
 	var out []secret
-	add := func(what, query string, aad func(uuid.UUID) []byte, update string) error {
-		rows, err := tx.Query(ctx, query)
+	for _, c := range columns {
+		key, param := c.key, "$1"
+		if c.uuidKey {
+			key, param = c.key+"::text", "$1::text::uuid"
+		}
+		rows, err := tx.Query(ctx, fmt.Sprintf(`SELECT %s, %s FROM %s WHERE %s IS NOT NULL FOR UPDATE`, key, c.col, c.table, c.col))
 		if err != nil {
-			return fmt.Errorf("%s: %w", what, err)
+			return nil, fmt.Errorf("%s: %w", c.what, err)
 		}
 		type row struct {
-			ID   uuid.UUID
+			Key  string
 			Blob []byte
 		}
 		rs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[row])
 		if err != nil {
-			return fmt.Errorf("%s: %w", what, err)
+			return nil, fmt.Errorf("%s: %w", c.what, err)
 		}
+		update := fmt.Sprintf(`UPDATE %s SET %s = $2 WHERE %s = %s`, c.table, c.col, c.key, param)
 		for _, r := range rs {
-			id := r.ID
-			out = append(out, secret{what: what, blob: r.Blob, aad: aad(id), save: func(tx pgx.Tx, b []byte) error {
-				_, err := tx.Exec(ctx, update, id, b)
+			k := r.Key
+			out = append(out, secret{what: c.what, blob: r.Blob, aad: []byte(c.aad + k), save: func(tx pgx.Tx, b []byte) error {
+				_, err := tx.Exec(ctx, update, k, b)
 				return err
 			}})
 		}
-		return nil
-	}
-	for _, c := range []struct {
-		what, query string
-		aad         func(uuid.UUID) []byte
-		update      string
-	}{
-		{"user TOTP secret", `SELECT id, totp_secret FROM users WHERE totp_secret IS NOT NULL FOR UPDATE`, totpAAD,
-			`UPDATE users SET totp_secret = $2 WHERE id = $1`},
-		{"recovery codes", `SELECT id, recovery_codes FROM users WHERE recovery_codes IS NOT NULL FOR UPDATE`, recoveryAAD,
-			`UPDATE users SET recovery_codes = $2 WHERE id = $1`},
-		{"storage credentials", `SELECT id, credentials FROM storage_targets WHERE credentials IS NOT NULL FOR UPDATE`, storageAAD,
-			`UPDATE storage_targets SET credentials = $2 WHERE id = $1`},
-		{"node admin credential", `SELECT id, pg_admin_secret FROM nodes WHERE pg_admin_secret IS NOT NULL FOR UPDATE`, nodeAAD,
-			`UPDATE nodes SET pg_admin_secret = $2 WHERE id = $1`},
-		{"instance admin credential", `SELECT id, admin_secret FROM instances WHERE admin_secret IS NOT NULL FOR UPDATE`, instanceAAD,
-			`UPDATE instances SET admin_secret = $2 WHERE id = $1`},
-		{"project signing key", `SELECT id, private_enc FROM project_jwt_keys FOR UPDATE`, jwtKeyAAD,
-			`UPDATE project_jwt_keys SET private_enc = $2 WHERE id = $1`},
-	} {
-		if err := add(c.what, c.query, c.aad, c.update); err != nil {
-			return nil, err
-		}
 	}
 
-	// Settings rows hold sealed blobs inside JSON.
-	for _, f := range []struct {
-		what, key, aad string
-		path           []string
-	}{
-		{"agent CA key", "agent_ca", "settings.agent_ca.key", []string{"key_sealed"}},
-		{"backup key", "backup_key", "settings.backup_key", []string{"sealed"}},
-		{"alert webhook secret", "alerts", "settings.alerts.webhook_secret", []string{"webhook_secret"}},
-		{"alert SMTP password", "alerts", "settings.alerts.smtp_password", []string{"smtp", "password"}},
-		{"SMTP password", "mail", "settings.mail.password", []string{"password"}},
-	} {
+	for _, f := range settingBlobs {
 		s, err := settingSecret(ctx, tx, f.what, f.key, f.aad, f.path)
 		if err != nil {
 			return nil, err

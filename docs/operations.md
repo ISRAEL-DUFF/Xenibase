@@ -350,6 +350,13 @@ deliveries.
   The rotation re-encrypts everything in one transaction and checks the new
   key alone opens it all; on any error nothing changes. Operators sign in
   again afterwards. Back up the new `.env`.
+- Releases before this one skipped part of what is sealed (per-project
+  backup keys, Patroni secrets, webhook secrets and headers, scheduled jobs,
+  projects' auth SMTP settings and queued messages, device sign-in tokens,
+  the etcd CA key) and still reported success. If you rotated with one of
+  them, those values still need the old key: keep it in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (or put it back) and run the rotation again
+  with this release before you drop it.
 - The backup key never changes (old backups need it); keep it offline.
 - `XENIBASE_CONSOLE_DISABLED=true` turns the SQL console and table browser
   off for every project.
