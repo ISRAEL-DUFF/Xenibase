@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,5 +117,122 @@ func TestRealtimeCountsOnlyMessages(t *testing.T) {
 	b.handle(ctx, msg("realtime:room", evBroadcast, map[string]any{"type": "broadcast", "event": "ping", "payload": map[string]any{}}))
 	if n := h.msgs.Load(); n != 3 { // sent, and received by a
 		t.Fatalf("a broadcast to one other client counted as %d messages in all, want 3", n)
+	}
+}
+
+// replies are rc's queued replies' payloads, and broadcasts the number of
+// broadcasts queued to it.
+func replies(t *testing.T, rc *rtConn) (out []string, broadcasts int) {
+	t.Helper()
+	for _, m := range received(t, rc) {
+		switch m.Event {
+		case phxReply:
+			out = append(out, string(m.Payload))
+		case evBroadcast:
+			broadcasts++
+		}
+	}
+	return out, broadcasts
+}
+
+func broadcastOf(n int) map[string]any {
+	return map[string]any{"type": "broadcast", "event": "blob", "payload": map[string]any{"data": strings.Repeat("x", n)}}
+}
+
+// TestRealtimeBroadcastLimits: a broadcast or presence update over 32 KB
+// is refused, and so is one past the project's 1 MB a second on this
+// process, however many connections send them.
+func TestRealtimeBroadcastLimits(t *testing.T) {
+	e, _ := rtTestEdge(t)
+	h := e.hub(rtTestRef)
+	ctx := context.Background()
+	to := testConn(h, Request{Role: "anon"})
+	testChannel(to, "realtime:room")
+
+	from := testConn(h, Request{Role: "anon"})
+	testChannel(from, "realtime:room")
+	from.handle(ctx, msg("realtime:room", evBroadcast, broadcastOf(rtMaxMessage)))
+	from.handle(ctx, msg("realtime:room", evPresence, map[string]any{"type": "presence", "event": "track", "payload": map[string]any{"data": strings.Repeat("x", rtMaxMessage)}}))
+	got, _ := replies(t, from)
+	if len(got) != 2 || !strings.Contains(got[0], "too_large") || !strings.Contains(got[1], "too_large") {
+		t.Fatalf("a message over %d bytes: %v", rtMaxMessage, got)
+	}
+	if _, n := replies(t, to); n != 0 {
+		t.Fatalf("an oversized broadcast was delivered %d times", n)
+	}
+
+	// 30 KB broadcasts from several connections: about 34 fit in a second.
+	sent, refused := 0, 0
+	for i := 0; i < 50; i++ {
+		rc := testConn(h, Request{Role: "anon"})
+		testChannel(rc, "realtime:room")
+		rc.handle(ctx, msg("realtime:room", evBroadcast, broadcastOf(30<<10)))
+		r, _ := replies(t, rc)
+		if len(r) == 1 && strings.Contains(r[0], "rate_limited") {
+			refused++
+		} else {
+			sent++
+		}
+		h.leave(rc.channels["realtime:room"])
+	}
+	if _, n := replies(t, to); n != sent || sent > rtBytesPerSecond/(30<<10) || refused == 0 {
+		t.Fatalf("sent %d, refused %d, delivered %d", sent, refused, n)
+	}
+}
+
+// TestRealtimeRelayParts: a message too large for one NOTIFY goes to the
+// other processes in parts that each fit, joined back in any order;
+// incomplete ones are dropped after a while.
+func TestRealtimeRelayParts(t *testing.T) {
+	e, _ := rtTestEdge(t)
+	h := e.hub(rtTestRef)
+	ctx := context.Background()
+	to := testConn(h, Request{Role: "anon"})
+	testChannel(to, "realtime:room")
+
+	payload, _ := json.Marshal(broadcastOf(30 << 10))
+	b, _ := json.Marshal(relayMsg{Node: "edge-other-1", Kind: "bc", Topic: "realtime:room", Payload: payload})
+	parts := splitRelay("edge-other-1", 7, b)
+	if len(parts) < 5 {
+		t.Fatalf("%d bytes in %d parts", len(b), len(parts))
+	}
+	for _, p := range parts {
+		if len(p) > rtNotifyMax {
+			t.Fatalf("a part of %d bytes", len(p))
+		}
+	}
+	if one := splitRelay("edge-other-1", 8, []byte(`{"k":"hi"}`)); len(one) != 1 || one[0] != `{"k":"hi"}` {
+		t.Fatalf("a small message: %v", one)
+	}
+	// Last first, and one twice.
+	for _, i := range []int{len(parts) - 1, 0, 0} {
+		h.relayIn(ctx, nil, parts[i])
+	}
+	if _, n := replies(t, to); n != 0 {
+		t.Fatal("delivered before every part was in")
+	}
+	for _, p := range parts[1 : len(parts)-1] {
+		h.relayIn(ctx, nil, p)
+	}
+	got := received(t, to)
+	if len(got) != 1 || got[0].Event != evBroadcast || string(got[0].Payload) != string(payload) {
+		t.Fatalf("joined: %d messages", len(got))
+	}
+	if len(h.bc.parts) != 0 || h.bc.partBytes != 0 {
+		t.Fatalf("parts kept: %d, %d bytes", len(h.bc.parts), h.bc.partBytes)
+	}
+
+	// A message whose last part never comes is let go.
+	parts = splitRelay("edge-other-1", 9, b)
+	for _, p := range parts[:len(parts)-1] {
+		h.relayIn(ctx, nil, p)
+	}
+	for _, ps := range h.bc.parts {
+		ps.at = time.Now().Add(-rtPartsWait - time.Second)
+	}
+	h.relayIn(ctx, nil, `{"n":"edge-other-1","k":"hi"}`)
+	h.relayIn(ctx, nil, splitRelay("edge-other-1", 10, b)[0])
+	if len(h.bc.parts) != 1 || h.bc.partBytes > len(b) {
+		t.Fatalf("after expiry: %d messages, %d bytes", len(h.bc.parts), h.bc.partBytes)
 	}
 }

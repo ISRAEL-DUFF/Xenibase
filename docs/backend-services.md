@@ -905,7 +905,8 @@ Broadcast sends a message to everyone on a channel (`self: true` to get
 your own back, `ack: true` to have the edge confirm it); presence keeps
 who is on a channel with each client's state (`track`, `untrack`,
 `presence_state`, `presence_diff`). Clients on different xenibase-edge
-processes reach each other through `NOTIFY` on the project's database, and
+processes reach each other through `NOTIFY` on the project's database (a
+large message in several), and
 a process that stops is dropped from presence within about 35 seconds.
 
 A server can broadcast over HTTP with the secret key:
@@ -950,7 +951,12 @@ A private channel and a public one of the same name don't hear each other.
 Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects
 and refetches). A connection joins at most 100 channels, sends at most 600
-broadcasts and presence updates a minute, and a message is at most 256 KB. Messages to and from clients (`realtime_messages`: broadcasts,
+broadcasts and presence updates a minute, and a broadcast or presence
+message is at most 32 KB (other frames 256 KB). A project's clients may
+send at most 1 MB of broadcasts and presence a second through each
+xenibase-edge process, and a topic kept as history keeps at most 256 KB a
+minute per process; past these a broadcast is refused with a
+`rate_limited` error reply (`429` over HTTP, with how many were sent). Messages to and from clients (`realtime_messages`: broadcasts,
 presence and database changes; heartbeats, joins and replies are free) and
 connection time (`realtime_connection_minutes`) are metered.
 

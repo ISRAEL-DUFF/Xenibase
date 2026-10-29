@@ -2,7 +2,9 @@ package edge
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,14 +20,33 @@ import (
 // through this process directly and through the project's other edge
 // processes with NOTIFY on the project's database (§6.5), sent only while
 // another process has said hello on it. Larger messages than a NOTIFY
-// takes go through xb_realtime.relay.
+// takes are sent in parts in one transaction, which writes nothing to a
+// table; only one too large even for that (a big presence state) goes
+// through xb_realtime.relay.
 
 const (
 	// rtNotifyMax is the largest NOTIFY payload sent as is (Postgres takes
 	// 8000 bytes).
 	rtNotifyMax = 7800
+	// rtMaxParts is the most NOTIFY parts one message is sent in (about
+	// 5 MB); rtPartsPending bounds the parts a process holds while it
+	// waits for the rest, and rtPartsWait how long it waits.
+	rtMaxParts     = 1000
+	rtPartsPending = 16 << 20
+	rtPartsWait    = 10 * time.Second
 	// rtPersistTTL is how long the list of topics kept as history is cached.
 	rtPersistTTL = 10 * time.Second
+
+	// rtMaxMessage is the largest broadcast or presence message a client
+	// sends, and the largest broadcast sent over HTTP.
+	rtMaxMessage = 32 << 10
+	// rtBytesPerSecond bounds the broadcasts and presence a project's
+	// clients send through one edge process, all of which may be relayed
+	// to its other processes through its database.
+	rtBytesPerSecond = 1 << 20
+	// rtHistoryBytesPerMinute bounds the broadcasts one edge process keeps
+	// as a project's history.
+	rtHistoryBytesPerMinute = 256 << 10
 )
 
 type rtBroadcastState struct {
@@ -39,11 +60,52 @@ type rtBroadcastState struct {
 	persistMu sync.Mutex
 	persisted map[string]bool
 	persistAt time.Time
+
+	// What the project's clients sent, and what was kept as history,
+	// lately.
+	sent, kept byteRate
+
+	// parts are messages from other processes still arriving in parts
+	// (listener goroutine only), by node and id; partBytes their size.
+	parts     map[string]*relayParts
+	partBytes int
+	partID    atomic.Int64
 }
 
 func (s *rtBroadcastState) init() {
 	s.peers = map[string]time.Time{}
 	s.presence = map[string]map[string]map[string]*presenceEntry{}
+	s.parts = map[string]*relayParts{}
+}
+
+// byteRate counts bytes in a fixed window.
+type byteRate struct {
+	mu    sync.Mutex
+	start time.Time
+	used  int
+}
+
+// take adds n to the window's count; false (and nothing added) when that
+// would pass limit bytes in the window.
+func (r *byteRate) take(n, limit int, window time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if now := time.Now(); now.Sub(r.start) >= window {
+		r.start, r.used = now, 0
+	}
+	if r.used+n > limit {
+		return false
+	}
+	r.used += n
+	return true
+}
+
+// relayParts is a message arriving in parts.
+type relayParts struct {
+	at   time.Time
+	data [][]byte
+	got  int
+	size int
 }
 
 // presenceEntry is one tracked presence: on this process (ch set) or
@@ -58,7 +120,7 @@ type presenceEntry struct {
 // relayMsg is what processes tell each other.
 type relayMsg struct {
 	Node    string                                 `json:"n"`
-	Kind    string                                 `json:"k"` // bc, pd, pst, hi, bye, ref
+	Kind    string                                 `json:"k"` // bc, pd, pst, hi, bye, ref, part
 	Topic   string                                 `json:"t,omitempty"`
 	Private bool                                   `json:"priv,omitempty"`
 	Payload json.RawMessage                        `json:"p,omitempty"`
@@ -67,6 +129,10 @@ type relayMsg struct {
 	State   map[string]map[string][]map[string]any `json:"s,omitempty"` // topic key -> presence key -> metas
 	First   bool                                   `json:"f,omitempty"`
 	Relay   int64                                  `json:"r,omitempty"`
+	// A part: the Part'th of Parts of message Relay, in base64.
+	Part  int    `json:"pi,omitempty"`
+	Parts int    `json:"pn,omitempty"`
+	Data  string `json:"d,omitempty"`
 }
 
 // node is this process's id among the project's edge processes.
@@ -110,12 +176,37 @@ func (h *rtHub) broadcastFrom(ctx context.Context, ch *rtChannel, m rtMsg) {
 		ch.c.replyError(m, "not allowed to send on this private channel: no INSERT policy on xb_realtime.channel_access lets this user")
 		return
 	}
+	if reason := h.budget(ctx, ch.topic, len(m.Payload)); reason != "" {
+		ch.c.replyError(m, reason)
+		return
+	}
 	h.fanOut(ch.topic, ch.private, m.Payload, ch)
 	if ch.bcAck {
 		ch.c.reply(m, "ok", nil)
 	}
 	h.relayOut(ctx, relayMsg{Kind: "bc", Topic: ch.topic, Private: ch.private, Payload: m.Payload})
 	h.persist(ctx, ch.topic, ch.private, body.Event, body.Payload, ch)
+}
+
+// budget takes a message of n bytes from the project's byte rates on this
+// process, or says why it can't be sent: it is too large, the project's
+// clients are sending too much, or (a broadcast on a persisted topic) too
+// much is being kept as history. topic is "" for presence.
+func (h *rtHub) budget(ctx context.Context, topic string, n int) string {
+	if n > rtMaxMessage {
+		return fmt.Sprintf("too_large: a broadcast or presence message is at most %d KB", rtMaxMessage>>10)
+	}
+	if !h.bc.sent.take(n, rtBytesPerSecond, time.Second) {
+		return fmt.Sprintf("rate_limited: the project's clients are sending more than %d MB of broadcasts and presence a second", rtBytesPerSecond>>20)
+	}
+	if topic == "" {
+		return ""
+	}
+	if p := h.e.lookup(h.ref); p != nil && h.persisted(ctx, p)[strings.TrimPrefix(topic, rtTopicPrefix)] &&
+		!h.bc.kept.take(n, rtHistoryBytesPerMinute, time.Minute) {
+		return fmt.Sprintf("rate_limited: the project keeps at most %d KB of broadcast history a minute", rtHistoryBytesPerMinute>>10)
+	}
+	return ""
 }
 
 // fanOut delivers a broadcast payload to this process's clients on topic;
@@ -197,6 +288,10 @@ func (h *rtHub) presenceFrom(ctx context.Context, ch *rtChannel, m rtMsg) {
 	}
 	if ch.private && !ch.writePresence {
 		ch.c.replyError(m, "not allowed to track presence on this private channel")
+		return
+	}
+	if reason := h.budget(ctx, "", len(m.Payload)); reason != "" {
+		ch.c.replyError(m, reason)
 		return
 	}
 	switch body.Event {
@@ -331,6 +426,13 @@ func (h *rtHub) relayOut(ctx context.Context, m relayMsg) {
 	}
 	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	if parts := splitRelay(m.Node, h.bc.partID.Add(1), b); len(parts) > 1 && len(parts) <= rtMaxParts {
+		// The NOTIFYs of one transaction: nothing is written to a table.
+		if _, err := pool.Exec(nctx, `SELECT pg_notify($1, p) FROM unnest($2::text[]) AS p`, chanBroadcast, parts); err != nil {
+			h.e.cfg.Log.Warn("realtime notify", "ref", h.ref, "err", err)
+		}
+		return
+	}
 	if len(b) > rtNotifyMax {
 		var id int64
 		if err := pool.QueryRow(nctx, `INSERT INTO xb_realtime.relay (body) VALUES ($1) RETURNING id`, string(b)).Scan(&id); err != nil {
@@ -344,11 +446,82 @@ func (h *rtHub) relayOut(ctx context.Context, m relayMsg) {
 	}
 }
 
+// splitRelay is b as NOTIFY payloads: b itself when it fits, else the
+// parts of message id.
+func splitRelay(node string, id int64, b []byte) []string {
+	if len(b) <= rtNotifyMax {
+		return []string{string(b)}
+	}
+	// size bytes in base64, with room for the rest of the part.
+	size := max((rtNotifyMax-160-len(node))/4*3, 1024)
+	n := (len(b) + size - 1) / size
+	out := make([]string, 0, n)
+	for i := range n {
+		chunk := b[i*size : min((i+1)*size, len(b))]
+		part, _ := json.Marshal(relayMsg{Node: node, Kind: "part", Relay: id, Part: i, Parts: n, Data: base64.StdEncoding.EncodeToString(chunk)})
+		out = append(out, string(part))
+	}
+	return out
+}
+
+// joinPart keeps a part of another process's message, and returns the
+// whole message once every part is in (listener goroutine only).
+func (h *rtHub) joinPart(m relayMsg) ([]byte, bool) {
+	s := &h.bc
+	now := time.Now()
+	for k, ps := range s.parts {
+		if now.Sub(ps.at) > rtPartsWait {
+			s.partBytes -= ps.size
+			delete(s.parts, k)
+		}
+	}
+	if m.Parts < 2 || m.Parts > rtMaxParts || m.Part < 0 || m.Part >= m.Parts {
+		return nil, false
+	}
+	chunk, err := base64.StdEncoding.DecodeString(m.Data)
+	if err != nil || s.partBytes+len(chunk) > rtPartsPending {
+		return nil, false
+	}
+	k := m.Node + ":" + strconv.FormatInt(m.Relay, 10)
+	ps := s.parts[k]
+	if ps == nil {
+		ps = &relayParts{at: now, data: make([][]byte, m.Parts)}
+		s.parts[k] = ps
+	}
+	if len(ps.data) != m.Parts || ps.data[m.Part] != nil {
+		return nil, false
+	}
+	ps.data[m.Part] = chunk
+	ps.got++
+	ps.size += len(chunk)
+	s.partBytes += len(chunk)
+	if ps.got < m.Parts {
+		return nil, false
+	}
+	delete(s.parts, k)
+	s.partBytes -= ps.size
+	whole := make([]byte, 0, ps.size)
+	for _, c := range ps.data {
+		whole = append(whole, c...)
+	}
+	return whole, true
+}
+
 // relayIn handles another process's message.
 func (h *rtHub) relayIn(ctx context.Context, q querier, payload string) {
 	var m relayMsg
 	if json.Unmarshal([]byte(payload), &m) != nil || m.Node == h.e.node() {
 		return
+	}
+	if m.Kind == "part" {
+		whole, ok := h.joinPart(m)
+		if !ok {
+			return
+		}
+		m = relayMsg{}
+		if json.Unmarshal(whole, &m) != nil || m.Node == h.e.node() {
+			return
+		}
 	}
 	if m.Kind == "ref" {
 		var body string
@@ -417,8 +590,9 @@ func (h *rtHub) sendState(ctx context.Context) {
 		}
 	}
 	h.bc.mu.Unlock()
-	if len(state) > 0 {
-		h.relayOut(ctx, relayMsg{Kind: "pst", State: state})
+	// A topic at a time, so each message stays within what parts carry.
+	for tk, keys := range state {
+		h.relayOut(ctx, relayMsg{Kind: "pst", State: map[string]map[string][]map[string]any{tk: keys}})
 	}
 }
 
@@ -567,19 +741,34 @@ func (e *Edge) restBroadcast(c *call, req Request) {
 		return
 	}
 	h := e.hub(c.p.cfg.Ref)
-	for _, m := range in.Messages {
+	payloads := make([]json.RawMessage, len(in.Messages))
+	for i := range in.Messages {
+		m := &in.Messages[i]
 		if m.Topic == "" || m.Event == "" {
 			c.fail(http.StatusBadRequest, "bad_request", "each message needs a topic and an event")
 			return
 		}
-		topic := m.Topic
-		if !strings.HasPrefix(topic, rtTopicPrefix) {
-			topic = rtTopicPrefix + topic
+		if !strings.HasPrefix(m.Topic, rtTopicPrefix) {
+			m.Topic = rtTopicPrefix + m.Topic
 		}
 		if len(m.Payload) == 0 {
 			m.Payload = json.RawMessage(`{}`)
 		}
-		payload := rawJSON(map[string]any{"type": "broadcast", "event": m.Event, "payload": m.Payload})
+		payloads[i] = rawJSON(map[string]any{"type": "broadcast", "event": m.Event, "payload": m.Payload})
+		if len(payloads[i]) > rtMaxMessage {
+			c.fail(http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("a broadcast is at most %d KB", rtMaxMessage>>10))
+			return
+		}
+	}
+	for i, m := range in.Messages {
+		if reason := h.budget(c.r.Context(), m.Topic, len(payloads[i])); reason != "" {
+			// Those before it were sent.
+			c.w.Header().Set("Retry-After", "1")
+			c.json(http.StatusTooManyRequests, map[string]any{"sent": i,
+				"error": Error{Code: "rate_limited", Message: strings.TrimPrefix(reason, "rate_limited: "), RequestID: c.id}})
+			return
+		}
+		topic, payload := m.Topic, payloads[i]
 		h.fanOut(topic, m.Private, payload, nil)
 		h.counted(1)
 		h.relayOut(c.r.Context(), relayMsg{Kind: "bc", Topic: topic, Private: m.Private, Payload: payload})

@@ -31,6 +31,18 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Realtime broadcasts can no longer fill the project's database.** With
+  the publishable key, a client could send 600 broadcasts of 256 KB a
+  minute, and with a second edge process listening each one over 7,800
+  bytes was written to `xb_realtime.relay` (about 150 MB a minute per
+  connection through the shared cluster's WAL), and to `broadcast_history`
+  on a persisted topic. A broadcast or presence message is now at most
+  **32 KB** (from clients and over HTTP; 256 KB before), a project's
+  clients may send at most 1 MB of them a second through each edge
+  process, and a persisted topic keeps at most 256 KB a minute per process;
+  past these the sender gets `too_large` or `rate_limited` (`413` or `429`
+  over HTTP). Large messages now cross between edge processes as several
+  `NOTIFY`s, with no table row.
 - **Realtime subscriptions no longer outlive their table's row-level
   security.** It was checked only when a client subscribed, so after the
   owner turned it off (a migration that does so for a moment was enough)

@@ -301,3 +301,72 @@ func TestRealtimeChangesStopWithoutRLS(t *testing.T) {
 		t.Fatal("the channel was closed")
 	}
 }
+
+// TestRealtimeBroadcastsSpareTheDatabase: a large broadcast reaches the
+// project's other edge processes in NOTIFY parts, with no xb_realtime.relay
+// row, and a persisted topic keeps at most 256 KB of history a minute.
+func TestRealtimeBroadcastsSpareTheDatabase(t *testing.T) {
+	rp := newRTProject(t)
+	ctx := context.Background()
+	if _, err := rp.db.Exec(ctx, `INSERT INTO xb_realtime.persisted_topics VALUES ('log')`); err != nil {
+		t.Fatal(err)
+	}
+	h := rp.e.hub(rp.pc.Ref)
+
+	// Another process's listening connection, and this one knowing it.
+	listener, err := pgx.ConnectConfig(ctx, rp.db.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close(ctx)
+	if _, err := listener.Exec(ctx, `LISTEN `+chanBroadcast); err != nil {
+		t.Fatal(err)
+	}
+	h.bc.listening.Store(true)
+	h.bc.mu.Lock()
+	h.bc.peers["edge-other-1"] = time.Now()
+	h.bc.mu.Unlock()
+	other := New(Config{Domain: rtDomain, PoolerSSLMode: "disable", Name: "edge-other"})
+	other.apply([]edgeapi.Project{rp.pc})
+	oh := other.hub(rp.pc.Ref)
+	to := testConn(oh, Request{Role: "anon"})
+	testChannel(to, "realtime:log")
+
+	from := testConn(h, Request{Role: "anon"})
+	testChannel(from, "realtime:log")
+	sent := 0
+	for i := 0; i < 12; i++ {
+		from.handle(ctx, msg("realtime:log", evBroadcast, broadcastOf(30<<10)))
+		if r, _ := replies(t, from); len(r) == 0 {
+			sent++
+		} else if !strings.Contains(r[0], "broadcast history") {
+			t.Fatalf("broadcast %d: %v", i, r)
+		}
+	}
+	if sent == 0 || sent > rtHistoryBytesPerMinute/(30<<10) {
+		t.Fatalf("%d of 12 30 KB broadcasts on a persisted topic sent in a minute", sent)
+	}
+	var kept, relayed int
+	if err := rp.db.QueryRow(ctx, `SELECT (SELECT count(*) FROM xb_realtime.broadcast_history), (SELECT count(*) FROM xb_realtime.relay)`).Scan(&kept, &relayed); err != nil {
+		t.Fatal(err)
+	}
+	if kept != sent || relayed != 0 {
+		t.Fatalf("history rows %d (want %d), relay rows %d", kept, sent, relayed)
+	}
+	// What the other process hears, joined.
+	delivered := 0
+	for delivered < sent {
+		wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		n, err := listener.WaitForNotification(wctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("%d of %d broadcasts heard: %v", delivered, sent, err)
+		}
+		if len(n.Payload) > rtNotifyMax {
+			t.Fatalf("a NOTIFY of %d bytes", len(n.Payload))
+		}
+		oh.relayIn(ctx, nil, n.Payload)
+		_, b := replies(t, to)
+		delivered += b
+	}
+}
