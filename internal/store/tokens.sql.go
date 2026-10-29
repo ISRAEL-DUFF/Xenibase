@@ -26,6 +26,7 @@ type ApproveDeviceRequestParams struct {
 	DeviceCodeHash string
 }
 
+// tenant: system - a device login has no organisation until it is approved.
 func (q *Queries) ApproveDeviceRequest(ctx context.Context, arg ApproveDeviceRequestParams) (int64, error) {
 	result, err := q.db.Exec(ctx, approveDeviceRequest,
 		arg.ApprovedBy,

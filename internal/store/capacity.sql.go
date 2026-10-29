@@ -926,6 +926,7 @@ UPDATE instances SET deleted_at = now(), status = 'deleted'
 WHERE node_id = $1 AND kind = 'shared' AND deleted_at IS NULL
 `
 
+// tenant: system - capacity automation retiring an empty node's shared clusters.
 // An empty node's shared clusters go with it.
 func (q *Queries) RetireNodeSharedClusters(ctx context.Context, nodeID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, retireNodeSharedClusters, nodeID)

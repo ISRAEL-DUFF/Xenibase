@@ -50,6 +50,7 @@ UPDATE storage_targets SET xenibase_region = sqlc.narg(xenibase_region) WHERE id
 -- Early access to hidden regions.
 
 -- name: RegionEarlyAccessOrgs :many
+-- tenant: system - the platform admin's region settings.
 SELECT org_id FROM region_early_access WHERE region_id = @region_id ORDER BY created_at, org_id;
 
 -- name: RegionHasEarlyAccess :one

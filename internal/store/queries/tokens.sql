@@ -84,6 +84,7 @@ SELECT * FROM device_auth_requests WHERE user_code = @user_code;
 SELECT * FROM device_auth_requests WHERE device_code_hash = @device_code_hash;
 
 -- name: ApproveDeviceRequest :execrows
+-- tenant: system - a device login has no organisation until it is approved.
 UPDATE device_auth_requests SET approved_by = @approved_by, org_id = @org_id, token_id = @token_id, sealed_token = @sealed_token
 WHERE device_code_hash = @device_code_hash AND approved_by IS NULL AND denied_at IS NULL AND expires_at > now();
 

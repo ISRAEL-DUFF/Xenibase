@@ -32,6 +32,7 @@ RETURNING *;
 SELECT EXISTS (SELECT 1 FROM organizations WHERE slug = @slug AND id <> @org_id);
 
 -- name: ListUserOrgs :many
+-- tenant: system - scoped by the user's own memberships (m.user_id).
 -- The organisations a user belongs to, personal first.
 SELECT o.*, m.role AS member_role,
        (SELECT count(*) FROM org_members x WHERE x.org_id = o.id)::int AS member_count,

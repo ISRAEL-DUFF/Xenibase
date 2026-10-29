@@ -157,6 +157,7 @@ FROM nodes n
 WHERE n.status <> 'removed' AND n.role <> 'pooler';
 
 -- name: RetireNodeSharedClusters :exec
+-- tenant: system - capacity automation retiring an empty node's shared clusters.
 -- An empty node's shared clusters go with it.
 UPDATE instances SET deleted_at = now(), status = 'deleted'
 WHERE node_id = @node_id AND kind = 'shared' AND deleted_at IS NULL;

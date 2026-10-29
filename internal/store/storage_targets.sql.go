@@ -412,6 +412,7 @@ type InstanceArchivingToParams struct {
 	WalgTargetID *uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) InstanceArchivingTo(ctx context.Context, arg InstanceArchivingToParams) (bool, error) {
 	row := q.db.QueryRow(ctx, instanceArchivingTo, arg.WalgPrefix, arg.WalgTargetID)
 	var column_1 bool
@@ -569,6 +570,7 @@ type SetInstanceWALGParams struct {
 	ID           uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) SetInstanceWALG(ctx context.Context, arg SetInstanceWALGParams) error {
 	_, err := q.db.Exec(ctx, setInstanceWALG,
 		arg.WalgPrefix,

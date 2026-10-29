@@ -17,6 +17,7 @@ const getInstance = `-- name: GetInstance :one
 SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections FROM instances WHERE id = $1
 `
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) GetInstance(ctx context.Context, id uuid.UUID) (Instance, error) {
 	row := q.db.QueryRow(ctx, getInstance, id)
 	var i Instance
@@ -84,6 +85,7 @@ type GetInstanceTargetRow struct {
 // GetInstanceTarget is how to reach an instance: host (poolers, agents)
 // defaults to the node's private address; the admin credential is the
 // instance's own (dedicated) or the node's (registered shared cluster).
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) GetInstanceTarget(ctx context.Context, id uuid.UUID) (GetInstanceTargetRow, error) {
 	row := q.db.QueryRow(ctx, getInstanceTarget, id)
 	var i GetInstanceTargetRow
@@ -124,6 +126,7 @@ type InsertInstanceParams struct {
 	MaxConnections *int32
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) InsertInstance(ctx context.Context, arg InsertInstanceParams) (Instance, error) {
 	row := q.db.QueryRow(ctx, insertInstance,
 		arg.ID,
@@ -203,6 +206,7 @@ type ListInstanceSummariesRow struct {
 	NodeName           string
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) ListInstanceSummaries(ctx context.Context) ([]ListInstanceSummariesRow, error) {
 	rows, err := q.db.Query(ctx, listInstanceSummaries)
 	if err != nil {
@@ -416,6 +420,7 @@ const markInstanceDeleted = `-- name: MarkInstanceDeleted :exec
 UPDATE instances SET status = 'deleted', deleted_at = now() WHERE id = $1
 `
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) MarkInstanceDeleted(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, markInstanceDeleted, id)
 	return err
@@ -529,6 +534,7 @@ LIMIT 1
 
 // PickDedicatedNode chooses the healthy node with an agent that allows
 // dedicated instances and runs the fewest.
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) PickDedicatedNode(ctx context.Context, region string) (Node, error) {
 	row := q.db.QueryRow(ctx, pickDedicatedNode, region)
 	var i Node
@@ -641,6 +647,7 @@ type SetInstanceAdminSecretParams struct {
 	ID          uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) SetInstanceAdminSecret(ctx context.Context, arg SetInstanceAdminSecretParams) error {
 	_, err := q.db.Exec(ctx, setInstanceAdminSecret, arg.AdminSecret, arg.ID)
 	return err
@@ -680,6 +687,7 @@ type SetInstanceRunningParams struct {
 	ID          uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) SetInstanceRunning(ctx context.Context, arg SetInstanceRunningParams) error {
 	_, err := q.db.Exec(ctx, setInstanceRunning,
 		arg.ContainerID,
@@ -702,6 +710,7 @@ type SetInstanceStatusParams struct {
 	ID     uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) SetInstanceStatus(ctx context.Context, arg SetInstanceStatusParams) error {
 	_, err := q.db.Exec(ctx, setInstanceStatus, arg.Status, arg.Error, arg.ID)
 	return err
@@ -742,6 +751,7 @@ const sharedInstanceOnNode = `-- name: SharedInstanceOnNode :one
 SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections FROM instances WHERE node_id = $1 AND kind = 'shared' AND deleted_at IS NULL
 `
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) SharedInstanceOnNode(ctx context.Context, nodeID uuid.UUID) (Instance, error) {
 	row := q.db.QueryRow(ctx, sharedInstanceOnNode, nodeID)
 	var i Instance
@@ -860,6 +870,7 @@ type UpsertSharedInstanceParams struct {
 	AdminPort *int32
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) UpsertSharedInstance(ctx context.Context, arg UpsertSharedInstanceParams) (Instance, error) {
 	row := q.db.QueryRow(ctx, upsertSharedInstance,
 		arg.NodeID,

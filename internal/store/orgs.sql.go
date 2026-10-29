@@ -1287,6 +1287,7 @@ type ListUserOrgsRow struct {
 	ProjectCount       int32
 }
 
+// tenant: system - scoped by the user's own memberships (m.user_id).
 // The organisations a user belongs to, personal first.
 func (q *Queries) ListUserOrgs(ctx context.Context, userID uuid.UUID) ([]ListUserOrgsRow, error) {
 	rows, err := q.db.Query(ctx, listUserOrgs, userID)

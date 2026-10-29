@@ -378,6 +378,7 @@ const nodeForInstance = `-- name: NodeForInstance :one
 SELECT n.id, n.name, n.private_addr, n.agent_port, n.role, n.agent_cert_fp, n.pg_admin_secret, n.capacity, n.status, n.last_heartbeat, n.created_at, n.agent_host, n.agent_version, n.registration_token, n.registration_expires_at, n.last_reachable_at, n.provider_server_id, n.pooler_generation, n.pooler_hash, n.pooler_vrrp_state, n.pooler_ready, n.pooler_checked_at, n.provider, n.region, n.server_type, n.monthly_cost_minor, n.cost_currency, n.lifecycle, n.empty_since, n.keep, n.failure_domain, n.placement_group FROM nodes n JOIN instances i ON i.node_id = n.id WHERE i.id = $1
 `
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) NodeForInstance(ctx context.Context, instanceID uuid.UUID) (Node, error) {
 	row := q.db.QueryRow(ctx, nodeForInstance, instanceID)
 	var i Node
@@ -422,6 +423,7 @@ const nodeLiveInstances = `-- name: NodeLiveInstances :one
 SELECT count(*)::int FROM instances WHERE node_id = $1 AND deleted_at IS NULL
 `
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) NodeLiveInstances(ctx context.Context, nodeID uuid.UUID) (int32, error) {
 	row := q.db.QueryRow(ctx, nodeLiveInstances, nodeID)
 	var column_1 int32

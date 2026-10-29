@@ -145,6 +145,7 @@ SELECT org_id FROM region_early_access WHERE region_id = $1 ORDER BY created_at,
 `
 
 // Early access to hidden regions.
+// tenant: system - the platform admin's region settings.
 func (q *Queries) RegionEarlyAccessOrgs(ctx context.Context, regionID string) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, regionEarlyAccessOrgs, regionID)
 	if err != nil {
