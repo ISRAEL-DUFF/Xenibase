@@ -1,0 +1,141 @@
+<!--atlas
+{
+  "id": "nodes-agents",
+  "title": "Nodes and agents",
+  "part": "B",
+  "order": 2,
+  "summary": "How machines join: registration, the agent CA and mutual TLS, the agent's fixed command API, Docker, and machines created by capacity automation.",
+  "verified": "acd8de1d320fc2523f476ce353f2bce65cdbfb00",
+  "sources": [
+    "cmd/agent/",
+    "internal/agentapi/",
+    "internal/agentca/",
+    "internal/agentsvc/",
+    "internal/nodes/",
+    "internal/docker/",
+    "internal/cloud/",
+    "internal/store/queries/nodes.sql",
+    "internal/api/backups.go",
+    "internal/backup/import.go",
+    "docs/decisions.md"
+  ]
+}
+-->
+<h2>What a node is</h2>
+<p>A node is a machine that <code>xenibase-server</code> sends work to. Each runs <code>xenibase-agent</code>, which is the only thing on the machine the control plane talks to. The control plane never logs in over SSH and never runs a shell command it composed. It calls a fixed HTTPS API on the agent, and the agent turns each call into Docker API requests, <code>pg_dump</code>/<code>pg_restore</code> processes, or file writes.</p>
+<p>A node row has a <code>role</code>, set when an operator adds it (<x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) CreateNode("><code>CreateNode</code></x-ref>):</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Role</th><th>What runs there</th><th>Can change to</th></tr></thead>
+  <tbody>
+    <tr><td><code>shared</code>, <code>dedicated</code>, <code>both</code></td><td>Postgres: a shared cluster, dedicated instance containers, or both. Which of these new projects may be placed on.</td><td>Each other (<x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) SetRole("><code>SetRole</code></x-ref>)</td></tr>
+    <tr><td><code>pooler</code></td><td>The two PgBouncers, keepalived, and the agent in pooler mode (<x-page id="connections--pooler-hosts">pooler hosts</x-page>)</td><td>Nothing: remove it and add the machine again</td></tr>
+    <tr><td><code>edge</code></td><td><code>xenibase-edge</code> beside the agent, never a database (V4.1 §11)</td><td>Nothing</td></tr>
+  </tbody>
+</table></div>
+<p>A node also has a region (the home region when none is given) and an optional failure domain, which HA, etcd and pooler placement use to keep pairs apart.</p>
+
+<h2 id="nodes-agents--joining">How a node joins</h2>
+<ol>
+  <li><strong>The operator adds the node.</strong> <code>POST /api/v1/nodes</code> (Admin → Nodes → Add node) inserts the row and returns a one-time registration token, <code>xbreg_</code> and 24 random bytes. Only its SHA-256 is stored, with an expiry a day later (<x-ref path="internal/nodes/nodes.go" symbol="func newToken() (token, hash string, exp time.Time, err error) {"><code>newToken</code></x-ref>). <x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) NewToken("><code>NewToken</code></x-ref> issues a fresh one for an existing node, replacing any earlier token.</li>
+  <li><strong>The agent registers.</strong> <code>xenibase-agent register --server … --token …</code>, or the first <code>run</code> when no state exists yet, which retries up to 30 times two seconds apart. <x-ref path="internal/agentsvc/state.go" symbol="func Register(ctx context.Context, dir string, o RegisterOptions) (*State, error) {"><code>agentsvc.Register</code></x-ref> makes a P-256 key and a certificate request (<x-ref path="internal/agentca/agentca.go" symbol="func NewCSR()"><code>NewCSR</code></x-ref>) and posts it with the token and the address the server should dial (<code>--advertise</code>, default the hostname and port 7070) to <code>POST /api/v1/agent/register</code>. That route has no session. The token in the body authenticates, and the route is rate limited per IP (<x-ref path="internal/api/backups.go" symbol="func (s *Server) RegisterAgent("><code>RegisterAgent</code></x-ref>). The agent checks the server's HTTPS certificate against the system roots or <code>--server-ca</code>.</li>
+  <li><strong>The server signs and pins.</strong> In one transaction, <x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) Register(ctx context.Context, req agentapi.RegisterRequest)"><code>nodes.Register</code></x-ref> finds the node by the token's hash (unexpired, row locked), signs the CSR for that node, and records the certificate's SHA-256 fingerprint, the advertised host and port, and the agent version. The token is cleared in the same statement, so it works once.</li>
+  <li><strong>The agent saves its state</strong>: <code>agent.key</code>, <code>agent.crt</code>, the CA certificate and <code>node.json</code>, each <code>0600</code> in a <code>0700</code> directory (<code>/var/lib/xenibase-agent</code>). From then on <code>run</code> loads that state and listens.</li>
+</ol>
+<x-code path="internal/store/queries/nodes.sql" start="-- name: GetNodeByRegistrationToken :one" end="RETURNING *;" lang="sql" caption="the token is single use: the update that pins the certificate clears it"/>
+
+<h3>The bootstrap token</h3>
+<p>The install bundle's own agent registers the local node without an operator. <code>XENIBASE_AGENT_BOOTSTRAP_TOKEN</code> (at least 24 characters) is given to both the server and that agent, and the agent sends it with <code>--node local</code>. The server compares it in constant time and then looks the node up by name. It refuses a node that already has a pinned certificate: re-registering needs a token from the UI.</p>
+<x-code path="internal/nodes/nodes.go" start="if s.bootstrap != &quot;&quot; &amp;&amp; req.Node != &quot;&quot;" end="} else {" caption="the bootstrap path"/>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p>The bootstrap token never expires and is not tied to the node it was made for. Anyone holding it can claim <em>any</em> node with no pinned certificate. That includes a machine an operator or capacity automation has just added and whose own agent has not registered yet, so a hostile agent can take that node's identity and receive its work: instance specs carry admin and replication passwords and WAL-G keys. It also includes a removed node. <code>RemoveNode</code> clears the fingerprint and sets <code>status = 'removed'</code>, <code>GetNodeByName</code> does not look at the status, and <code>CompleteNodeRegistration</code> sets <code>status = 'healthy'</code>, so a removed node comes back as a live one. The token sits in the bundle's <code>.env</code> and in two containers' environments.</p>
+</div>
+
+<h3 id="nodes-agents--machines">Machines Xenibase creates</h3>
+<p>Capacity automation (V3 §5.1) creates machines through <x-ref path="internal/cloud/provider.go" symbol="type Provider interface"><code>cloud.Provider</code></x-ref>: Hetzner Cloud (<x-ref path="internal/cloud/hetzner.go"><code>hetzner.go</code></x-ref>), or <code>manual</code>, which has no API and returns <code>ErrManual</code>. The new server joins by itself with the same one-time token, carried in its cloud-init document (<x-ref path="internal/cloud/cloudinit.go" symbol="type Bootstrap struct {"><code>cloud.Bootstrap</code></x-ref>). That document installs Docker, turns off SSH passwords, sets <code>ufw</code> to deny incoming traffic except SSH and the private network, and starts the agent with the Docker socket mounted. On an edge node it also starts <code>xenibase-edge</code> and opens 8443. Every value that reaches a shell line is checked first by <x-ref path="internal/cloud/cloudinit.go" symbol="func (b Bootstrap) Validate() error {"><code>Validate</code></x-ref>: names, CIDRs and image references against patterns, and the token and edge secret refused if they hold spaces, quotes, <code>$</code>, backslashes or backticks. YAML strings are JSON-quoted.</p>
+<div class="callout note"><span class="callout-label">Note</span>
+  <p>The cloud-init document is the server's user data, so the registration token and, on an edge node, the edge secret stay readable from the provider's metadata service by anything on that machine. The registration token is spent within minutes. The edge secret is not, and it unlocks every region's feed (see <x-page id="connections--edge">the edge</x-page>).</p>
+</div>
+
+<h2 id="nodes-agents--identity">The agent's identity and certificates</h2>
+<p><x-ref path="internal/agentca/agentca.go"><code>internal/agentca</code></x-ref> is a private CA that lives in the metadata database. <x-ref path="internal/agentca/agentca.go" symbol="func loadOrCreate("><code>LoadOrCreate</code></x-ref> creates it on first start under an advisory lock, so two servers starting together make one CA, and stores the private key sealed with the master key (associated data <code>settings.agent_ca.key</code>). It is P-256, valid for 20 years, and may sign only end-entity certificates (<code>MaxPathLenZero</code>). There are three kinds of certificate:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Certificate</th><th>Subject</th><th>Use</th><th>Lifetime</th><th>Issued</th></tr></thead>
+  <tbody>
+    <tr><td>Agent CA</td><td><code>Xenibase agent CA</code></td><td>Signs the two below</td><td>20 years</td><td>Once</td></tr>
+    <tr><td>Agent</td><td><code>node:&lt;uuid&gt;</code>, SANs from the advertised host</td><td>TLS <strong>server</strong> only (<code>ExtKeyUsageServerAuth</code>)</td><td>2 years</td><td>At each registration (<x-ref path="internal/agentca/agentca.go" symbol="func (ca *CA) SignAgent("><code>SignAgent</code></x-ref>)</td></tr>
+    <tr><td>xenibase-server</td><td><code>xenibase-server</code></td><td>TLS <strong>client</strong> only</td><td>30 days</td><td>Once per process start (<x-ref path="internal/agentca/agentca.go" symbol="func (ca *CA) ServerClientCert() (tls.Certificate, error) {"><code>ServerClientCert</code></x-ref>)</td></tr>
+  </tbody>
+</table></div>
+<p>The CSR's own subject is ignored. The server writes the node's UUID into the certificate, so an agent cannot ask for another node's name. <code>SignAgent</code> checks the CSR's signature, which proves the agent holds the key.</p>
+<h3>Both directions of the handshake</h3>
+<p>The server always dials the agent; the agent never calls the server after registering. When the server dials, <x-ref path="internal/nodes/client.go" symbol="func (s *Service) dial(n store.Node) (*Agent, error) {"><code>dial</code></x-ref> trusts only the agent CA, requires TLS 1.3, and then checks two more things the CA alone would not give:</p>
+<x-code path="internal/nodes/client.go" start="VerifyPeerCertificate: func(raw [][]byte, chains [][]*x509.Certificate) error {" lines="9" caption="pinned fingerprint, then the node ID in the subject"/>
+<p>The pin means a stolen copy of the CA key is not enough to stand in for a registered agent: the impostor would also need the node's own certificate. The subject check stops one node's genuine certificate being used at another node's address. Revocation is the pin: re-registering replaces the fingerprint, and <x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) RemoveNode("><code>RemoveNode</code></x-ref> (refused while any instance is live on the node) clears it. There is no CRL.</p>
+<p>On the agent, <x-ref path="internal/agentsvc/service.go" symbol="func TLSConfig(cert tls.Certificate, ca *x509.CertPool) *tls.Config {"><code>agentsvc.TLSConfig</code></x-ref> requires a client certificate from the pinned CA, TLS 1.3, and the subject <code>xenibase-server</code>. Go's own check also requires the client-auth key usage. Agent certificates are server-auth only, so one agent cannot call another even though the same CA signed both. An overlay test written for this page confirmed both refusals: a client certificate named <code>xenibase-server</code> with server-auth usage fails with "incompatible key usage", and a client-auth certificate with another name fails the subject check.</p>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>The V1 spec (§3.3) says the server "issues each agent a client certificate at registration". Agents get server certificates. The client certificate is the server's, and every agent accepts any unexpired one the CA signed with that subject. There is no per-server identity: a copy of any server's client certificate commands every agent until it expires.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The server's client certificate expires 30 days after the process starts, and nothing renews it.</strong> <code>nodes.NewService</code> calls <code>ServerClientCert</code> once and keeps the result for the life of the process (<x-ref path="internal/nodes/nodes.go" symbol="cert, err := ca.ServerClientCert()"><code>NewService</code></x-ref>). An agent checks the expiry on every handshake. The overlay test above shows an expired certificate refused with "certificate has expired". So a <code>xenibase-server</code> that runs for more than 30 days without a restart loses every agent at once. Instance creation, start and stop, backups, restores, imports, etcd changes and pooler-host pushes all fail, and health checks mark every node unreachable. A restart cures it, which is why short-lived deployments never see it. Renewing the certificate in the background (for example through <code>tls.Config.GetClientCertificate</code>, a day before expiry) and alerting on its age would close it.</p>
+</div>
+
+<h2 id="nodes-agents--commands">What the control plane can make an agent do</h2>
+<p>The whole API is the mux in <x-ref path="internal/agentsvc/service.go" symbol="func (s *Service) Handler() http.Handler {"><code>Service.Handler</code></x-ref>, with paths and bodies defined in <x-ref path="internal/agentapi/agentapi.go"><code>internal/agentapi</code></x-ref>. <x-ref path="internal/nodes/client.go"><code>nodes.Agent</code></x-ref> has one method per path.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Path</th><th>What the agent does</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /v1/health</code>, <code>GET /v1/host/metrics</code></td><td>Reports its version, node ID, tool versions and whether Docker answers. Reads load, memory, disk, CPU ticks and disk I/O from <code>/proc</code> and <code>statfs</code>.</td></tr>
+    <tr><td><code>POST /v1/dump</code></td><td><code>pg_dump -Fc</code> of a database, encrypted as it streams (Xenibase's own format, or OpenPGP to a project's own key), uploaded to S3. No temporary file. If <code>pg_dump</code> fails after the upload looks complete, the object is deleted.</td></tr>
+    <tr><td><code>POST /v1/restore</code></td><td>Downloads an object, decrypts it, pipes it into <code>pg_restore</code>: owned by the project's owner, single transaction, stop at the first error, unless the request allows errors (imports).</td></tr>
+    <tr><td><code>POST /v1/copy</code></td><td><code>pg_dump</code> piped into <code>pg_restore</code> with nothing in between: imports from an outside database.</td></tr>
+    <tr><td><code>POST /v1/instances</code>, <code>GET</code>/<code>DELETE /v1/instances/{id}</code>, <code>…/start</code>, <code>…/stop</code></td><td>Creates, idempotently, a Postgres container with its volume. With <code>restore</code> it first fills the volume from a WAL-G base backup and recovers, to a time if one is given. With <code>recreate</code> it swaps the container and keeps the volume (a minor-version upgrade). With <code>patroni</code> it runs the instance as an HA member. Reads, starts, stops and destroys containers.</td></tr>
+    <tr><td><code>POST …/walg/backup</code>, <code>GET …/walg/backups</code></td><td><code>wal-g backup-push</code> inside the container, then <code>delete retain FULL n</code>. Lists base backups.</td></tr>
+    <tr><td><code>PUT</code>/<code>GET</code>/<code>DELETE /v1/etcd</code>, <code>GET /v1/etcd/address</code>, <code>POST /v1/etcd/members</code></td><td>Runs, inspects or removes this node's etcd member, and lists, adds or removes cluster members through it (V3.1 §3.2).</td></tr>
+    <tr><td><code>PUT /v1/pooler/config</code>, <code>PUT /v1/pooler/expected</code>, <code>GET /v1/pooler/status</code></td><td>Pooler hosts only: writes the PgBouncer files, records the newest generation, reports readiness (<x-page id="connections--pooler-hosts">pooler hosts</x-page>).</td></tr>
+  </tbody>
+</table></div>
+<p>Request bodies are capped at 1 MiB (64 MiB for a pooler bundle, which carries every login's verifier). Dumps, restores, copies and base backups share <code>MaxJobs</code> slots, two by default (<x-ref path="internal/agentsvc/service.go" symbol="func (s *Service) acquire("><code>acquire</code></x-ref>). A further request waits for a slot until its own context ends.</p>
+
+<h3 id="nodes-agents--injection">Why a command cannot become a shell</h3>
+<p>The agent takes values, never command lines, and each value reaches a process as an argument or an environment variable:</p>
+<ul>
+  <li><strong>Connections</strong> reach <code>pg_dump</code> and <code>pg_restore</code> as <code>PGHOST</code>, <code>PGUSER</code>, <code>PGPASSWORD</code> and the rest (<x-ref path="internal/agentsvc/pg.go" symbol="func pgEnv("><code>pgEnv</code></x-ref>), so passwords never appear in <code>ps</code>. Schema filters are single <code>--schema=…</code> arguments (<x-ref path="internal/agentsvc/pg.go" symbol="func dumpArgs("><code>dumpArgs</code></x-ref>), so a value starting with <code>-</code> cannot become a flag. Child processes get <code>SIGKILL</code> if the agent dies (<code>Pdeathsig</code>).</li>
+  <li><strong>Instance IDs</strong> must be UUIDs (<x-ref path="internal/agentsvc/instances.go" symbol="var instanceID = regexp.MustCompile"><code>instanceID</code></x-ref>). Container and volume names are made from them.</li>
+  <li><strong>Postgres settings</strong> become <code>-c name=value</code> arguments to <code>postgres</code>, with names limited to <code>[a-z_][a-z0-9_.]*</code> and values without NUL or newline (<x-ref path="internal/agentsvc/instances.go" symbol="var settingName = regexp.MustCompile"><code>settingName</code></x-ref>). The settings come from the server's size profiles and replica settings, never from a customer.</li>
+  <li><strong>The few shell scripts</strong> are constants. Their variable parts come in through the exec environment: the move rules, the recovery settings, the backup name (checked against <code>^(LATEST|base_…)$</code>). The one file a script sources, the recovery source's WAL-G settings, is written by <x-ref path="internal/agentsvc/instances.go" symbol="func shellExports("><code>shellExports</code></x-ref> with every value single-quoted.</li>
+  <li><strong>etcd membership</strong> takes a peer URL that must start with <code>https://</code> and a numeric member ID, sent as JSON to etcd's gateway.</li>
+  <li><strong>Docker</strong> is reached through <x-ref path="internal/docker/client.go" symbol="func New(host string) (*Client, error) {"><code>docker.New</code></x-ref>: the Engine API over the Unix socket (or <code>tcp://</code>, unencrypted), at API version 1.43 or the daemon's minimum if that is higher. It has no SDK dependencies.</li>
+</ul>
+<p>So what the control plane can do to a node is bounded by this API, not by what a shell could do. But that bound is wide. The agent runs as root with the Docker socket, and creates containers from whatever image and settings the server sends. Whoever holds the server's client certificate effectively has root on every node.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>An import's source address is not checked, and that defeats IP allowlists.</strong> <code>POST /api/v1/imports</code> (and its preflight) takes a <code>postgres://</code> URL from any member allowed to create projects. <code>xenibase-server</code> connects to it directly (<x-ref path="internal/backup/import.go" symbol="func connectSource("><code>connectSource</code></x-ref>, plain <code>pgx</code>, not the <code>outbound</code> guard that webhooks use), and then an agent runs <code>/v1/copy</code> against it. Neither refuses private, loopback or node addresses. Both connect from addresses that every cluster's <code>pg_hba.conf</code> trusts: the bundle's <code>shared-pg-hba.conf</code> lets the server and agent in by address, and agent-run instances accept the private ranges. Someone who has a project's owner password, but is kept out by that project's <x-page id="connections--allowlist">IP allowlist</x-page>, can import <code>postgres://&lt;owner&gt;:&lt;password&gt;@shared-pg:5432/&lt;db&gt;</code> (or the instance's private address) into a project of their own and get a full copy. The same path probes the private network from the control plane. The source should go through the <code>outbound</code> rules, with the nodes' networks added to its blocked ranges.</p>
+</div>
+
+<h2 id="nodes-agents--auth">How commands are authenticated and authorised</h2>
+<p>Authentication is the TLS handshake and nothing else: no token, no request signature, no per-request check. Authorisation is all or nothing. Once a client presents a valid <code>xenibase-server</code> certificate, every path is open, and the agent does not know which project or operation a call is for. Each request is decided in the control plane. The operation that calls the agent has already been authorised against the caller's organisation role (see <x-page id="security">Security</x-page>), and the agent trusts the server's decision.</p>
+<p>The server also refuses to send work to an agent it does not trust to understand it. <x-ref path="internal/nodes/client.go" symbol="func (s *Service) agentFor("><code>agentFor</code></x-ref> checks the version the agent last reported against the server's (<x-ref path="internal/nodes/compat.go" symbol="func Compatible(server, agent string) bool {"><code>Compatible</code></x-ref>): the same major, and a minor no older than the server's. Development builds match anything. Health checks use <code>dial</code> without the version check, so an agent that needs upgrading still reports in.</p>
+<p>Pooler hosts add a second listener: an <em>unauthenticated</em> HTTP API on a loopback address for keepalived's check script and notify calls (<x-ref path="internal/agentsvc/pooler.go" symbol="func (s *Service) LocalHandler() http.Handler {"><code>LocalHandler</code></x-ref>). <code>ServeLocal</code> refuses any address that is not loopback. Any local process can mark the host MASTER and so make the agent claim the floating IP.</p>
+
+<h2 id="nodes-agents--instances">Instances through Docker</h2>
+<p><x-ref path="internal/agentsvc/instances.go" symbol="func (in *instances) Create(ctx context.Context, spec agentapi.InstanceSpec)"><code>instances.Create</code></x-ref> holds a per-instance lock and is idempotent. If the container exists it is started and waited for. Otherwise it pulls the image if missing. The image name is a template with <code>{major}</code>, default <code>xenibase-postgres:{major}-walg3.0.9</code>. It then creates the volume <code>xenibase-&lt;id&gt;</code>, optionally restores into it in a one-off container, and starts <code>postgres</code> with hard CPU and memory limits, <code>shm</code> sized from memory, <code>SIGINT</code> as the stop signal, and restart <code>unless-stopped</code>. It finally checks that the running major is the one asked for (<code>postgres -V</code>). <code>PGDATA</code> is always set inside the volume, because older images declare an anonymous volume that a recreate would lose.</p>
+<p>Network logins are limited at <code>initdb</code> to <code>XENIBASE_AGENT_DB_ALLOW</code>, which defaults to every private range and <code>127.0.0.1</code> (<x-ref path="cmd/agent/main.go" symbol="const defaultDBAllow"><code>defaultDBAllow</code></x-ref>), with SCRAM. On every start the agent appends, once, rules that let only <code>xenibase_move_&lt;hex&gt;</code> logins in from <code>XENIBASE_AGENT_MOVE_ALLOW</code> for logical-replication moves, and reloads (<x-ref path="internal/agentsvc/instances.go" symbol="func (in *instances) ensureMoveHBA("><code>ensureMoveHBA</code></x-ref>). Instances are reached by container name on the agent's Docker network, or on a port published on the node's private address.</p>
+<div class="callout note"><span class="callout-label">Note</span>
+  <p>A project's IP allowlist is enforced at the poolers, not here. Anything that can reach a node's private address with a project's password connects to its instance directly. On the dedicated tier that includes another customer's <code>postgres_fdw</code>, which is allowed there.</p>
+</div>
+
+<h2 id="nodes-agents--failures">Failure handling</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>What fails</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>Registration at first start</td><td>Retried 30 times, two seconds apart, each with a 30-second timeout. Then the agent exits and its supervisor restarts it.</td></tr>
+    <tr><td>An agent stops answering</td><td><x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) Run(ctx context.Context, interval time.Duration) {"><code>nodes.Run</code></x-ref> polls every pinned agent every 30 seconds (health, then metrics, 5 seconds in all) and records <code>healthy</code> or <code>unreachable</code>, the capacity snapshot, the version, and <code>last_reachable_at</code> (<x-ref path="internal/nodes/nodes.go" symbol="func (s *Service) Check(ctx context.Context, n store.Node) Status {"><code>Check</code></x-ref>). HA failover and capacity automation read those columns.</td></tr>
+    <tr><td>An agent on the wrong version</td><td>Still health-checked, but <code>agentFor</code> refuses it with <code>ErrIncompatibleAgent</code>, naming both versions, until it is upgraded.</td></tr>
+    <tr><td>A container that will not come up</td><td><x-ref path="internal/agentsvc/instances.go" symbol="func (in *instances) waitReady("><code>waitReady</code></x-ref> gives up after three restarts, or when the container stops, with its last 20 log lines. Otherwise it waits up to 10 minutes for <code>pg_isready</code>.</td></tr>
+    <tr><td>A restore that fails half-way</td><td>The next attempt removes the restore container and the volume before starting again.</td></tr>
+    <tr><td>A busy agent</td><td>Long jobs queue for one of two slots, and fail with 503 if the caller's context ends first.</td></tr>
+    <tr><td>A call that never answers</td><td>The client has no timeout of its own (<code>ResponseHeaderTimeout: 0</code>), because dumps run for hours. Each caller sets a context deadline: the arbiter 3 seconds, pooler pushes 10.</td></tr>
+  </tbody>
+</table></div>
+<div class="callout note"><span class="callout-label">Note</span>
+  <p><code>dial</code> builds a new <code>http.Transport</code> for every <code>agentFor</code> call. Each one keeps its idle TLS connection for up to a minute, so the 3-second arbiter leaves about twenty idle connections open on each pooler host at any time. That is harmless at two hosts per region, but it is a full TLS 1.3 handshake per call. Caching one client per node and fingerprint would stop it.</p>
+</div>

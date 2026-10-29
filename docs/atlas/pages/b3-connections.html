@@ -1,0 +1,155 @@
+<!--atlas
+{
+  "id": "connections",
+  "title": "Connections: poolers and the edge",
+  "part": "B",
+  "order": 3,
+  "summary": "How clients reach a database: the PgBouncer pair and its generated files, pooler hosts and the floating IP, TLS for the database hostname, the waker, and xenibase-edge.",
+  "verified": "acd8de1d320fc2523f476ce353f2bce65cdbfb00",
+  "sources": [
+    "internal/pooler/",
+    "internal/agentsvc/pooler.go",
+    "internal/agentsvc/keepalived.go",
+    "internal/agentapi/pooler.go",
+    "internal/edge/edge.go",
+    "internal/edge/gateway.go",
+    "internal/edgeapi/",
+    "cmd/edge/",
+    "internal/floatip/",
+    "internal/tlscert/",
+    "internal/waker/",
+    "internal/freetier/freetier.go",
+    "internal/bloom/",
+    "internal/provision/network.go",
+    "internal/dedicated/roles.go",
+    "internal/store/queries/projects.sql",
+    "internal/store/migrations/00058_allowed_cidrs.sql",
+    "deploy/pgbouncer/",
+    "deploy/pooler-host/",
+    "deploy/compose/compose.yaml",
+    "docs/edge-poolers.md",
+    "docs/network-access.md"
+  ]
+}
+-->
+<h2>The path of a connection</h2>
+<p>Every client connection string names the region's database hostname, a port, and the project's database:</p>
+<pre><code>postgresql://blog_k2f9_owner:…@db.example.com:6543/blog_k2f9?sslmode=require</code></pre>
+<ol>
+  <li><strong>DNS and the floating IP.</strong> The hostname points at the region's floating IP. Hetzner routes that address to one of two pooler hosts. Without pooler hosts, the PgBouncers run beside <code>xenibase-server</code>, as in the compose bundle.</li>
+  <li><strong>PgBouncer.</strong> <code>:5432</code> is session mode, for migrations, <code>LISTEN</code> and anything that needs a session. <code>:6543</code> is transaction mode, for app traffic, with up to 200 prepared statements tracked per connection. Both run the same configuration (<x-ref path="deploy/pgbouncer/session.ini"><code>deploy/pgbouncer</code></x-ref>). TLS is required (<code>client_tls_sslmode = require</code>, TLS 1.2 or 1.3).</li>
+  <li><strong>Who may log in from where.</strong> <code>auth_type = hba</code>: PgBouncer reads the generated <code>hba.conf</code>, then checks the password against the SCRAM verifier in the generated <code>userlist.txt</code>. PgBouncer never sees a plaintext password.</li>
+  <li><strong>Routing by database name.</strong> The name in the startup packet picks a line of the generated <code>databases.ini</code>: the backend host and port, the backend database, and pool limits. PgBouncer connects to the backend as the same user and passes SCRAM through.</li>
+  <li><strong>The backend.</strong> One of three things: the shared cluster or dedicated instance that holds the database; the read replicas, for <code>&lt;db&gt;_ro</code>; or, for a paused or archived Free project, the <a href="#connections--waker">waker</a>.</li>
+</ol>
+<p>There is no SNI routing and no per-project hostname for Postgres. A region has one hostname and one certificate, and the database name alone picks the project. The data API, auth, storage and realtime go through <a href="#connections--edge"><code>xenibase-edge</code></a> instead, which <em>does</em> route by hostname.</p>
+
+<h2 id="connections--files">The generated files</h2>
+<p><code>xenibase-server</code> owns three files in the pooler directory (<code>XENIBASE_POOLER_CONFIG_DIR</code>, mounted read-only into each PgBouncer at <code>/etc/pgbouncer/xenibase</code>). <x-ref path="internal/pooler/render.go" symbol="func Render(cfg Config) (databases, userlist, hba []byte, err error) {"><code>Render</code></x-ref> produces them from a <code>Config</code> of routes, users and restrictions. Entries are sorted, so the same input gives byte-identical files. Names are validated, never escaped, so a bad name upstream cannot inject configuration:</p>
+<x-code path="internal/pooler/render.go" start="identRe = regexp.MustCompile" lines="2" caption="databases and users are lowercase identifiers; hosts a narrow character set"/>
+<div class="table-wrap"><table>
+  <thead><tr><th>File</th><th>One line per</th><th>Example</th></tr></thead>
+  <tbody>
+    <tr><td><code>databases.ini</code></td><td>Route: the project's database, its V1 alias if it has one, and <code>&lt;db&gt;_ro</code> if it has read replicas</td><td><code>blog_k2f9 = host=10.0.0.21 port=5432 dbname=blog_k2f9 pool_size=15 max_db_connections=60</code></td></tr>
+    <tr><td><code>userlist.txt</code></td><td>Login: owner, read-only login, members' personal logins, probe, edge and request-role logins, logins an owner created with role management, and the static admin user</td><td><code>"blog_k2f9_owner" "SCRAM-SHA-256$4096:…"</code></td></tr>
+    <tr><td><code>hba.conf</code></td><td>Allowlist rule, then the default</td><td><code>host all all 0.0.0.0/0 scram-sha-256</code></td></tr>
+  </tbody>
+</table></div>
+<p><x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) Sync(ctx context.Context) error {"><code>Manager.Sync</code></x-ref> builds one <code>Config</code> per region under a Postgres advisory lock, so two servers never interleave. It reads projects in a live status whose organisation is not suspended (<code>PoolerRoutes</code>; a suspended organisation simply loses its routes), their replicas, and every kind of login. A project is routed by its region's poolers, or by the home region's when its region has no pooler hosts. For 30 days after a move it is also routed by its old region's, so old connection strings keep working. A region's files go in the main directory for the home region, <code>regions/&lt;id&gt;/</code> for the others. Files are written atomically (temp file, <code>fsync</code>, rename, directory <code>fsync</code>) in a fixed order: users, then <code>hba.conf</code>, then routes. A new route is never served before its user can log in, or wider than its allowlist. Then every pooler gets <code>RELOAD</code> (<x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) distribute("><code>distribute</code></x-ref>).</p>
+<p>The admin console also carries <code>PAUSE</code>/<code>RESUME</code> around cutovers, <code>KILL</code> for deletes and password rotations, and <code>RECONNECT</code>. <x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) Freeze("><code>Freeze</code></x-ref> pauses the transaction pooler, falling back to <code>KILL</code> after a wait, and kills on the session pooler, whose clients would otherwise hold <code>PAUSE</code> open. Each command goes only to the poolers that route that database.</p>
+
+<h3 id="connections--isolation">One project's login on another's database</h3>
+<p>PgBouncer has no notion of which login belongs to which route. Any user in <code>userlist.txt</code> may ask for any database in <code>databases.ini</code>, and PgBouncer will open a backend connection as that user. Isolation is the backend's job: every project database has <code>REVOKE ALL … FROM PUBLIC</code> and <code>CONNECT</code> granted to its own roles only (<x-ref path="internal/provision/flows.go" symbol="&quot;REVOKE ALL ON DATABASE &quot;"><code>ensureDatabase</code></x-ref>), so Postgres refuses the login. <code>isocheck</code> verifies that nightly on every cluster. The auth file is also one namespace per region, so login names must be unique across projects. Logins an owner creates must be named <code>&lt;db&gt;_…</code>, may not be one of the project's or Xenibase's own names (<x-ref path="internal/dedicated/roles.go" symbol="func platformRole("><code>platformRole</code></x-ref>), and lose to a platform login of the same name.</p>
+
+<h2 id="connections--allowlist">The per-project IP allowlist</h2>
+<p>New in v4.2.4 (migration 00058). <code>PUT /api/v1/projects/{id}/network</code> stores up to 50 networks in <code>projects.allowed_cidrs</code>. <x-ref path="internal/provision/network.go" symbol="func NormalizeAllowedCIDRs("><code>NormalizeAllowedCIDRs</code></x-ref> turns bare addresses into <code>/32</code> or <code>/128</code>, unmaps IPv4-in-IPv6, and refuses host bits, zones and <code>/0</code>. A check constraint repeats the limit of 50.</p>
+<p>For each project with a list, <x-ref path="internal/pooler/render.go" symbol="func renderHBA("><code>renderHBA</code></x-ref> writes its rules ahead of the default. PgBouncer takes the first line that matches:</p>
+<x-code path="internal/pooler/render.go" start="dbs := strings.Join(r.Databases, &quot;,&quot;)" end="return b.Bytes(), nil" caption="exempt logins from anywhere, then each CIDR, then reject; the last two lines admit every other project"/>
+<p>The databases are the project's name, its <code>_ro</code> route and its V1 alias, so neither port nor any route is left open. Both PgBouncers read the same file. The exempt logins (<code>Platform</code>) are the five backend-service logins and the SLA probe. Their passwords never leave Xenibase, and the API keys and row-level security protect what they can do. The dashboard's SQL editor, backups, moves and HA connect to instances directly, not through the poolers. Provisioning and password rotation skip their own connect-through-the-pooler smoke test while a list exists, because it would come from the server's address.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <ul>
+    <li><strong>The allowlist can be bypassed through an import.</strong> An import connects from <code>xenibase-server</code> and an agent, whose addresses the backends trust, straight to any address the caller names. Someone with a restricted project's password copies it into a project of their own without ever touching a pooler. See <x-page id="nodes-agents--commands">Nodes and agents</x-page>.</li>
+    <li><strong>Nothing checks that it is enforced.</strong> The agent writes <code>hba.conf</code> whatever PgBouncer's <code>auth_type</code> is. A pooler host still on the pre-4.2.4 <code>pgbouncer.ini</code> (<code>auth_type = scram-sha-256</code>) ignores the file and reports ready, so a list is stored and shown but not applied. The upgrade notes say to upgrade pooler hosts first, but the arbiter could check: <code>SHOW CONFIG</code> on the admin console it already uses.</li>
+    <li><strong>It covers the poolers only.</strong> Instances accept SCRAM logins from every private range (<code>XENIBASE_AGENT_DB_ALLOW</code>). Anything on the private network with the password, such as a dedicated project's <code>postgres_fdw</code>, is not subject to the list.</li>
+    <li>The final <code>host all all 0.0.0.0/0</code> rule also admits the admin console (database <code>pgbouncer</code>, user <code>xenibase</code>) from the internet, with only its password in the way. A rule limiting <code>pgbouncer</code> to the private network would cost nothing.</li>
+  </ul>
+</div>
+<div class="callout note"><span class="callout-label">Note</span>
+  <p>The poolers see the address a connection arrives from. PROXY protocol is not used anywhere: pooler hosts run with host networking behind a floating IP, which keeps the source address. In the compose bundle, Docker's port publishing keeps it for IPv4, but an IPv6 client reached through <code>docker-proxy</code> arrives from the bridge gateway (172.31.250.1) and is refused by any list that does not name that address.</p>
+</div>
+
+<h2 id="connections--pooler-hosts">Pooler hosts, keepalived and the floating IP</h2>
+<p>With pooler hosts (V3 §2.1) each region has two machines. Each runs both PgBouncers and the agent in pooler mode in one container, and keepalived in another, the only one with <code>NET_ADMIN</code> (<x-ref path="deploy/pooler-host/compose.yaml"><code>deploy/pooler-host</code></x-ref>).</p>
+<h3>Getting the files there</h3>
+<p>After writing the files, <x-ref path="internal/pooler/hosts.go" symbol="func (m *Manager) pushHosts(ctx context.Context) error {"><code>pushHosts</code></x-ref> reads each region's bundle. That is its three files plus the TLS pair: the region's own if it has one, else the main directory's (<x-ref path="internal/pooler/hosts.go" symbol="func readBundle("><code>readBundle</code></x-ref>). It hashes the bundle, advances the region's generation in the metadata database, and sends <code>PUT /v1/pooler/config</code> to each of the region's hosts over the agent's mutual TLS. Then it tells every host the generation, including any that just failed. A push fails only when every host refuses it. A host that missed it knows it is stale.</p>
+<p>The agent accepts only the five known file names, requires the routes and auth file, checks the hash against the content, and refuses an older generation with 409 (two servers raced). It writes users, rules, key, certificate, then routes, and sends <code>SIGHUP</code> to the PgBouncers (<x-ref path="internal/agentsvc/pooler.go" symbol="func (p *poolerHost) apply(b agentapi.PoolerBundle) error {"><code>apply</code></x-ref>). The generation served and the generation expected are kept in a state file, so they survive a restart.</p>
+<h3>Who holds the address</h3>
+<p>A host is <em>ready</em> when it has a configuration, serves the newest generation the server has announced, and both PgBouncers accept TCP connections (<x-ref path="internal/agentsvc/pooler.go" symbol="func (p *poolerHost) status() agentapi.PoolerStatus {"><code>status</code></x-ref>). keepalived asks the agent's loopback <code>/ready</code> every second. Two failures drop the host out, and unicast VRRP with one-second adverts hands over in about 3 to 4 seconds. Both hosts start as <code>BACKUP</code> with <code>nopreempt</code>, so a host that comes back does not take the address back (<x-ref path="internal/agentsvc/keepalived.go" symbol="var keepalivedTmpl"><code>keepalived.conf</code></x-ref>). keepalived's notify posts the new state to the agent. On <code>MASTER</code> the agent asks Hetzner to route the floating IP to its own server, retrying with backoff for up to two minutes, and stops when the state changes (<x-ref path="internal/agentsvc/pooler.go" symbol="func (p *poolerHost) setVRRP(state string) {"><code>setVRRP</code></x-ref>).</p>
+<p><code>xenibase-server</code>'s arbiter checks each region's pair every 3 seconds. It re-pushes to a stale host, at most every 15 seconds, and asks Hetzner where the IP points. Its rule is <x-ref path="internal/pooler/arbiter.go" symbol="func Decide(hosts []HostView, holder string, manageIP bool) Decision {"><code>Decide</code></x-ref>:</p>
+<x-code path="internal/pooler/arbiter.go" start="if !manageIP || (d.Holder != nil &amp;&amp; d.Holder.healthy()) {" end="d.AssignTo = pick" caption="a healthy holder is never moved; otherwise prefer the healthy host keepalived made MASTER"/>
+<p>It moves the IP only after the holder has been unhealthy for two checks in a row, so keepalived's own move goes first. Each move, change of holder, split brain, host going stale and recovery is recorded as a pooler event and shown in Admin → Nodes.</p>
+<h3>Split brain</h3>
+<p>If the two hosts lose sight of each other but not of Hetzner, both become <code>MASTER</code>. Both agents then assign the IP once. <x-ref path="internal/floatip/floatip.go" symbol="func (h *Hetzner) Assign("><code>Assign</code></x-ref> is a no-op when the IP already points at the caller. The last assignment wins, and neither agent claims again until its state changes. The arbiter reports <code>split_brain</code> but leaves a healthy holder alone, so nothing flaps. Both hosts are stateless and serve the same generation, so whichever receives the traffic routes it correctly. A host that missed a change cannot be ready, so cannot hold the address through keepalived. Two cases remain. If the control plane cannot reach the holder, the arbiter moves the address after six seconds even though clients could still reach it. That is a needless failover, not a wrong one. And while the control plane is down, nothing announces new generations, so a host that missed the last push before the outage still counts as ready.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p>Each pooler host holds a Hetzner Cloud API token with read and write access (<code>XENIBASE_AGENT_HETZNER_TOKEN</code>), because the agent assigns the floating IP itself. Hetzner tokens cannot be narrowed to one IP. Pooler hosts are the only machines that face the internet on a database port, and a compromise of one hands over every server, volume and network in the Hetzner project, database nodes included. Leaving assignment to <code>xenibase-server</code>, which already moves the address, or putting a narrow proxy in front of the API would keep the token off them, at the cost of a slower failover when the control plane is down.</p>
+</div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V3 §2.1 says the server "verifies both hashes match". Staleness is decided by generation. The agent checks each bundle's hash against its content, and the server records each host's hash, but nothing compares the two hosts' hashes.</p>
+</div>
+
+<h2 id="connections--tls">TLS for the database hostname</h2>
+<p><x-ref path="internal/tlscert/tlscert.go"><code>internal/tlscert</code></x-ref> keeps <code>server.crt</code> and <code>server.key</code> in the pooler directory for the database hostname (Settings → DB hostname). It has four modes (<code>XENIBASE_POOLER_TLS</code>):</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Mode</th><th>Certificate</th></tr></thead>
+  <tbody>
+    <tr><td><code>acme</code> (bundle default)</td><td>Let's Encrypt or another ACME CA through certmagic, HTTP-01 only. Caddy forwards <code>/.well-known/acme-challenge/</code> to the server. A self-signed certificate stands in until the first issue, and whenever the hostname is an IP or not a public name (<x-ref path="internal/tlscert/tlscert.go" symbol="func acmeable("><code>acmeable</code></x-ref>).</td></tr>
+    <tr><td><code>self-signed</code></td><td>P-256, one year, replaced when it has less than 30 days left or no longer names the host.</td></tr>
+    <tr><td><code>files</code></td><td>Operator-supplied PEM files, copied in.</td></tr>
+    <tr><td><code>off</code></td><td>Nothing is written.</td></tr>
+  </tbody>
+</table></div>
+<p><x-ref path="internal/tlscert/tlscert.go" symbol="func (m *Manager) ensure(ctx context.Context) error {"><code>ensure</code></x-ref> runs at start, on a hostname change, twice a day, and after a failure with backoff up to an hour. It checks that the pair matches and writes the key before the certificate, then reloads the poolers, which pushes the pair to pooler hosts. Clients are told to use <code>sslmode=require</code>, which encrypts but does not check the certificate. <code>verify-full</code> works when the certificate is from a public CA.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <ul>
+    <li><strong>A region's own pooler hostname never gets a certificate.</strong> Regions have their own hostname (<code>regions.pooler_host</code>, for example <code>db.ng.example.com</code>), but the server builds one <code>tlscert.Manager</code>, for the home hostname (<x-ref path="cmd/server/main.go" symbol="m, err := tlscert.New(tc, st.DBHost())"><code>setupPoolerTLS</code></x-ref>). Nothing writes a pair into <code>regions/&lt;id&gt;/</code>, so <code>readBundle</code> always falls back to the home pair. Clients of a non-home region that use <code>verify-full</code> fail on the hostname. With <code>require</code>, nothing protects them from an impostor.</li>
+    <li><strong>The hops behind the poolers are not verified.</strong> PgBouncer connects to backends with <code>server_tls_sslmode = prefer</code>, so it falls back to plain text and never checks a certificate. That is reasonable on one private network, but not for routes that cross regions: a region without its own poolers is served from the home region, and a moved project is forwarded from its old one for 30 days. The edge connects to the poolers with <code>sslmode=require</code> by default (<x-ref path="cmd/edge/main.go" symbol="XENIBASE_EDGE_POOLER_SSLMODE"><code>XENIBASE_EDGE_POOLER_SSLMODE</code></x-ref>), as the service logins. Someone in the path cannot learn the password from SCRAM, but can take over the session after it.</li>
+  </ul>
+</div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V1 §3.3 has the pooler certificate "obtained via DNS-01 or HTTP-01". The pooler certificate is HTTP-01 only (TLS-ALPN is turned off, and there is no DNS-01 solver in <code>tlscert</code>). DNS-01 exists for the edge's wildcard, outside this package.</p>
+</div>
+
+<h2 id="connections--waker">The waker</h2>
+<p>A Free project that sits idle is paused, and later archived (V3 §4.2–§4.3). Its route then points at the waker instead of its cluster, with <code>pool_size</code> and <code>max_db_connections</code> of 1:</p>
+<x-code path="internal/pooler/manager.go" start="if r.Lifecycle != &quot;active&quot; &amp;&amp; wakerHost != &quot;&quot; {" lines="5"/>
+<p>The waker (<x-ref path="internal/waker/waker.go"><code>internal/waker</code></x-ref>) runs inside <code>xenibase-server</code> on <code>XENIBASE_WAKER_LISTEN</code>. It speaks just enough of the protocol to answer. It declines TLS and GSS, reads the startup packet (at most 10,000 bytes, three tries), and asks <x-ref path="internal/freetier/freetier.go" symbol="func (s *Service) Wake(ctx context.Context, database string) (waker.State, error) {"><code>freetier.Wake</code></x-ref> to queue a resume or an unarchive. A request while another operation runs on the project is a no-op. It then closes the connection with a FATAL error that says what is happening (<x-ref path="internal/waker/waker.go" symbol="func Code(st State) string {"><code>Code</code></x-ref>):</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Project</th><th>SQLSTATE</th><th>The client sees</th></tr></thead>
+  <tbody>
+    <tr><td>Paused</td><td><code>08004</code></td><td>"…paused for inactivity and is resuming. Retry in about 30 seconds."</td></tr>
+    <tr><td>Archived</td><td><code>08004</code></td><td>"…being restored from its archive. Retry in a few minutes."</td></tr>
+    <tr><td>Already active (the route is about to switch back)</td><td><code>57P03</code>, which PgBouncer treats as a server starting and holds the client</td><td>"Retry in a few seconds."</td></tr>
+    <tr><td>Unknown database</td><td><code>3D000</code></td><td>"This database is not available."</td></tr>
+  </tbody>
+</table></div>
+<p>A connection storm is bounded three times. Each PgBouncer opens at most one server connection per paused database. The waker handles at most 256 connections at once, and refuses the rest at accept with <code>53300</code>, without waking anything. Each connection has a 10-second deadline, and its wake call half of that. The wake itself is one locked row and an idempotent enqueue.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p>The waker does not authenticate. It relies on PgBouncer having checked the client's password first, and on listening "on an address only the poolers reach". The bundle listens on <code>:6435</code> inside its Docker network. With pooler hosts elsewhere it must listen where they can reach it, and nothing restricts the source. Anyone who reaches it can wake any paused project, or start an archived project's restore, by sending its database name in a startup packet. The edge does the same for any request to a paused project's hostname, before the API key is checked, limited to once per 30 seconds per edge (<x-ref path="internal/edge/gateway.go" symbol="func (e *Edge) wake(ref string) {"><code>wake</code></x-ref>). The cost is compute and archive restores rather than data. Checking the source address against the pooler hosts, and the key before waking, would close both.</p>
+</div>
+
+<h2 id="connections--edge">xenibase-edge</h2>
+<p><code>xenibase-edge</code> (<x-ref path="cmd/edge/main.go"><code>cmd/edge</code></x-ref>) serves each project's backend services at <code>https://&lt;ref&gt;.&lt;domain&gt;</code>. The data API, auth, storage and realtime are described in Part D. This section covers how it connects.</p>
+<h3>The configuration feed</h3>
+<p>The edge keeps every project's configuration in memory and gets it from <code>xenibase-server</code>. It long-polls <code>GET /api/v1/edge/config?since=…&amp;wait=25</code> for changes and reads the whole feed again every minute as a backstop (<x-ref path="internal/edge/edge.go" symbol="func (e *Edge) apply(ps []edgeapi.Project) {"><code>apply</code></x-ref> ignores an older version that a resync brings back). An entry carries the pooler database and address, the edge login's and the request roles' passwords, the hashes of live API keys, the JWT verification keys, CORS, rate and cache settings, and the state. <code>disabled</code> removes the project. A project's database pools are kept while its connection details are unchanged, and closed when they change. Until the first full read the edge answers 503.</p>
+<p>Every call in either direction carries <code>Xenibase-Signature</code>, an HMAC-SHA256 over the time, method, request URI and body with the shared edge secret. The receiver accepts five minutes of clock difference (<x-ref path="internal/edgeapi/edgeapi.go" symbol="func Verify(secret string"><code>edgeapi.Verify</code></x-ref>).</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p>There is one edge secret for the whole platform (<code>XENIBASE_EDGE_SECRET</code>). The region an edge serves is a query parameter the edge chooses (<x-ref path="internal/edgeapi/edgeapi.go" symbol="func (c *Client) Config("><code>Config</code></x-ref>). An empty one means all regions. So a regional edge, and the cloud-init of every edge node Xenibase creates, holds a key that reads every project's service-role password in every region. That weakens the point of a data-residency region having its own edge. A secret per edge, bound to its region on the server, would contain a compromise to one region.</p>
+</div>
+<h3>From hostname to transaction</h3>
+<ol>
+  <li><x-ref path="internal/edge/gateway.go" symbol="func (e *Edge) refFromHost("><code>refFromHost</code></x-ref> takes the HTTP <code>Host</code>, lower-cased, without port or trailing dot. It must be exactly one label in front of <code>XENIBASE_EDGE_DOMAIN</code>. The edge serves a wildcard certificate whatever the SNI says, and the <code>Host</code> header alone picks the project.</li>
+  <li><x-ref path="internal/edge/gateway.go" symbol="func (e *Edge) authorize(c *call) (Request, bool) {"><code>authorize</code></x-ref> looks the <code>apikey</code> up by its SHA-256 among <em>that project's</em> keys only. A key from another project is simply not found, so a <code>Host</code> header cannot be used to point one project's key at another. A secret key means the <code>service</code> role, and is refused from a browser unless the project allows it. A publishable key means <code>anon</code>, or <code>user</code> with a bearer token. The token must verify against that project's own ES256 keys with the project's ref as audience, and carry <code>role: user</code>. Per-IP and per-key limits apply. The client address is the <code>RemoteAddr</code>, or the last <code>X-Forwarded-For</code> entry when the peer is in <code>XENIBASE_EDGE_TRUSTED_PROXIES</code> (<x-ref path="internal/edge/gateway.go" symbol="func (e *Edge) clientIP("><code>clientIP</code></x-ref>).</li>
+  <li><x-ref path="internal/edge/edge.go" symbol="func (e *Edge) WithRequest("><code>WithRequest</code></x-ref> runs the whole request in one transaction through the transaction pooler, as the role's own login (<code>&lt;db&gt;_anon</code>, <code>_user</code>, <code>_service</code>), with the claims and statement timeout set with <code>set_config(…, true)</code>. Nothing outlives the transaction, so transaction pooling is safe, and tenant SQL that resets the role stays that role. Only a feed from a server older than M32, which has no request-role passwords, makes the edge log in as the edge login and <code>SET LOCAL ROLE</code>.</li>
+</ol>
+<x-code path="internal/edge/edge.go" start="return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {" end="return fn(tx)" caption="one request, one transaction"/>
+<p>Pools are small: four connections per login, two for the service and hook roles. They use pgx's exec mode, with no server-side prepared statements kept between transactions (<x-ref path="internal/edge/edge.go" symbol="func (e *Edge) loginPool("><code>loginPool</code></x-ref>). <code>GET</code>s that may read from replicas use the <code>&lt;db&gt;_ro</code> route. These logins are the ones exempt from IP allowlists. The Bloom filter in <x-ref path="internal/bloom/bloom.go"><code>internal/bloom</code></x-ref> sends a project's counted monthly users to the edge in a few kilobytes. A false positive lets an uncounted user in.</p>
