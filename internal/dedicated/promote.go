@@ -182,6 +182,9 @@ func (s *Service) runPromote(ctx context.Context, op store.Operation, log *jobs.
 	if p.Status != provision.StatusPromoting {
 		return jobs.Permanent(fmt.Errorf("project is %s, not promoting", p.Status))
 	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
+	}
 	inst, err := q.GetInstance(ctx, params.TargetInstance)
 	if err != nil {
 		return jobs.Permanent(err)
@@ -349,6 +352,20 @@ func (s *Service) restoreLogins(ctx context.Context, p store.Project) error {
 		}
 	}
 	return nil
+}
+
+// thawRetry lets the source serve again at the start of an attempt after
+// the first, before the cutover: the attempt before may have frozen it
+// and failed, crashed or lost its lease before the commit, and this one
+// copies again from the start before freezing on its own.
+func (s *Service) thawRetry(ctx context.Context, op store.Operation, p store.Project, log *jobs.StepLogger) error {
+	if op.Attempts <= 1 {
+		return nil
+	}
+	if err := s.thaw(ctx, p); err != nil {
+		return err
+	}
+	return log.Info(ctx, "freeze", "writes open again while this attempt copies (an earlier attempt may have frozen them)")
 }
 
 func isNotPaused(err error) bool { return err != nil && strings.Contains(err.Error(), "is not paused") }

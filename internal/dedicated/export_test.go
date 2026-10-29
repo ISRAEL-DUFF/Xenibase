@@ -15,3 +15,10 @@ var (
 	FailPromote = (*Service).failPromote
 	FailDemote  = (*Service).failDemote
 )
+
+// The handlers of the move-like operations.
+var (
+	RunMove    = (*Service).runMove
+	RunPromote = (*Service).runPromote
+	RunDemote  = (*Service).runDemote
+)

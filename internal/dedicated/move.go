@@ -195,6 +195,9 @@ func (s *Service) runMove(ctx context.Context, op store.Operation, log *jobs.Ste
 	if p.InstanceID != params.SourceInstance {
 		return jobs.Permanent(errors.New("the project is no longer on the instance being moved from"))
 	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
+	}
 	pt := p
 	pt.InstanceID = params.TargetInstance
 	if params.NewInstance {

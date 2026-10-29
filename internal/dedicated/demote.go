@@ -495,6 +495,9 @@ func (s *Service) runDemote(ctx context.Context, op store.Operation, log *jobs.S
 	if p.InstanceID != params.SourceInstance {
 		return jobs.Permanent(errors.New("the project is no longer on the instance being demoted"))
 	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
+	}
 
 	// The checks again, against the cluster chosen (V2 §5.2).
 	plan, err := s.preflight(ctx, p, DemoteOptions{ConsoleWritable: params.ConsoleWritable}, &params.TargetInstance)

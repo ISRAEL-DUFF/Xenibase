@@ -121,6 +121,13 @@ bundle share one version (spec §11.5).
   resume whatever happens, and a sweep every minute gives the logins back
   and sets such a project active once its instance answers; one still
   frozen after 10 minutes raises a `project_stuck` alert.
+- **A retry after a move's freeze copied everything again with the source
+  still frozen.** An error, crash or deploy between the freeze and the
+  cutover started the second attempt with the logins `NOLOGIN` and the
+  poolers paused, so a dump-mode move or promotion was down for a second
+  whole copy. A move, promotion, demotion or major upgrade now opens writes
+  again at the start of any attempt after the first that finds the project
+  not yet cut over.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

@@ -3,6 +3,7 @@ package dedicated_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 
@@ -212,5 +213,42 @@ func TestFailedRollbackResumesAndIsRepaired(t *testing.T) {
 				t.Fatal("the repair did not resume the poolers")
 			}
 		})
+	}
+}
+
+// A retry after the freeze used to copy everything again with the source
+// still frozen by the attempt before. Now an attempt after the first opens
+// writes again before it starts; the first attempt leaves them alone.
+func TestRetryUnfreezesTheSource(t *testing.T) {
+	for _, tc := range []struct {
+		kind, status string
+		run          func(*dedicated.Service, context.Context, store.Operation, *jobs.StepLogger) error
+	}{
+		{dedicated.KindMove, provision.StatusMoving, dedicated.RunMove},
+		{dedicated.KindUpgrade, provision.StatusUpgrading, dedicated.RunMove},
+		{dedicated.KindPromote, provision.StatusPromoting, dedicated.RunPromote},
+		{dedicated.KindDemote, provision.StatusDemoting, dedicated.RunDemote},
+	} {
+		for _, attempt := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s/attempt%d", tc.kind, attempt), func(t *testing.T) {
+				e := setupMove(t, tc.status)
+				ctx := context.Background()
+				// The attempt fails soon after it starts: its target is gone.
+				if err := store.New(e.db).MarkInstanceDeleted(ctx, e.target.ID); err != nil {
+					t.Fatal(err)
+				}
+				op, log := e.op(t, tc.kind, attempt, true)
+				if err := tc.run(e.svc, ctx, op, log); err == nil {
+					t.Fatal("the attempt succeeded without a target")
+				}
+				resumed := e.bouncer.count("RESUME " + e.project.DbName)
+				if attempt > 1 && (!e.canLogin(t) || resumed != 1) {
+					t.Fatalf("a retry started with the source still frozen by the attempt before (LOGIN %v, RESUME sent %d times)", e.canLogin(t), resumed)
+				}
+				if attempt == 1 && (e.canLogin(t) || resumed != 0) {
+					t.Fatal("the first attempt unfroze a source it had not frozen")
+				}
+			})
+		}
 	}
 }
