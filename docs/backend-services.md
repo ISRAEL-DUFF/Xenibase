@@ -599,7 +599,11 @@ templates (Authentication → Emails: plain text with `{{.Code}}`,
   hour per project (`429 over_email_send_rate_limit` past that).
 - **Your own SMTP server** (Authentication → Emails) sends from your
   domain without that limit. Its password is encrypted; **Send test**
-  checks it before saving.
+  checks it before saving. Like webhooks, the server must have a public
+  address unless the platform admin allows its host for the organisation
+  (its outbound allow-list); a failed test says only that it
+  failed, with the reason in the server's log. A provider's `base_url`
+  follows the same rule.
 - One address gets at most one code a minute; sends are counted in the
   usage (`message_sends`) and shown with failures.
 

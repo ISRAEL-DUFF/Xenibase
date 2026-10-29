@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -450,7 +451,11 @@ func (s *Service) sendOne(ctx context.Context, d store.AuthMessageOutbox) (sendR
 			if own == nil {
 				return res, errors.New("the project's own provider was removed")
 			}
-			p = own.provider()
+			client, err := s.providerClient(ctx, d.ProjectID, own)
+			if err != nil {
+				return res, err
+			}
+			p = own.provider(client)
 		} else {
 			p = s.platformProvider(d.Channel)
 			if p == nil {
@@ -496,7 +501,11 @@ func (s *Service) sendOne(ctx context.Context, d store.AuthMessageOutbox) (sendR
 		if prov.SMTP == nil {
 			return res, errors.New("the project's SMTP settings were removed")
 		}
-		return res, mail.Send(sctx, prov.SMTP.config(), msg)
+		cfg := prov.SMTP.config()
+		if err := s.pinSMTP(ctx, d.ProjectID, &cfg); err != nil {
+			return res, err
+		}
+		return res, mail.Send(sctx, cfg, msg)
 	}
 	if s.Mail == nil {
 		return res, mail.ErrNotConfigured
@@ -526,21 +535,74 @@ func authEmailContent(kind, subject, body, projectName string) *mail.Content {
 	return &c
 }
 
-// provider is the messaging client for a project's own provider.
-func (p *PhoneProvider) provider() messaging.Provider {
+// provider is the messaging client for a project's own provider; client
+// (nil: the default) makes its requests.
+func (p *PhoneProvider) provider(client *http.Client) messaging.Provider {
 	switch p.Provider {
 	case "termii":
-		return messaging.Termii{BaseURL: p.BaseURL, APIKey: p.APIKey, SenderID: p.SenderID}
+		return messaging.Termii{BaseURL: p.BaseURL, APIKey: p.APIKey, SenderID: p.SenderID, Client: client}
 	case "africastalking":
-		return messaging.AfricasTalking{BaseURL: p.BaseURL, Username: p.Username, APIKey: p.APIKey, From: p.SenderID}
+		return messaging.AfricasTalking{BaseURL: p.BaseURL, Username: p.Username, APIKey: p.APIKey, From: p.SenderID, Client: client}
 	case "twilio":
 		return messaging.Twilio{BaseURL: p.BaseURL, AccountSID: p.AccountSID, AuthToken: p.AuthToken, From: p.From,
-			MessagingServiceSID: p.MessagingServiceSID, WhatsAppFrom: p.From}
+			MessagingServiceSID: p.MessagingServiceSID, WhatsAppFrom: p.From, Client: client}
 	case "whatsapp_cloud":
 		return messaging.WhatsAppCloud{BaseURL: p.BaseURL, PhoneNumberID: p.PhoneNumberID, AccessToken: p.AccessToken,
-			Template: p.Template, Language: p.Language}
+			Template: p.Template, Language: p.Language, Client: client}
 	}
 	return nil
+}
+
+// ErrDestination is a project's own SMTP server or provider URL that the
+// outbound rules refuse (a private or internal address not allow-listed).
+var ErrDestination = errors.New("the address isn't allowed: it must be public, unless the platform admin allows the host for the organisation")
+
+// providerClient is the HTTP client for a project's own provider: with a
+// base_url, one that connects only to the address the outbound rules
+// checked and follows no redirects (nil, the default, for the provider's
+// own API).
+func (s *Service) providerClient(ctx context.Context, projectID uuid.UUID, p *PhoneProvider) (*http.Client, error) {
+	if p.BaseURL == "" {
+		return nil, nil
+	}
+	if s.Outbound == nil {
+		return nil, errors.New("outbound requests aren't available")
+	}
+	org, err := s.projectOrg(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	t, err := s.Outbound.Check(ctx, org, p.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("the provider's base_url: %w: %w", ErrDestination, err)
+	}
+	return s.Outbound.Client(t, 15*time.Second), nil
+}
+
+// pinSMTP checks a project's own SMTP server against the outbound rules
+// and points cfg at the address checked.
+func (s *Service) pinSMTP(ctx context.Context, projectID uuid.UUID, cfg *mail.Config) error {
+	if s.Outbound == nil {
+		return errors.New("outbound requests aren't available")
+	}
+	org, err := s.projectOrg(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	addr, err := s.Outbound.CheckAddr(ctx, org, cfg.Host, cfg.Port)
+	if err != nil {
+		return fmt.Errorf("the SMTP server: %w: %w", ErrDestination, err)
+	}
+	cfg.DialAddr = addr.String()
+	return nil
+}
+
+func (s *Service) projectOrg(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
+	p, err := store.New(s.db).GetProject(ctx, projectID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return p.OrgID, nil
 }
 
 // sendMessageHook hands a message to the project's send-message webhook

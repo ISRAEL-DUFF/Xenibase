@@ -707,9 +707,26 @@ func (s *Service) TestSMTP(ctx context.Context, projectID uuid.UUID, m *SMTPSett
 	if err := c.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
-	return mail.Send(ctx, c, mail.Message{To: []string{to}, Subject: "Xenibase test email", Plain: true,
-		Body: "This is a test email from your project's SMTP settings in Xenibase. They work.\n"})
+	// The server is dialled only at an address the outbound rules allow,
+	// and what went wrong past that stays in the log: the answer must not
+	// map the networks Xenibase reaches.
+	if err := s.pinSMTP(ctx, projectID, &c); err != nil {
+		if errors.Is(err, ErrDestination) {
+			return fmt.Errorf("%w: the SMTP server's address isn't allowed: it must be public, unless the platform admin allows the host for the organisation", ErrInvalid)
+		}
+		return err
+	}
+	if err := mail.Send(ctx, c, mail.Message{To: []string{to}, Subject: "Xenibase test email", Plain: true,
+		Body: "This is a test email from your project's SMTP settings in Xenibase. They work.\n"}); err != nil {
+		s.log.Info("project SMTP test failed", "project_id", projectID, "err", err)
+		return ErrSMTPTest
+	}
+	return nil
 }
+
+// ErrSMTPTest is a test email that couldn't be sent (the reason is
+// logged, not returned).
+var ErrSMTPTest = errors.New("the test email couldn't be sent: check the host, port, TLS mode, user name, password and sender")
 
 // ---- Signing key rotation (V4 §4.4) ------------------------------------------
 

@@ -437,11 +437,16 @@ func (s *Server) TestAuthSMTP(w http.ResponseWriter, r *http.Request, id gen.Pro
 		return
 	}
 	if err := s.services.TestSMTP(r.Context(), id, smtpIn(req.Smtp), req.To); err != nil {
-		if errors.Is(err, services.ErrInvalid) {
+		switch {
+		case errors.Is(err, services.ErrInvalid):
 			s.servicesError(w, "smtp test", err)
-			return
+		case errors.Is(err, services.ErrSMTPTest):
+			// The dial or SMTP error isn't shown: it would map the networks
+			// xenibase-server reaches.
+			writeError(w, http.StatusBadGateway, "smtp_failed", err.Error())
+		default:
+			s.servicesError(w, "smtp test", err)
 		}
-		writeError(w, http.StatusBadGateway, "smtp_failed", "the test email couldn't be sent: "+err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -31,6 +31,16 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A project's own SMTP server and SMS provider go through the outbound
+  rules.** Webhooks could reach only public addresses, but a project
+  admin could point the project's SMTP host at a private address (say
+  `10.0.0.5:5432`) and read the dial error from **Send test** to map the
+  control plane's network, or set a provider `base_url` that made the
+  worker POST to an internal service. Both are now checked like webhooks
+  (public addresses only unless the platform admin allows the host, never
+  link-local or metadata) and connected to at the address checked, with no
+  redirects followed. The SMTP test answers 400 for a refused address and
+  otherwise a generic 502, with the reason in the server's log.
 - **TOTP codes can no longer be guessed at the request rate.** Five wrong
   codes used up a challenge, but a new one could be had at once, and the
   `/factors`, `/mfa/*`, `/user` and sign-out routes had no auth rate
