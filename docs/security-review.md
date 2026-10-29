@@ -157,6 +157,10 @@ a test that failed before.
   every backend's database and role) stayed readable. They are revoked from
   `PUBLIC` in each shared project database; migration 00066 queues
   `apply_settings`, which now applies it, for existing projects.
+- **Narrowing an IP allowlist left existing connections open** (low-medium).
+  PgBouncer checks HBA rules at login only. Saving a list now drops the
+  project's clients from addresses it no longer admits (`SHOW CLIENTS`,
+  `KILL_CLIENT`), except Xenibase's own logins.
 
 ## V3 review of payments and billing (M27)
 

@@ -438,6 +438,15 @@ func (s *Server) SetProjectNetwork(w http.ResponseWriter, r *http.Request, id ge
 			s.internalError(w, "project network: pooler sync", err)
 			return
 		}
+		// HBA rules apply at login: drop clients already connected from
+		// addresses the list no longer admits.
+		n, err := pm.DropDisallowed(r.Context(), p, p.AllowedCidrs)
+		if err != nil {
+			s.log.Warn("project network: drop disallowed clients", "project_id", p.ID, "err", err)
+		}
+		if n > 0 {
+			a.set("dropped_connections", n)
+		}
 	}
 	writeJSON(w, http.StatusOK, s.networkOut(r, p.AllowedCidrs))
 }

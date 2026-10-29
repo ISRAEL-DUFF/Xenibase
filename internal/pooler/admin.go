@@ -219,6 +219,19 @@ func (a *Admin) KillUser(ctx context.Context, user string) (int, error) {
 	if !dbNameRe.MatchString(user) {
 		return 0, fmt.Errorf("pooler: invalid user name %q", user)
 	}
+	return a.KillClients(ctx, func(c Client) bool { return c.User == user })
+}
+
+// Client is one row of SHOW CLIENTS.
+type Client struct {
+	ID, User, Database string
+	// Addr is the client's address, or "unix" for a socket.
+	Addr string
+}
+
+// KillClients drops every client connection drop selects (KILL_CLIENT,
+// PgBouncer 1.24+) and returns how many it dropped.
+func (a *Admin) KillClients(ctx context.Context, drop func(Client) bool) (int, error) {
 	conn, err := pgx.ConnectConfig(ctx, a.cfg)
 	if err != nil {
 		return 0, fmt.Errorf("pooler %s (%s): connect admin console: %w", a.Name, a.Addr(), err)
@@ -232,16 +245,18 @@ func (a *Admin) KillUser(ctx context.Context, user string) (int, error) {
 	for i, fd := range rows.FieldDescriptions() {
 		col[fd.Name] = i
 	}
+	field := func(raw [][]byte, name string) string {
+		if i, ok := col[name]; ok && i < len(raw) {
+			return string(raw[i])
+		}
+		return ""
+	}
 	var ids []string
 	for rows.Next() {
 		raw := rows.RawValues()
-		ui, ok1 := col["user"]
-		ii, ok2 := col["id"]
-		if !ok1 || !ok2 || ui >= len(raw) || ii >= len(raw) {
-			continue
-		}
-		if string(raw[ui]) == user {
-			ids = append(ids, string(raw[ii]))
+		c := Client{ID: field(raw, "id"), User: field(raw, "user"), Database: field(raw, "database"), Addr: field(raw, "addr")}
+		if c.ID != "" && c.User != "" && drop(c) {
+			ids = append(ids, c.ID)
 		}
 	}
 	rows.Close()

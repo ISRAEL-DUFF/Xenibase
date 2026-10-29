@@ -28,8 +28,12 @@ is audited (`project.network`, with the list before and after).
   are refused: leave the list empty instead.
 - An empty list accepts connections from anywhere, as before.
 - A change reaches every pooler of the project's region within seconds.
-  Connections already open stay open until they close; new ones follow the
-  new list.
+  Connections already open from an address the new list doesn't admit are
+  dropped when you save it (on both ports and every route of the project;
+  Xenibase's own service logins are left alone), so removing a leaked
+  network takes effect at once. Clients still on the list keep their
+  connections. The audit entry records how many were dropped
+  (`dropped_connections`).
 
 ## What it covers
 

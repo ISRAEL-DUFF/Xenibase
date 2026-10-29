@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -617,6 +618,69 @@ func (m *Manager) each(ctx context.Context, f func(*Admin) error) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// DropDisallowed drops p's client connections that its IP allowlist,
+// cidrs, no longer admits: on its routes (the database, its _ro route and
+// V1 alias), from an address outside every network, apart from Xenibase's
+// own logins, which the allowlist exempts. PgBouncer checks HBA rules only
+// at login, so narrowing a list does nothing to clients already connected
+// until this runs. An empty list admits everyone and drops nothing. It
+// returns how many clients it dropped.
+func (m *Manager) DropDisallowed(ctx context.Context, p store.Project, cidrs []string) (int, error) {
+	if len(cidrs) == 0 {
+		return 0, nil
+	}
+	nets := make([]netip.Prefix, 0, len(cidrs))
+	for _, c := range cidrs {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			return 0, fmt.Errorf("pooler: allowlist entry %q: %w", c, err)
+		}
+		nets = append(nets, pfx)
+	}
+	dbs := map[string]bool{}
+	for _, d := range store.PoolerNames(p) {
+		dbs[d], dbs[d+ReadOnlySuffix] = true, true
+	}
+	exempt := map[string]bool{store.ProbeRole(p.DbName): true}
+	for _, r := range store.ServiceRoles(p.DbName) {
+		exempt[r] = true
+	}
+	drop := func(c Client) bool { return dbs[c.Database] && !exempt[c.User] && !admitted(c.Addr, nets) }
+	seen := map[*Admin]bool{}
+	var errs []error
+	n := 0
+	for _, d := range store.PoolerNames(p) {
+		for _, a := range m.adminsFor(d) {
+			if seen[a] {
+				continue
+			}
+			seen[a] = true
+			k, err := a.KillClients(ctx, drop)
+			n += k
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return n, errors.Join(errs...)
+}
+
+// admitted reports whether a client at addr is on one of nets. A socket
+// client ("unix") is local, never subject to an allowlist.
+func admitted(addr string, nets []netip.Prefix) bool {
+	a, err := netip.ParseAddr(addr)
+	if err != nil {
+		return addr == "unix"
+	}
+	a = a.Unmap()
+	for _, n := range nets {
+		if n.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // KillUser drops user's client connections on every pooler.
