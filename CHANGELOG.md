@@ -39,6 +39,15 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Break-glass can no longer become permanent membership.** Under
+  break-glass a platform admin acts as an org admin, and could invite their
+  own address as admin and accept it, keeping the access after the session
+  expired or an owner ended it, with nothing after that flagged
+  `break_glass`. Invitations (to the organisation or a project), role
+  changes and ownership transfers made under break-glass now answer 403
+  `break_glass`; everything else it allows is unchanged. Nobody can invite
+  their own address, and an invitation sent by the account accepting it is
+  refused, so one sent before this release can't be used either.
 - **A new delivering server no longer starts with a full webhook rate.**
   The per-organisation delivery rate was a token bucket in the delivering
   server's memory, so a server that took over after a failover or a restart

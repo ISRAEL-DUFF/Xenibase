@@ -271,7 +271,8 @@ the organisation, and can also accept them when changing plan. Details:
 - The platform admin can't open your databases, console or backups through
   Xenibase except with **break-glass** access: at most 4 hours, with a reason,
   emailed to every owner, shown as a banner while it lasts, and marked in
-  your audit log. Any owner can end it. It is an audit control, not
+  your audit log. Any owner can end it, and it can't invite anyone or
+  change roles, so it can't become lasting access. It is an audit control, not
   encryption: someone with root on the servers can read the data.
 - **Deleting an organisation** (owners, Organisation → Delete) takes each
   project's final backup and gives a 7-day grace period in which an owner

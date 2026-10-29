@@ -677,6 +677,14 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 	var orgRole *string
 	orgName := ""
 	q := store.New(s.db)
+	// Nobody invites themselves: a member has no need to, and someone who
+	// is not one could only be a platform admin under break-glass, whose
+	// access must end with the session (V2 §2.4).
+	if inviter, err := q.GetUser(ctx, p.InvitedBy); err == nil && strings.EqualFold(inviter.Email, email) {
+		return Invited{}, fmt.Errorf("%w: you can't invite yourself", ErrForbidden)
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Invited{}, err
+	}
 	if p.OrgID != nil {
 		kind = "org"
 		if !validOrgRole(p.OrgRole) {
@@ -811,7 +819,7 @@ func (s *Service) AcceptToken(ctx context.Context, token string, signedIn *uuid.
 		return store.User{}, nil, err
 	}
 	invitation := store.Invitation{ID: inv.ID, Email: inv.Email, Kind: inv.Kind, OrgID: inv.OrgID, OrgRole: inv.OrgRole,
-		ProjectRoles: inv.ProjectRoles, ExpiresAt: inv.ExpiresAt, AcceptedAt: inv.AcceptedAt, RevokedAt: inv.RevokedAt}
+		ProjectRoles: inv.ProjectRoles, InvitedBy: inv.InvitedBy, ExpiresAt: inv.ExpiresAt, AcceptedAt: inv.AcceptedAt, RevokedAt: inv.RevokedAt}
 	return s.accept(ctx, invitation, signedIn, acc, ip)
 }
 
@@ -845,6 +853,11 @@ func (s *Service) accept(ctx context.Context, inv store.Invitation, signedIn *uu
 			}
 			if *signedIn != existing.ID {
 				return ErrWrongAccount
+			}
+			if inv.InvitedBy == existing.ID {
+				// Only a break-glass session could have sent it (Invite
+				// refuses one's own address now; older ones may wait).
+				return fmt.Errorf("%w: you can't accept an invitation you sent yourself", ErrForbidden)
 			}
 			u = existing
 		case errors.Is(err, pgx.ErrNoRows):

@@ -226,7 +226,10 @@ can be turned off on its own, without suspending (see Outbound traffic).
 To look inside an org (a support case), open a **break-glass** session
 with a reason and a length (up to 4 hours). You act as an org admin; its
 owners and admins are emailed, every action is in its audit log marked
-break-glass, and they see a banner. End it when you are done.
+break-glass, and they see a banner. End it when you are done. A
+break-glass session can't invite anyone (you included), change a
+member's organisation or project role, or transfer ownership: it grants
+nothing that outlives it, so ask an owner for those.
 
 Owners can delete an organisation (Organisation → Delete). It is
 read-only for 7 days and can be cancelled; then each project gets a final
