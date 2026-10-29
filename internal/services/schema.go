@@ -533,6 +533,10 @@ var schemaVersions = []schemaVersion{
 		// it set (a hash of its hash), so confirming an address keeps only
 		// that password, not one a squatter set before the owner signed up.
 		`ALTER TABLE xb_auth.one_time_codes ADD COLUMN IF NOT EXISTS password_sha text`,
+		// Wrong codes in a row across a factor's challenges, and the lockout
+		// they lead to.
+		`ALTER TABLE xb_auth.mfa_factors ADD COLUMN IF NOT EXISTS failed_attempts int NOT NULL DEFAULT 0`,
+		`ALTER TABLE xb_auth.mfa_factors ADD COLUMN IF NOT EXISTS locked_until timestamptz`,
 	}},
 }
 

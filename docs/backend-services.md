@@ -518,7 +518,7 @@ Users enrol an authenticator app (TOTP) or, when allowed, a phone:
 | --- | --- |
 | `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. A user who already has a verified factor enrols another only at `aal2` (`403 insufficient_aal`). |
 | `POST factors/{id}/challenge` | A challenge (a phone factor gets a code). |
-| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. A new factor is verified only when it is the user's first or the session is at `aal2`. |
+| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. A new factor is verified only when it is the user's first or the session is at `aal2`. Five wrong codes in a row, across challenges, lock the factor for a minute, doubling with each further one up to a day (`429 mfa_factor_locked`). |
 | `DELETE factors/{id}` | Removes a factor (a verified one needs `aal2`). |
 
 `/mfa/enroll`, `/mfa/challenge` and `/mfa/verify` (with `factor_id` in the

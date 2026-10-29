@@ -38,7 +38,8 @@ const (
 )
 
 // Per-IP limits on auth endpoints, per minute, on top of the project's.
-var authRates = map[string]int{"signup": 10, "signin": 30, "otp": 10, "verify": 30, "token": 120, "recover": 10, "admin": 600}
+var authRates = map[string]int{"signup": 10, "signin": 30, "otp": 10, "verify": 30, "token": 120, "recover": 10, "admin": 600,
+	"mfa": 30, "user": 60}
 
 // authBody reads a JSON body into v (an empty body is {}).
 func authBody(c *call, v any) bool {
@@ -199,17 +200,29 @@ func (e *Edge) auth(c *call, req Request) {
 			e.recover(c)
 		}
 	case path == "signout" && m == http.MethodPost:
-		e.signout(c, req)
+		if e.authLimit(c, "user") {
+			e.signout(c, req)
+		}
 	case path == "user" && m == http.MethodGet:
-		e.getUser(c, req)
+		if e.authLimit(c, "user") {
+			e.getUser(c, req)
+		}
 	case path == "user" && (m == http.MethodPatch || m == http.MethodPut):
-		e.updateUser(c, req)
+		if e.authLimit(c, "user") {
+			e.updateUser(c, req)
+		}
 	case strings.HasPrefix(path, "user/identities/") && m == http.MethodDelete:
-		e.unlinkIdentity(c, req, strings.TrimPrefix(path, "user/identities/"))
+		if e.authLimit(c, "user") {
+			e.unlinkIdentity(c, req, strings.TrimPrefix(path, "user/identities/"))
+		}
 	case path == "user/identities/authorize" && m == http.MethodGet:
-		e.oauthAuthorize(c, &req)
+		if e.authLimit(c, "user") {
+			e.oauthAuthorize(c, &req)
+		}
 	case strings.HasPrefix(path, "factors") || strings.HasPrefix(path, "mfa/"):
-		e.mfa(c, req, path)
+		if e.authLimit(c, "mfa") {
+			e.mfa(c, req, path)
+		}
 	case strings.HasPrefix(path, "admin/"):
 		if req.Role != "service" {
 			c.fail(http.StatusForbidden, "admin_only", "the admin API needs the project's secret key")

@@ -117,3 +117,68 @@ func TestAAL1CannotChangeWhatProvesTheUser(t *testing.T) {
 		t.Fatalf("stepping up with the owner's factor: %d %s", r.Code, r.Body)
 	}
 }
+
+// TestTOTPGuessesLockTheFactor: wrong codes count across a factor's
+// challenges, and five in a row lock it (even against the right code)
+// until the lockout ends; the MFA routes and /user have per-IP limits.
+func TestTOTPGuessesLockTheFactor(t *testing.T) {
+	x := mfaEdge(t)
+	const email, pw = "ada@example.com", "correct horse 1"
+	tok := accessToken(t, x.do("POST", "/auth/v1/signup", map[string]any{"email": email, "password": pw}, ""))
+	_, id, secret := x.enrolTOTP(tok)
+	if r := x.verifyTOTP(tok, id, secret, time.Now()); r.Code != http.StatusOK {
+		t.Fatalf("verify: %d %s", r.Code, r.Body)
+	}
+	aal1 := accessToken(t, x.signIn(email, pw))
+	right, err := totp.Code(secret, time.Now().Add(30*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := "000000"
+	if right == wrong {
+		wrong = "111111"
+	}
+	answer := func(code string) authResp {
+		t.Helper()
+		ch := x.do("POST", "/auth/v1/factors/"+id+"/challenge", nil, aal1)
+		if ch.Code != http.StatusOK {
+			return ch
+		}
+		return x.do("POST", "/auth/v1/factors/"+id+"/verify", map[string]any{"challenge_id": ch.json(t)["id"], "code": code}, aal1)
+	}
+	// Five wrong codes, each on a fresh challenge.
+	for i := 1; i <= 5; i++ {
+		if r := answer(wrong); r.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("wrong code %d: %d %s", i, r.Code, r.Body)
+		}
+	}
+	r := answer(right)
+	if r.Code != http.StatusTooManyRequests || r.errCode() != "mfa_factor_locked" || r.Header.Get("Retry-After") == "" {
+		t.Fatalf("the right code after five wrong ones: %d %s", r.Code, r.Body)
+	}
+	// The lockout ends: the right code works and the count starts again.
+	x.exec(`UPDATE xb_auth.mfa_factors SET locked_until = now() - interval '1 second'`)
+	if r := answer(right); r.Code != http.StatusOK {
+		t.Fatalf("after the lockout: %d %s", r.Code, r.Body)
+	}
+	var failed int
+	if err := x.db.QueryRow(t.Context(), `SELECT failed_attempts FROM xb_auth.mfa_factors WHERE id = $1`, id).Scan(&failed); err != nil || failed != 0 {
+		t.Fatalf("failures after a right code: %d %v", failed, err)
+	}
+
+	// Per-IP limits: the MFA routes and /user, at the edge's own scale.
+	x.e.cfg.AuthRateScale = 1
+	for _, c := range []struct{ method, path string }{
+		{"POST", "/auth/v1/factors/" + id + "/challenge"},
+		{"GET", "/auth/v1/user"},
+	} {
+		limited := false
+		for i := 0; i < 30 && !limited; i++ {
+			r := x.do(c.method, c.path, nil, aal1)
+			limited = r.Code == http.StatusTooManyRequests && r.errCode() == "over_request_rate_limit"
+		}
+		if !limited {
+			t.Fatalf("%s %s: 30 at once, none refused", c.method, c.path)
+		}
+	}
+}

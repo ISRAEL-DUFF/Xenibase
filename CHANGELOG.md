@@ -31,6 +31,17 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **TOTP codes can no longer be guessed at the request rate.** Five wrong
+  codes used up a challenge, but a new one could be had at once, and the
+  `/factors`, `/mfa/*`, `/user` and sign-out routes had no auth rate
+  limit, so only the gateway's per-key limit bounded guesses (one in
+  under an hour). Those routes now have per-IP groups (`mfa` 30 a minute,
+  `user` 60), and five wrong codes in a row on a factor, across
+  challenges, lock it for a minute, doubling with each further one up to
+  a day: its challenges and codes answer `429 mfa_factor_locked` with
+  `Retry-After`, and a right code clears the count (project schema
+  version 10 adds `failed_attempts` and `locked_until` to
+  `xb_auth.mfa_factors`).
 - **A password alone no longer reaches `aal2`.** A session at `aal1`
   could enrol a TOTP factor of its own and verify it, which raised the
   session to `aal2`, past `mfa_required` and policies on `xb_auth.aal()`;

@@ -169,6 +169,17 @@ func (e *Edge) mfaEnroll(c *call, req Request) {
 	c.json(http.StatusOK, out)
 }
 
+// factorLocked refuses a factor locked by wrong codes.
+func factorLocked(f *projauth.Factor) *apiErr {
+	now := time.Now()
+	if !f.Locked(now) {
+		return nil
+	}
+	a := refuse(http.StatusTooManyRequests, "mfa_factor_locked", "too many wrong codes for this factor; try again later")
+	a.retryAfter = int(f.LockedUntil.Sub(now).Seconds()) + 1
+	return a
+}
+
 func (e *Edge) factorID(c *call, raw string) (uuid.UUID, bool) {
 	id, err := uuid.Parse(raw)
 	if err != nil {
@@ -215,6 +226,9 @@ func (e *Edge) mfaChallenge(c *call, req Request, raw string) {
 			return err
 		}
 		kind = f.FactorType
+		if fail = factorLocked(f); fail != nil {
+			return nil
+		}
 		if f.FactorType == projauth.FactorPhone {
 			channel := in.Channel
 			if channel == "" {
@@ -303,13 +317,20 @@ func (e *Edge) mfaVerify(c *call, req Request, raw string) {
 				return nil
 			}
 		}
+		if fail = factorLocked(fac); fail != nil {
+			return nil
+		}
 		ok, err := projauth.VerifyChallenge(ctx, tx, fac, chID, in.Code, time.Now())
 		if err != nil {
 			return err
 		}
 		if !ok {
 			fail = refuse(http.StatusUnprocessableEntity, "mfa_verification_failed", "the code is wrong or the challenge has expired")
-			return projauth.Audit(ctx, tx, &uid, projauth.ActMFAFailed, c.ip, map[string]any{"factor_id": fac.ID})
+			details := map[string]any{"factor_id": fac.ID}
+			if fac.LockedUntil != nil {
+				details["locked_until"] = fac.LockedUntil
+			}
+			return projauth.Audit(ctx, tx, &uid, projauth.ActMFAFailed, c.ip, details)
 		}
 		s, err = projauth.StepUp(ctx, tx, sid, fac.FactorType)
 		if err != nil {
