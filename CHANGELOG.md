@@ -158,6 +158,10 @@ bundle share one version (spec §11.5).
   keys, which are never stored: a crypto library update that derived them
   differently would have left every WAL-G archive and project-key backup
   unreadable, unnoticed until a restore. A test now fixes them.
+- An import's verification counted the rows of every table in the source,
+  so a source login allowed to read only the imported schemas failed it
+  with "permission denied" and the import rolled back after the copy. It
+  now reads only the chosen schemas.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

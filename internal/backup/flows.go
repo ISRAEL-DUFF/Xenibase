@@ -393,7 +393,7 @@ func (s *Service) runPITRTest(ctx context.Context, op store.Operation, p store.P
 		return err
 	}
 	return s.Dedicated.ScratchPITR(ctx, p, op.ID, func(ctx context.Context, conn *pgx.Conn) error {
-		counts, err := tableCounts(ctx, conn)
+		counts, err := tableCounts(ctx, conn, nil)
 		if err != nil {
 			return jobs.Permanent(fmt.Errorf("count rows: %w", err))
 		}
@@ -446,7 +446,7 @@ func (s *Service) verifyRestore(ctx context.Context, p store.Project, b store.Ba
 		return err
 	}
 	defer conn.Close(context.Background())
-	counts, err := tableCounts(ctx, conn)
+	counts, err := tableCounts(ctx, conn, nil)
 	if err != nil {
 		return jobs.Permanent(fmt.Errorf("count rows: %w", err))
 	}
@@ -521,8 +521,8 @@ type (
 	SequenceValue = pgverify.SequenceValue
 )
 
-func tableCounts(ctx context.Context, conn *pgx.Conn) ([]TableCount, error) {
-	return pgverify.TableCounts(ctx, conn)
+func tableCounts(ctx context.Context, conn *pgx.Conn, schemas []string) ([]TableCount, error) {
+	return pgverify.TableCounts(ctx, conn, schemas)
 }
 
 func sequenceValues(ctx context.Context, conn *pgx.Conn, schemas []string) ([]SequenceValue, error) {

@@ -585,11 +585,12 @@ func (s *Service) verifyImport(ctx context.Context, sourceURL string, guard pgso
 		schema, _, _ := strings.Cut(table, ".")
 		return slices.Contains(schemas, schema)
 	}
-	srcCounts, err := tableCounts(ctx, src)
+	// Only the chosen schemas: the source login may read nothing else.
+	srcCounts, err := tableCounts(ctx, src, schemas)
 	if err != nil {
 		return jobs.Permanent(fmt.Errorf("count source rows: %w", redactErr(err, srcPG.Password)))
 	}
-	dstCounts, err := tableCounts(ctx, dst)
+	dstCounts, err := tableCounts(ctx, dst, schemas)
 	if err != nil {
 		return fmt.Errorf("count target rows: %w", err)
 	}
