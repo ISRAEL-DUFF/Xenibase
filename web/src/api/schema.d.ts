@@ -9463,6 +9463,8 @@ export interface components {
             projects: components["schemas"]["OAuthGrantProject"][];
         };
         OAuthAuthorizeInfo: {
+            /** @description The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes. */
+            consent: string;
             client_id: string;
             client_name: string;
             redirect_uri: string;
@@ -9475,13 +9477,15 @@ export interface components {
             organisations: components["schemas"]["OAuthGrantOrg"][];
         };
         OAuthDecision: {
+            /** @description The `consent` the consent page was given; required to approve. */
+            consent?: string;
             client_id: string;
             redirect_uri: string;
             state?: string;
             code_challenge: string;
             code_challenge_method: string;
             approve: boolean;
-            /** @description Within what the app asked for; the request's scopes by default. */
+            /** @description Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default. */
             scopes?: components["schemas"]["TokenScope"][];
             /** Format: uuid */
             org_id?: string;

@@ -137,8 +137,13 @@ func authorizeQuery(clientID, challenge, scope, state string) string {
 
 func consent(t *testing.T, b *browser, clientID, challenge, state string, approve bool, extra map[string]any) string {
 	t.Helper()
+	// The page's first call seals the request; the answer brings it back.
+	var info gen.OAuthAuthorizeInfo
+	if code, raw := b.do("GET", authorizeQuery(clientID, challenge, "", state), nil, &info); code != 200 {
+		t.Fatalf("consent page: %d %s", code, raw)
+	}
 	body := map[string]any{"client_id": clientID, "redirect_uri": redirectURI, "state": state, "code_challenge": challenge,
-		"code_challenge_method": "S256", "approve": approve}
+		"code_challenge_method": "S256", "approve": approve, "consent": info.Consent}
 	for k, v := range extra {
 		body[k] = v
 	}
@@ -223,11 +228,28 @@ func TestOAuthFlowOverHTTP(t *testing.T) {
 
 	// Scopes can't be widened beyond the request (the app may ask for
 	// read and write; the user chose read).
-	if code, body := admin.do("POST", "/api/v1/oauth/authorize", map[string]any{
-		"client_id": clientID, "redirect_uri": redirectURI, "code_challenge": challenge, "code_challenge_method": "S256",
-		"approve": true, "org_id": org, "scopes": []string{"read", "write", "admin"},
-	}, nil); code != 400 || !strings.Contains(body, "admin") {
+	approve := func(consent string, scopes ...string) (int, string) {
+		return admin.do("POST", "/api/v1/oauth/authorize", map[string]any{
+			"client_id": clientID, "redirect_uri": redirectURI, "code_challenge": challenge, "code_challenge_method": "S256",
+			"approve": true, "org_id": org, "scopes": scopes, "consent": consent,
+		}, nil)
+	}
+	if code, body := approve(info.Consent, "read", "write", "admin"); code != 400 || !strings.Contains(body, "admin") {
 		t.Fatalf("widened scopes: %d %s", code, body)
+	}
+	// The request is the server's record, not the page's: an app that asked
+	// for read gets no more, whatever the answer says.
+	var readOnly gen.OAuthAuthorizeInfo
+	if code, body := admin.do("GET", authorizeQuery(clientID, challenge, "read", "s1"), nil, &readOnly); code != 200 || len(readOnly.Scopes) != 1 {
+		t.Fatalf("a read-only request: %d %s", code, body)
+	}
+	if code, body := approve(readOnly.Consent, "read", "write"); code != 400 || !strings.Contains(body, "write") {
+		t.Fatalf("widened past the request: %d %s", code, body)
+	}
+	for _, bad := range []string{"", "not-a-consent", readOnly.Consent[:len(readOnly.Consent)-4] + "AAAA"} {
+		if code, body := approve(bad, "read"); code != 400 || !strings.Contains(body, "consent") {
+			t.Fatalf("approving with consent %q: %d %s", bad, code, body)
+		}
 	}
 	// Denied: the app learns so at its redirect.
 	if to := consent(t, admin, clientID, challenge, "s2", false, nil); !strings.Contains(to, "error=access_denied") || !strings.Contains(to, "state=s2") || strings.Contains(to, "code=") {

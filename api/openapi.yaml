@@ -15184,8 +15184,11 @@ components:
             $ref: "#/components/schemas/OAuthGrantProject"
     OAuthAuthorizeInfo:
       type: object
-      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations]
+      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations, consent]
       properties:
+        consent:
+          type: string
+          description: The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
         client_id:
           type: string
         client_name:
@@ -15212,6 +15215,9 @@ components:
       type: object
       required: [client_id, redirect_uri, code_challenge, code_challenge_method, approve]
       properties:
+        consent:
+          type: string
+          description: The `consent` the consent page was given; required to approve.
         client_id:
           type: string
         redirect_uri:
@@ -15226,7 +15232,7 @@ components:
           type: boolean
         scopes:
           type: array
-          description: Within what the app asked for; the request's scopes by default.
+          description: Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
           items:
             $ref: "#/components/schemas/TokenScope"
         org_id:

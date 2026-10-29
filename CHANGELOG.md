@@ -39,6 +39,14 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **OAuth consent narrows scopes on the server, not just the page.** The
+  consent page's answer was checked only against the scopes the app may
+  ever ask for, so the narrowing to what this request asked for (decision
+  OAuth #4) was the page's alone. `GET /api/v1/oauth/authorize` now also
+  returns `consent`, the validated request sealed for the user (30
+  minutes); approving must send it back, and a scope beyond what the app
+  asked for is refused (`400 invalid`). A consent page left open across the
+  upgrade must be reloaded.
 - **A billing member stays billing.** Accepting an invitation, or a
   project transfer, turned a billing member into a plain member, so an
   admin could invite a billing member's address with a project and take
