@@ -41,6 +41,11 @@ bundle share one version (spec §11.5).
   and room in the projects quota (409 `quota_exceeded`), and runs under the
   branch's lock: it is refused (409) while a reset or anything else is in
   progress, or the branch isn't active.
+- **A branch's file copy no longer succeeds with files left out.** Every
+  copy error (throttling, the network, the operation's deadline) counted
+  as "not found in the parent". Only a file the parent no longer has
+  counts as missing now; other failures fail the attempt once the rest were
+  tried, and the retry copies only what is left.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

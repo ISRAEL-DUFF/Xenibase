@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/storage"
 	"github.com/israel-duff/xenibase/internal/store"
 )
 
@@ -174,18 +175,60 @@ func (s *Service) runCopyBranchFiles(ctx context.Context, op store.Operation, lo
 	}
 	rows.Close()
 	conn.Close(context.Background())
-	copied, missing := 0, 0
 	start := time.Now()
-	for _, v := range versions {
-		dst := objectsKey(to.Ref, v)
-		if _, _, err := cl.Head(ctx, dst); err == nil {
-			continue // a retry: already there
+	n, err := copyObjects(ctx, cl, from.Ref, to.Ref, versions)
+	if err != nil {
+		// The next attempt skips what is there already.
+		_ = log.Warn(ctx, "files", "copied %d files, %d already there, %d not found in the parent, %d failed; retrying them", n.copied, n.present, n.missing, n.failed)
+		return err
+	}
+	return log.Info(ctx, "files", "copied %d files in %s (%d already there, %d not found in the parent)", n.copied, time.Since(start).Round(time.Millisecond), n.present, n.missing)
+}
+
+// copyCount counts what copyObjects did.
+type copyCount struct{ copied, present, missing, failed int }
+
+// copyObjects copies versions from one ref's prefix to another's in the
+// store, skipping those already there, so a retry carries on where an
+// attempt stopped. Only a version not in the parent counts as missing
+// (deleted there since the data was copied, or never stored); any other
+// error (throttling, the network, the operation's deadline) is returned
+// once the others have been tried, so the operation retries.
+func copyObjects(ctx context.Context, cl *storage.Client, fromRef, toRef string, versions []uuid.UUID) (copyCount, error) {
+	var n copyCount
+	var errs []error
+	fail := func(err error) {
+		n.failed++
+		if len(errs) < 5 {
+			errs = append(errs, err)
 		}
-		if _, err := cl.Copy(ctx, objectsKey(from.Ref, v), dst); err != nil {
-			missing++ // gone from the parent since the copy, or never stored
+	}
+	for _, v := range versions {
+		if err := ctx.Err(); err != nil {
+			n.failed += len(versions) - n.copied - n.present - n.missing - n.failed
+			return n, errors.Join(append(errs, err)...)
+		}
+		dst := objectsKey(toRef, v)
+		_, _, err := cl.Head(ctx, dst)
+		if err == nil {
+			n.present++ // a retry: already there
 			continue
 		}
-		copied++
+		if !errors.Is(err, storage.ErrNotFound) {
+			fail(err)
+			continue
+		}
+		switch _, err := cl.Copy(ctx, objectsKey(fromRef, v), dst); {
+		case errors.Is(err, storage.ErrNotFound):
+			n.missing++
+		case err != nil:
+			fail(err)
+		default:
+			n.copied++
+		}
 	}
-	return log.Info(ctx, "files", "copied %d files in %s (%d not found in the parent)", copied, time.Since(start).Round(time.Millisecond), missing)
+	if n.failed > 0 {
+		return n, fmt.Errorf("%d of %d files not copied: %w", n.failed, len(versions), errors.Join(errs...))
+	}
+	return n, nil
 }
