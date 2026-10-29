@@ -57,7 +57,8 @@ Project → Settings → **API** → **Enable backend services**, or
    the platform, with `xb_auth.uid()`, `role()`, `claims()` and
    `claim(text)` for your row-level security policies;
 3. grants the three request roles use of what the owner creates in
-   `public` (row-level security decides which rows);
+   `public` (row-level security decides which rows; anon and user keep
+   privileges only on what row-level security protects, below);
 4. makes the first publishable and secret keys and the project's signing
    key.
 
@@ -127,23 +128,49 @@ Views must run as the caller (`CREATE VIEW … WITH (security_invoker = true)`)
 so the underlying tables' policies apply; embedded tables are checked the
 same way. The secret key bypasses row-level security entirely.
 
+A table without row-level security is out of reach through views and
+functions too. While it stays that way, `<db>_anon` and `<db>_user` hold no
+privileges on it (on a public table, `SELECT` only): Xenibase takes them back
+within a couple of seconds of the table appearing or losing row-level
+security, and gives exactly those back once it has it, so the usual order
+(create the table, then enable row-level security and add policies) works.
+`xb_auth.withheld` lists what is held back. The same goes for materialized
+views and views that run as their owner. A view that runs as the caller but
+reads such a table answers `403 rls_required` naming it, and so does a
+function that runs as the caller while anon or user can still reach one
+(after a grant made by hand, say).
+
 ```sql
 ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY readable ON posts FOR SELECT
   USING (published OR author_id = xb_auth.uid());
 ```
 
-Column privileges hold too: `REVOKE SELECT (email) ON profiles FROM "<db>_anon"`
-hides a column from anonymous callers.
+Column privileges hold too. To hide a column from anonymous callers, take
+away the table-level `SELECT` and grant the columns they may read; a
+column-level `REVOKE` alone does nothing while the table-level grant stands:
+
+```sql
+REVOKE SELECT ON profiles FROM "<db>_anon";
+GRANT SELECT (id, name, avatar_url) ON profiles TO "<db>_anon";
+```
+
+Do the same for `"<db>_user"` to hide it from signed-in users. Xenibase keeps
+these grants when it re-applies the request roles' grants after a move or
+restore. `select=*` then answers `403 permission_denied`: name the columns
+(`select=id,name`). The security advisor's `secret_column` finding gives the
+statements for the table.
 
 ### Guardrails
 
 - Each request has its statement timeout (8 s by default), at most 30
   filters and 3 levels of relations, and a 10 MB result.
-- Every new shape of query is planned once (`EXPLAIN`) and refused with
-  `400 query_too_expensive` when its estimated cost is over the project's
-  limit (1,000,000 by default: a scan of a few million rows). Add an index or
-  a filter, or raise the limit in the settings.
+- Every read is planned (`EXPLAIN`) as the caller, with its own values, and
+  refused with `400 query_too_expensive` when its estimated cost is over the
+  project's limit (1,000,000 by default: a scan of a few million rows). Add an
+  index or a filter, or raise the limit in the settings. A set-returning
+  function's call is checked the same way, and `count=exact` over the limit
+  is not run (`"count": null`, as when it times out).
 - Schema changes are picked up within about two seconds, with no restart.
 
 ### Errors
@@ -194,7 +221,7 @@ curl -X DELETE ".../data/v1/todos/7"
 | --- | --- |
 | `on_conflict` | Upsert: the columns of a unique constraint (`on_conflict=email`). Conflicting rows are updated with the sent columns; with `resolution=ignore` they are left alone. |
 | `select` | Which columns of the written rows come back (the read API's `select`, without relations). |
-| `return` | `representation` (default) or `minimal` (only `affected`). |
+| `return` | `representation` (default) or `minimal` (only `affected`; the rows aren't read back, so an `INSERT`-only policy is enough, as for a contact form). |
 | `where`, `or` | Which rows an update or delete changes, as for reads. **An update or delete needs a filter or a key**: `400 filter_required` otherwise. |
 | `max_affected` | Refuse (`400 too_many_rows`, nothing changed) when more rows would change; 1,000 by default, at most 100,000. |
 
@@ -266,7 +293,10 @@ At most 3,600 seconds and 100 entries.
 - **The key** is the project, the path and its query with the parameters
   sorted (the `apikey` parameter left out), the project's configuration
   version and its schema's fingerprint, so changing the settings or the
-  schema starts afresh.
+  schema starts afresh. The fingerprint includes policies, grants and
+  row-level security: closing a policy, revoking a grant or turning
+  row-level security off empties the project's cache within about two
+  seconds, whatever the TTL.
 - **Headers:** `X-Cache: HIT` or `MISS`, `Age`, and
   `Cache-Control: public, max-age=<seconds left>` with
   `Vary: Authorization, Read-Replica`, so a CDN in front may cache too
@@ -303,6 +333,10 @@ curl ".../data/v1/rpc/search_todos?q=milk&limit=5"   # STABLE or IMMUTABLE only
   ambiguous_function` when more than one fits.
 - `SECURITY DEFINER` functions run as their owner and skip row-level
   security: the security advisor lists them.
+- Functions an extension installed (`pg_stat_statements_reset`, PostGIS's)
+  are not served (`404 unknown_function`), and the request roles are not
+  granted them, so one an extension keeps from `PUBLIC` stays the
+  platform's. Wrap one in a function of your own to call it through the API.
 
 ## Generated types
 
@@ -322,6 +356,13 @@ xenibase gen types --lang go --project my-app --package db -o db/types.go
 The same files download from Project → Settings → API → Generate types, or
 `GET /api/v1/projects/{id}/services/types?lang=ts|dart|go`.
 
+Table and column names appear in the files only as escaped strings; field and
+class names keep their letters and digits (`price$usd` becomes `PriceUsd`, a
+Dart field named `class` becomes `class_`, and a second name that comes out
+the same gets a number). Go's JSON tags can't hold some characters (quotes,
+a comma, a backslash, control characters), so Go generation refuses a column
+with one, naming it (`400`); rename the column or use TypeScript or Dart.
+
 ## Security advisor
 
 Project → Settings → API → Security advisor (or
@@ -330,7 +371,7 @@ Project → Settings → API → Security advisor (or
 | Level | Finding |
 | --- | --- |
 | danger | A table without row-level security (`rls_disabled`); a write policy open to anon (or `PUBLIC`) with no condition (`policy_allows_everything`). |
-| warn | `SECURITY DEFINER` functions (`security_definer_function`); views that don't run as the caller (`view_not_invoker`); columns named like secrets (password, token, secret…) readable by anon or user (`secret_column`). |
+| warn | `SECURITY DEFINER` functions (`security_definer_function`); views that don't run as the caller (`view_not_invoker`); views that run as the caller but read a table without row-level security (`view_reads_unprotected`); columns named like secrets (password, token, secret…) readable by anon or user (`secret_column`). |
 | info | Public tables; row-level security with no policies (only the secret key gets in); read policies open to everyone. |
 
 Each finding says what to do and, where one statement fixes it, gives it.
@@ -410,7 +451,7 @@ curl -X POST .../auth/v1/signin/password -H "apikey: xb_pub_…" -d '{"email":"a
 
 | Endpoint | |
 | --- | --- |
-| `POST signup` | Email and password (argon2id). With **Confirm email addresses** on (the default) the user gets a link and a 6-digit code and can't sign in with the password until they use one; the answer is the same whether or not the address was new. |
+| `POST signup` | Email and password (argon2id). With **Confirm email addresses** on (the default) the user gets a link and a 6-digit code and can't sign in with the password until they use one; the answer is the same whether or not the address was new. Signing up again before confirming replaces the password; confirming keeps only the password of the sign-up whose code was used, so someone who signed up with the address first can't keep theirs. |
 | `POST signin/password` (or `POST token?grant_type=password`) | A session. Five wrong passwords in a row lock the user for a minute, doubling with each further failure (`429 user_locked`). |
 | `POST signin/otp` | A magic link and a code by email (`create_user: false` to only sign in existing users). Proving an unconfirmed address this way (or by a reset) clears any password set on it before, so nobody can claim an address ahead of its owner. |
 | `POST verify` | `{"type":"signup"\|"magiclink"\|"email"\|"recovery"\|"invite"\|"email_change","email":"…","token":"123456"}`, or `{"type":…,"token_hash":"…"}` with the link's token: a session. A code works once, for 10 minutes (invitations a day), and 5 wrong tries use it up. |
@@ -419,13 +460,18 @@ curl -X POST .../auth/v1/signin/password -H "apikey: xb_pub_…" -d '{"email":"a
 | `POST recover` | A password-reset link and code; verifying it signs the user in to set a new password. |
 | `POST token?grant_type=refresh_token` | `{"refresh_token":"…"}`: new tokens; the refresh token is single use. |
 | `POST signout?scope=local\|others\|global` | With the access token: this session, the others, or every session. |
-| `GET user`, `PATCH user` | The signed-in user with their `identities` and `factors`; change the password, `data` (merged into the user's metadata), the email (confirmed by a link sent to the new address) or the `phone` (confirmed by a code to the new number). |
+| `GET user`, `PATCH user` | The signed-in user with their `identities` and `factors`; change the password, `data` (merged into the user's metadata), the email (confirmed by a link sent to the new address) or the `phone` (confirmed by a code to the new number). A user with a verified factor changes the password or email only at `aal2` (`401 insufficient_aal`). |
 | `GET settings` | Which methods are on and the password rules, for your sign-in form. |
 | `GET .well-known/jwks.json` | The public keys (no key needed). |
 
 Links go only to the **site URL** (and pages under it) or the exact
-**redirect URLs** you list (`*` and `**` wildcards when allowed);
-anything else is `400 redirect_not_allowed`.
+**redirect URLs** you list; anything else is `400 redirect_not_allowed`.
+With wildcards allowed, a redirect URL may be a pattern, matched part by
+part: `*` in the host stands for one label or part of one
+(`https://*.example.com` allows `https://a.example.com` but not
+`https://a.b.example.com`), `:*` for any port, and in the path `*` is
+anything but `/` and `**` anything. A query or fragment is allowed only
+when the pattern's path ends in `**` or the pattern has one.
 
 ### Phone: SMS and WhatsApp codes
 
@@ -511,9 +557,9 @@ Users enrol an authenticator app (TOTP) or, when allowed, a phone:
 
 | Endpoint (with the user's token) | |
 | --- | --- |
-| `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. |
+| `POST factors` `{"factor_type":"totp","friendly_name":…}` | The secret and an `otpauth://` URI for a QR code. Phone: `{"factor_type":"phone","phone":…}`. A user who already has a verified factor enrols another only at `aal2` (`403 insufficient_aal`). |
 | `POST factors/{id}/challenge` | A challenge (a phone factor gets a code). |
-| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. |
+| `POST factors/{id}/verify` `{"challenge_id":…,"code":…}` | New tokens at `aal2`; the factor is verified. A new factor is verified only when it is the user's first or the session is at `aal2`. Five wrong codes in a row, across challenges, lock the factor for a minute, doubling with each further one up to a day (`429 mfa_factor_locked`). |
 | `DELETE factors/{id}` | Removes a factor (a verified one needs `aal2`). |
 
 `/mfa/enroll`, `/mfa/challenge` and `/mfa/verify` (with `factor_id` in the
@@ -551,7 +597,8 @@ A failing custom-claims hook fails the sign-in (`500`), so test it before
 turning it on. Webhooks are signed with the project's **hook secret**
 (`Xenibase-Signature`, the same scheme as database webhooks), go through the
 organisation's outbound rules, and are listed with their results under
-Authentication → Hooks.
+Authentication → Hooks. Only project admins see the secret (developers see
+that it is set); an admin can rotate it there.
 
 ### Captcha
 
@@ -573,7 +620,10 @@ send) or `"captcha_token"` (`400 captcha_failed` otherwise).
 - **Your servers verify tokens with the JWKS endpoint**; there is no shared
   secret. Rotating the key (Authentication → Signing keys, or
   `xenibase auth rotate-key`) signs new tokens with a new key and keeps the
-  old one in the JWKS for a day, so nobody is signed out.
+  old one in the JWKS for a day, so nobody is signed out. If a key leaked,
+  **Revoke** it there (`POST …/auth/signing-keys/{keyId}/revoke`): it leaves
+  the JWKS and the edges at once, so tokens it signed stop working within
+  seconds; revoking the active key makes a new one and signs everyone out.
 - Refresh tokens rotate on every use. **Presenting a refresh token that was
   already used ends its whole session** (`400 refresh_token_reused`): a
   stolen token is good for one refresh at most, and only until the
@@ -594,9 +644,16 @@ templates (Authentication → Emails: plain text with `{{.Code}}`,
   hour per project (`429 over_email_send_rate_limit` past that).
 - **Your own SMTP server** (Authentication → Emails) sends from your
   domain without that limit. Its password is encrypted; **Send test**
-  checks it before saving.
-- One address gets at most one code a minute; sends are counted in the
-  usage (`message_sends`) and shown with failures.
+  checks it before saving. Like webhooks, the server must have a public
+  address unless the platform admin allows its host for the organisation
+  (its outbound allow-list); a failed test says only that it
+  failed, with the reason in the server's log. A provider's `base_url`
+  follows the same rule.
+- One address gets at most one code a minute, five an hour and twenty a
+  day (`429 over_email_send_rate_limit`), counted on requests whether or
+  not the address has a user (so the limit doesn't tell who has an
+  account); sends are counted in the usage (`message_sends`) and shown
+  with failures.
 
 A Flutter sample that signs in with a WhatsApp code and Google and reads
 org-scoped rows is in [examples/flutter-auth](examples/flutter-auth/).
@@ -683,9 +740,10 @@ month) are recorded as usage (`auth_mau`) and shown on the Users tab.
 
 Files live in **buckets**. A file's metadata is a row in the project's own
 database (`xb_storage.objects`: bucket, path, size, MIME type, checksum,
-owner, your metadata), and its bytes are in the region's object store (the
-same store as the region's backups; for data-residency projects, the
-in-country one). Who may read, upload, overwrite and delete files is decided
+owner, your metadata), and its bytes are in the region's object store (its
+files target, kept apart from the backups, or without one the region's
+backup store; for data-residency projects, in the country; see
+[regions](regions.md#files-target)). Who may read, upload, overwrite and delete files is decided
 by **row-level security on `xb_storage.objects`**, the same policies as
 your tables. The project's owner role owns the table, so you write the
 policies:
@@ -731,9 +789,9 @@ too.
 | `GET /storage/v1/object/<bucket>/<path>` | Download, as the caller's policies allow; `Range` works |
 | `GET /storage/v1/object/info/<bucket>/<path>` | The file's metadata |
 | `GET /storage/v1/public/<bucket>/<path>` | A public bucket's file, no key |
-| `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size) |
+| `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size, a `/render/sign/` URL that serves only that render, never the original) |
 | `POST /storage/v1/object/sign/<bucket>` | Signed URLs for several `paths` |
-| `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL (2 hours) for a client without a session |
+| `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL for a client without a session: 2 hours at most, used once, and written as the signer, so their policies apply to what is uploaded |
 | `POST /storage/v1/upload/<bucket>/<path>` | Start a large upload (`size`, `mime_type`) |
 | `GET`, `DELETE /storage/v1/upload/<id>`; `POST …/<id>/complete` | Its status and the parts still to send; abort; finish |
 | `GET /storage/v1/list/<bucket>?prefix=&cursor=&limit=` | Files and folders under a prefix (`POST /storage/v1/object/list/<bucket>` takes the same as JSON) |
@@ -761,7 +819,11 @@ quota as an upload would, and answers with presigned URLs for its parts
  "expires_at": "…"}
 ```
 
-`PUT` each part's bytes to its URL; a failed part can be sent again.
+`PUT` each part's bytes to its URL, exactly the part's `size` (the URL is
+signed for that length, and the store refuses any other); a failed part
+can be sent again. An upload in progress holds its declared size against
+the quota until it completes, is aborted or expires, and a project may have
+100 open at once (`429 too_many_uploads`).
 `GET /storage/v1/upload/<id>` lists the parts not yet received (with fresh
 URLs), so an app can resume after a restart. `POST …/complete` checks the
 parts and sizes and writes the file's row as the user who started the
@@ -778,7 +840,10 @@ buckets, `private` otherwise, for the bucket's cache time), and
 `Content-Disposition: attachment` with `?download` (or `?download=<name>`). Put a CDN in front of
 the edge's hostname to cache public files; with Cloudflare, set
 `XENIBASE_CDN_CLOUDFLARE_ZONE_ID` and `XENIBASE_CDN_CLOUDFLARE_TOKEN` (a token
-with Cache Purge) on xenibase-server so a bucket made private is purged.
+with Cache Purge) on xenibase-server so files that leave a public bucket's
+URLs are purged: the bucket made private, deleted or emptied, or a file
+deleted, replaced or moved. A purge Cloudflare refuses is retried every
+few minutes until it succeeds.
 
 ### Image transforms
 
@@ -809,16 +874,20 @@ worker.
   `xb_storage.objects` queues the bytes to remove and keeps the project's
   totals.
 - **The sweep** (every 5 minutes, xenibase-server) removes queued bytes and
-  abandoned uploads, records storage used (`storage_gb_hours`) and the
-  month's downloads and transforms, and sends the edges each project's
-  remaining quota.
-- **The reconciler** (nightly) removes bytes with no row after 7 days and
-  counts rows whose bytes are missing; Project → Storage shows them.
+  abandoned uploads, records storage used (`storage_gb_hours`: files and
+  their cached image renders, also while backend services are off, since
+  turning them off keeps the files) and the month's downloads and
+  transforms, and sends the edges each project's remaining quota.
+- **The reconciler** (nightly, on one server) removes bytes with no row
+  after 7 days, counts rows whose bytes are missing (Project → Storage shows
+  them) and measures what the cached renders take.
 - **Deleting a project** removes its files once its final backup's
   retention ends (30 days).
 - **Branches and restores** copy the database, so file rows come along but
   not the bytes: a branch's files show as missing until uploaded again.
-  Moving a project to another region doesn't move its files yet.
+  A project with files can't be moved to another region: its files stay
+  in its region's object store, so the move is refused until they are
+  deleted.
 
 ### The dashboard and the CLI
 
@@ -855,7 +924,9 @@ client.channel("todos")
 A channel can carry database changes, broadcast and presence at once.
 Signed-in clients send their access token in the join (supabase-js does);
 a channel may be told a new one with an `access_token` message before
-the old expires, and a channel whose token has expired is closed.
+the old expires, and a channel whose token has expired is closed within
+10 seconds (at once if a message is due to it or it sends one). A
+connection opened with a bearer token takes that token's expiry.
 
 ### Database changes
 
@@ -880,7 +951,9 @@ see the row:
   session ids aside) in one query per group, and sends a subscriber the
   row as they see it. Anon and signed-in users can subscribe only to
   tables with row-level security on (or listed as public tables); the
-  secret key sees everything.
+  secret key sees everything. Turning row-level security off closes their
+  subscriptions to the table at its next change (a `system` message with
+  `status` `error`); subscribe again once it is back on.
 - **Deletes** carry the primary key only (`old_record`), and reach only
   subscribers the edge sent the row to before: a client that loads rows
   over the data API and then subscribes gets deletes for rows that change
@@ -903,7 +976,8 @@ Broadcast sends a message to everyone on a channel (`self: true` to get
 your own back, `ack: true` to have the edge confirm it); presence keeps
 who is on a channel with each client's state (`track`, `untrack`,
 `presence_state`, `presence_diff`). Clients on different xenibase-edge
-processes reach each other through `NOTIFY` on the project's database, and
+processes reach each other through `NOTIFY` on the project's database (a
+large message in several), and
 a process that stops is dropped from presence within about 35 seconds.
 
 A server can broadcast over HTTP with the secret key:
@@ -915,8 +989,10 @@ curl -X POST https://<ref>.<domain>/realtime/v1/api/broadcast -H "apikey: $SECRE
 
 Broadcasts on topics listed in Project → Realtime → Broadcast history
 (`xb_realtime.persisted_topics`) are kept 7 days and read with
-`GET /realtime/v1/history/<topic>?after=<id>&limit=` (add `private=true`
-for a private channel's history, which needs its read policy).
+`GET /realtime/v1/history/<topic>?after=<id>&limit=`: that is the public
+channel's history; add `private=true` for the private channel's, which
+needs its read policy (or the secret key). Broadcasts kept before this
+release are treated as private.
 
 ### Private channels
 
@@ -933,7 +1009,9 @@ CREATE POLICY members_send ON xb_realtime.channel_access FOR INSERT TO <db>_user
   WITH CHECK (EXISTS (SELECT 1 FROM room_members m WHERE m.room = topic AND m.user_id = xb_auth.uid()));
 ```
 
-The edge checks them in a transaction it rolls back when a client joins.
+The edge checks them in a transaction it rolls back when a client joins,
+when it sends a new access token, and again every minute: a user your
+policies no longer allow is closed out of the channel.
 A private channel and a public one of the same name don't hear each other.
 
 ### Limits and use
@@ -941,12 +1019,22 @@ A private channel and a public one of the same name don't hear each other.
 | | Personal | Pro | Team |
 | --- | --- | --- | --- |
 | Concurrent connections (per edge process) | 100 | 1,000 | 5,000 |
-| Messages a month | 1 million, then refused | metered | metered |
+| Messages a month | 1 million, then refused (open connections are closed) | metered | metered |
 
 Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects
-and refetches). A connection joins at most 100 channels, sends at most 600
-broadcasts and presence updates a minute, and a message is at most 256 KB. Messages to and from clients (`realtime_messages`) and
+and refetches). Open connections are closed (code 1008) when the key they
+were opened with is revoked or rotated away, when the organisation is
+suspended, and when backend services are turned off. A connection joins at most 100 channels, sends at most 600
+broadcasts and presence updates a minute, and a broadcast or presence
+message is at most 32 KB (other frames 64 KB). A channel may have at most 20
+`postgres_changes` subscriptions and a connection 100, and a client that
+has 4 MB waiting for it is disconnected. A project's clients may
+send at most 1 MB of broadcasts and presence a second through each
+xenibase-edge process, and a topic kept as history keeps at most 256 KB a
+minute per process; past these a broadcast is refused with a
+`rate_limited` error reply (`429` over HTTP, with how many were sent). Messages to and from clients (`realtime_messages`: broadcasts,
+presence and database changes; heartbeats, joins and replies are free) and
 connection time (`realtime_connection_minutes`) are metered.
 
 ## Settings

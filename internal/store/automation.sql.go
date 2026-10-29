@@ -66,6 +66,26 @@ func (q *Queries) AddOutboundAllow(ctx context.Context, arg AddOutboundAllowPara
 	return err
 }
 
+const countOrgHTTPJobRuns = `-- name: CountOrgHTTPJobRuns :one
+SELECT count(*)::bigint FROM job_runs r JOIN scheduled_jobs j ON j.id = r.job_id JOIN projects p ON p.id = j.project_id
+WHERE p.org_id = $1 AND j.kind = 'http' AND r.status <> 'skipped'
+  AND coalesce(r.started_at, r.scheduled_for) > $2::timestamptz
+`
+
+type CountOrgHTTPJobRunsParams struct {
+	OrgID uuid.UUID
+	Since time.Time
+}
+
+// HTTP job runs (not skipped) the organisation had since a time: its runs
+// in the last hour, against the plan's per-hour limit.
+func (q *Queries) CountOrgHTTPJobRuns(ctx context.Context, arg CountOrgHTTPJobRunsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOrgHTTPJobRuns, arg.OrgID, arg.Since)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countOrgJobs = `-- name: CountOrgJobs :one
 SELECT count(*)::int FROM scheduled_jobs j JOIN projects p ON p.id = j.project_id
 WHERE p.org_id = $1 AND p.deleted_at IS NULL
@@ -76,6 +96,27 @@ func (q *Queries) CountOrgJobs(ctx context.Context, orgID uuid.UUID) (int32, err
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const countOrgWebhookAttempts = `-- name: CountOrgWebhookAttempts :one
+SELECT count(*) FROM webhook_deliveries d
+JOIN webhooks w ON w.id = d.webhook_id
+JOIN projects p ON p.id = w.project_id
+WHERE p.org_id = $1 AND d.created_at > now() - make_interval(secs => $2::float8)
+`
+
+type CountOrgWebhookAttemptsParams struct {
+	OrgID   uuid.UUID
+	Seconds float64
+}
+
+// The organisation's webhook delivery attempts in the last @seconds: what
+// a server that takes over delivery counts as already spent of the rate.
+func (q *Queries) CountOrgWebhookAttempts(ctx context.Context, arg CountOrgWebhookAttemptsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOrgWebhookAttempts, arg.OrgID, arg.Seconds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const countOutbound = `-- name: CountOutbound :exec
@@ -1008,6 +1049,29 @@ func (q *Queries) ListWebhooks(ctx context.Context, projectID uuid.UUID) ([]Webh
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockJob = `-- name: LockJob :one
+SELECT id FROM scheduled_jobs WHERE id = $1 FOR UPDATE
+`
+
+// tenant: system - the scheduler, or a job the request already authorized.
+// Serialises the overlap check and the run insert of one job across servers.
+func (q *Queries) LockJob(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockJob, id)
+	err := row.Scan(&id)
+	return id, err
+}
+
+const lockOrgHTTPJobRuns = `-- name: LockOrgHTTPJobRuns :exec
+SELECT pg_advisory_xact_lock(hashtext('xenibase_http_job_runs:' || $1::text))
+`
+
+// tenant: system - the scheduler, for an org whose job it dispatches.
+// Serialises the HTTP-runs-per-hour check of one organisation across servers.
+func (q *Queries) LockOrgHTTPJobRuns(ctx context.Context, orgKey string) error {
+	_, err := q.db.Exec(ctx, lockOrgHTTPJobRuns, orgKey)
+	return err
 }
 
 const markReplayed = `-- name: MarkReplayed :exec

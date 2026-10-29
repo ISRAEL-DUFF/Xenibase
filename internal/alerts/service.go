@@ -74,6 +74,9 @@ const (
 	// A dedicated project's WAL archiving fails or is behind (spec §6.4's
 	// "WAL archive lag").
 	KindWALArchive = "wal_archive"
+	// A region's projects keep their files in its backup target (V4 §5.1):
+	// the edges hold credentials that can delete its backups.
+	KindFilesShareBackups = "files_share_backups"
 )
 
 // KindProjectStuck: a move, promotion, demotion or major upgrade failed and
@@ -303,6 +306,16 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		errs = append(errs, err)
 	}
 	out = append(out, walArchiveConditions(archives)...)
+
+	shared, err := q.RegionsFilesOnBackupTarget(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, r := range shared {
+		out = append(out, condition{KindFilesShareBackups, SeverityWarning, "region", r.ID, r.Name,
+			fmt.Sprintf("File storage in %s uses the region's backup target, so the edges serving its %d project(s) with storage hold credentials that can delete its backups: give the region a files target (Platform → Regions, docs/regions.md)",
+				r.Name, r.Projects), map[string]any{"projects": r.Projects}})
+	}
 
 	unreachable, err := q.UnreachableNodes(ctx, nodeUnreachableAfter.Seconds())
 	if err != nil {

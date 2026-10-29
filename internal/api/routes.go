@@ -219,6 +219,7 @@ var routeRules = map[string]rule{
 	"POST /api/v1/projects/{id}/auth/templates/preview":            {scope: scopeProject, action: authz.ServicesManage},
 	"GET /api/v1/projects/{id}/auth/signing-keys":                  {scope: scopeProject, action: authz.ServicesLogs},
 	"POST /api/v1/projects/{id}/auth/signing-keys/rotate":          {scope: scopeProject, action: authz.ServicesManage},
+	"POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke":  {scope: scopeProject, action: authz.ServicesManage},
 	"GET /api/v1/projects/{id}/auth/users":                         {scope: scopeProject, action: authz.AuthUsers},
 	"GET /api/v1/projects/{id}/files":                              {scope: scopeProject, action: authz.FilesView},
 	"GET /api/v1/projects/{id}/realtime":                           {scope: scopeProject, action: authz.RealtimeView},

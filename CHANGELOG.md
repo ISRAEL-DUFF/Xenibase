@@ -6,6 +6,14 @@ bundle share one version (spec §11.5).
 ## Unreleased
 
 ### Added
+- **A leaked project signing key can be revoked at once.** Rotation was the
+  only control, and it keeps the old key verifying for a day, so tokens
+  forged with a leaked key (after an edge compromise, say) stayed valid
+  that long. `POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke`
+  (project admins), or **Revoke** under Authentication → Signing keys,
+  retires the key now: it leaves the JWKS and the edges with their next
+  feed read, and every token it signed is refused. Revoking the active key
+  makes a new one, which signs every user out.
 - **Connections grow with a dedicated instance's memory.** `max_connections`
   was 100 for every size; it is now 50 per GB, from 100 (2 GB or less) to 500
   (10 GB or more): 200 on a 4 GB instance, 400 on 8 GB. A dedicated project's
@@ -31,6 +39,255 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A new delivering server no longer starts with a full webhook rate.**
+  The per-organisation delivery rate was a token bucket in the delivering
+  server's memory, so a server that took over after a failover or a restart
+  gave every organisation a fresh minute's allowance on top of what had just
+  been sent. A new bucket now starts with the last minute's attempts from
+  the delivery log already spent.
+- **Scheduled jobs keep to their time across daylight saving.** A job's
+  next run was found by stepping through wall-clock hours, which went wrong
+  at both changes. When the clocks went back, a once-a-day job in the
+  repeated hour (`30 1 * * *` in New York on 1 November) ran at 01:30 EDT
+  and again an hour later at 01:30 EST. When they went forward, a job in a
+  zone behind UTC whose time fell in the skipped hour (`30 2 * * *` in New
+  York) sent the search backwards in a loop that never ended, which hung
+  the scheduler and any request that saved the job; in London or Berlin
+  the run was dropped for the day. The schedule is now matched
+  one offset period at a time: a fixed time (minute and hour both given)
+  runs once on the day an hour repeats, and a fixed time the clocks skip
+  runs at the first minute after the gap, as in cronie; schedules with `*`
+  in the minute or hour run by the clock through both. No run is ever less
+  than a minute after the one before. See `docs/webhooks.md` ("Scheduled
+  jobs").
+- **"Run now" no longer runs a job twice.** The overlap check read the
+  job's active runs and then inserted a running one with nothing to stop
+  another server doing the same, and "Run now" is served by any API
+  server, not only the scheduler's. A manual run that met the scheduled
+  one, or two manual runs, could both start, so an `overlap: skip` job ran
+  alongside itself. The check and the insert now hold the job's row lock,
+  as does starting a queued run when the one before ends (a run queued at
+  that moment could otherwise wait until the next scheduler restart failed
+  it), and the database allows one running and one queued run per job;
+  migration 00086 fails any duplicates the race left before adding that
+  rule.
+- **The HTTP job runs per hour limit holds across servers.** It was a
+  token bucket in the memory of the server that dispatched the run, so a
+  new scheduler leader after a failover started with a full hour's
+  allowance, and so did every API server serving "Run now". The limit is
+  now counted from the organisation's HTTP job runs in the last hour, under
+  a per-organisation lock, when each run is dispatched.
+- **The Personal plan's monthly realtime messages now stop connections
+  already open.** Using them up (or the month's API requests) only refused
+  new connections, so clients that stayed connected kept sending and
+  receiving for the rest of the month. The edge now closes the project's
+  open connections when either limit is reached (WebSocket code 1008) and
+  refuses HTTP broadcasts with `429 realtime_quota_exceeded`.
+- **Revoking a key, suspending an organisation or turning services off now
+  closes open realtime connections.** They were checked only when they
+  opened: a connection made with a since-revoked secret key kept receiving
+  every change and could join private channels, a suspended organisation's
+  clients carried on, and turning services off left broadcasts and the
+  edge's database connection running. The edge now closes such connections
+  (WebSocket code 1008, with the reason) as soon as the change reaches it,
+  within 10 seconds at most, and stops listening to a project whose
+  services are off. A spend cap still leaves open connections alone.
+- **Realtime channels follow their user's token and the channel policies
+  while open.** A private channel's policies were asked only at join, so a
+  member removed from a room kept hearing it, and a new `access_token`
+  switched user without asking them; an expired token closed a channel only
+  at its table's next change, never for broadcast or presence, and never on
+  a connection opened with a bearer token. Now a channel is closed within
+  10 seconds of its token expiring (at once if a message is due to it or
+  it sends one), a connection's bearer token expires its channels too, a new
+  token is checked against the policies, and private channels are checked
+  again every minute.
+- **A realtime connection's memory is bounded.** A join could bind any
+  number of database-change subscriptions, each remembering up to 10,000
+  rows for deletes, so one client with the publishable key could make the
+  edge hold gigabytes; and a client that stopped reading could have 64 MB
+  queued for it. A channel now binds at most **20** subscriptions and a
+  connection **100** (refused in the join's reply), a connection's
+  subscriptions remember 20,000 rows between them, a frame is at most
+  **64 KB** (256 KB before; the connection is closed with 1009), and a
+  client with 4 MB waiting is disconnected as too slow.
+- **Realtime broadcasts can no longer fill the project's database.** With
+  the publishable key, a client could send 600 broadcasts of 256 KB a
+  minute, and with a second edge process listening each one over 7,800
+  bytes was written to `xb_realtime.relay` (about 150 MB a minute per
+  connection through the shared cluster's WAL), and to `broadcast_history`
+  on a persisted topic. A broadcast or presence message is now at most
+  **32 KB** (from clients and over HTTP; 256 KB before), a project's
+  clients may send at most 1 MB of them a second through each edge
+  process, and a persisted topic keeps at most 256 KB a minute per process;
+  past these the sender gets `too_large` or `rate_limited` (`413` or `429`
+  over HTTP). Large messages now cross between edge processes as several
+  `NOTIFY`s, with no table row.
+- **Realtime subscriptions no longer outlive their table's row-level
+  security.** It was checked only when a client subscribed, so after the
+  owner turned it off (a migration that does so for a moment was enough)
+  every anon and user subscriber received every row until they
+  disconnected. Each batch of changes now checks it again; when it is off,
+  and the table isn't listed as public, those subscriptions are closed
+  with a `system` error and the channel stays joined.
+- **A private channel's broadcast history is no longer readable with the
+  publishable key.** History was kept by topic name alone and checked the
+  read policy only when asked for `private=true`, so
+  `GET /realtime/v1/history/<topic>` without it returned a private
+  channel's messages and senders to anyone. Each kept broadcast now records
+  which channel it was sent on: the plain request reads the public
+  channel's, `private=true` the private channel's, after its read policy.
+  Broadcasts kept before this release don't say, so they are treated as
+  private until they expire. The secret key can now read a private
+  channel's history (it got 403).
+- **Heartbeats are no longer billed as realtime messages.** Every frame a
+  client sent and every message queued to it counted, heartbeats and their
+  replies included, so an idle connection cost about 207,000 messages a
+  month and five idle browser tabs used up a Personal organisation's
+  million. Only broadcasts, presence and database changes count now;
+  heartbeats, joins, leaves, token updates, replies and status messages
+  are free, so `realtime_messages` drops for most projects.
+- **The publishable key could reset `pg_stat_statements` for the whole
+  instance.** Backend services granted the request roles `EXECUTE` on every
+  function in `public` and each exposed schema, including extensions'
+  functions locked from `PUBLIC`; with `pg_stat_statements` installed, anon
+  could call `POST /data/v1/rpc/pg_stat_statements_reset` and empty every
+  tenant's Query Insights on a shared cluster. Functions are now granted one
+  by one, leaving out any an extension owns (the owner's later functions
+  still get `EXECUTE` from the default privileges), schema version 7 takes
+  back the grants already made, and the data API, type generation and the
+  advisor leave extensions' functions out (`404 unknown_function`).
+- **A table without row-level security could be read through a view or a
+  function.** The edge refused such a table only when a URL named it, while
+  anon and user held every privilege on it, so a `security_invoker` view over
+  it, or any function running as the caller, returned every row to the
+  publishable key. Now anon and user lose their privileges on a relation
+  nothing protects (a table without row-level security, a materialized view,
+  a view running as its owner; a public table keeps `SELECT`) as soon as an
+  edge sees it, through the new `xb_auth.sync_grants`, and get back exactly
+  what was taken once it has row-level security (`xb_auth.withheld` records
+  it). The edge also refuses an invoker view that reads such a relation, and
+  any invoker function while the caller's role still reaches one (`403
+  rls_required`, naming it). Running version 1 again after a move or restore
+  no longer re-grants a table the owner narrowed. The advisor's
+  `rls_disabled` message says what is now true, and `view_reads_unprotected`
+  names an invoker view over such a table.
+- **The documented way to hide a column did nothing.** The guide and the
+  advisor's `secret_column` fix said `REVOKE SELECT (email) ON profiles FROM
+  "<db>_anon"`, which Postgres ignores while anon holds `SELECT` on the whole
+  table, as it does from the request roles' grants. Both now give
+  `REVOKE SELECT ON profiles FROM …; GRANT SELECT (id, name, …) ON profiles
+  TO …` (the advisor lists the table's other columns, or gives the column
+  `REVOKE` when anon has only column grants), and re-applying the grants
+  after a move or restore no longer undoes it.
+- **The data API's cost guard could be bypassed with a cheap value
+  first.** It planned each SQL text once and kept the estimate, and filter
+  values are parameters, so a request for a common value admitted a later one
+  that scans the whole table (about 100 times the cost), and a plan made for
+  the service role admitted anon. Every read is now planned with its own
+  values as its own role (planning costs a small fraction of the read).
+  Set-returning functions now go through the guard too, and an exact count
+  over the limit is not run (`count: null`, as when it times out).
+- **Generated types could carry code from a column's name.** `xenibase gen
+  types` wrote table and column names into the Go, TypeScript and Dart files
+  as they were, in identifiers, tags, comments and strings, so whoever could
+  create a column could, with a 37-byte name, add `init` functions to every
+  program built with the generated Go package, and a `$` or `'` broke the
+  Dart file. Names now appear only escaped, identifiers are made from their
+  letters and digits (numbered when two clash, kept off reserved words), and
+  Go generation refuses, with a `400` naming it, a column its JSON tags can't
+  carry.
+- **Closing a policy didn't empty the anonymous-read cache.** The schema
+  fingerprint behind the cache key left out policies, and a cache hit never
+  checked it, so after `DROP POLICY`, `ALTER POLICY` or a `REVOKE` a popular
+  cached URL kept serving the rows for up to its TTL (an hour). The
+  fingerprint now covers policies, grants and row-level security, a hit
+  waits for the catalog check every 2 seconds, and a changed fingerprint
+  drops the project's cached answers.
+- **`return=minimal` writes needed a `SELECT` policy.** Every data API
+  write asked for its rows back (`RETURNING *`) even with `return=minimal`,
+  and Postgres checks returned rows against the table's `SELECT` policies, so
+  a table anon may insert into but not read (a contact form, a waitlist)
+  refused every insert with `403 permission_denied`. Minimal inserts,
+  updates and deletes now leave `RETURNING` out and count from the command
+  tag. (An upsert still needs `SELECT`, which Postgres requires.)
+- **Only project admins see the auth hook signing secret.** The auth
+  settings (`GET …/auth/config`) are readable by developers and `read`
+  tokens, and they carried the `whsec_` secret in full, so anyone with
+  them could forge hook events the project's servers trust. The secret is
+  now included only for callers who may change the settings
+  (`project.services`); everyone else gets the new `hook_secret_set`, and
+  Authentication → Hooks shows "Set".
+- **Email codes are capped per address.** Beyond one a minute an address
+  could be sent codes without limit, so with the project's own SMTP a
+  chosen user's sign-in code could take 7,200 guesses a day. An address
+  now gets at most five codes an hour and twenty a day, every kind
+  together (`429 over_email_send_rate_limit` with `Retry-After`), counted
+  on requests whether or not it has a user, as phone numbers have five an
+  hour.
+- **The one-code-a-minute limit no longer tells which addresses have
+  users.** It counted codes sent, and only a real user is sent one, so two
+  `POST /recover` calls in a minute answered 200 then 429 for an address
+  with an account and 200 twice for one without; `signin/otp` without user
+  creation did the same for addresses and phone numbers. Requests for
+  codes are now recorded (as hashes of the address or number, kept a day,
+  in `xb_auth.code_requests`, project schema version 10) before the user
+  is looked up, and the limit counts requests, so every address gets 200
+  then 429.
+- **A project's own SMTP server and SMS provider go through the outbound
+  rules.** Webhooks could reach only public addresses, but a project
+  admin could point the project's SMTP host at a private address (say
+  `10.0.0.5:5432`) and read the dial error from **Send test** to map the
+  control plane's network, or set a provider `base_url` that made the
+  worker POST to an internal service. Both are now checked like webhooks
+  (public addresses only unless the platform admin allows the host, never
+  link-local or metadata) and connected to at the address checked, with no
+  redirects followed. The SMTP test answers 400 for a refused address and
+  otherwise a generic 502, with the reason in the server's log.
+- **TOTP codes can no longer be guessed at the request rate.** Five wrong
+  codes used up a challenge, but a new one could be had at once, and the
+  `/factors`, `/mfa/*`, `/user` and sign-out routes had no auth rate
+  limit, so only the gateway's per-key limit bounded guesses (one in
+  under an hour). Those routes now have per-IP groups (`mfa` 30 a minute,
+  `user` 60), and five wrong codes in a row on a factor, across
+  challenges, lock it for a minute, doubling with each further one up to
+  a day: its challenges and codes answer `429 mfa_factor_locked` with
+  `Retry-After`, and a right code clears the count (project schema
+  version 10 adds `failed_attempts` and `locked_until` to
+  `xb_auth.mfa_factors`).
+- **A password alone no longer reaches `aal2`.** A session at `aal1`
+  could enrol a TOTP factor of its own and verify it, which raised the
+  session to `aal2`, past `mfa_required` and policies on `xb_auth.aal()`;
+  it could also change the password or email. Once a user has a verified
+  factor, an `aal1` session is now refused enrolment (`403
+  insufficient_aal`), password and email changes (`401
+  insufficient_aal`), and verifying a factor enrolled before the user's
+  first was verified, as GoTrue does. The check reads the session's level
+  from the database, not the token; a user's first factor still raises the
+  session that verifies it.
+- **Wildcard redirect URLs no longer allow other hosts.** A pattern was
+  matched against the whole URL as text, so `*` also matched `?` and `#`:
+  with `https://*.example.com/**`, `https://evil.test?.example.com/` was
+  allowed, and a magic link or reset requested with it sent the session to
+  `evil.test`. Redirects are now parsed and matched part by part: the
+  scheme exactly, the host label by label (`*` stands for one label or
+  part of one), the port exactly or `:*`, and the path with `*` and `**`.
+  A query or fragment needs a pattern whose path ends in `**`. URLs with a
+  user part are still refused, and a page under the site URL must be the
+  site's path or below it (`/app` no longer allows `/application`).
+- **A squatter's password no longer survives the owner's sign-up.**
+  Someone who signed up first with another person's address kept their
+  password: when the owner signed up too, the unconfirmed row was only
+  sent a new code, the owner's password was dropped, and confirming kept
+  the squatter's, who could then sign in. The same held for an admin-API
+  invitation of a squatted address and for phone sign-up. Signing up again
+  before confirming (by email or phone, or a sign-up link from the admin
+  API) now replaces the password and ends the row's sessions, and each
+  code records the password its request set (project schema version 10
+  adds `xb_auth.one_time_codes.password_sha`). A `signup`, `invite` or
+  `phone_signup` code that first proves the address or number clears any
+  other password and ends the sessions; `/resend` keeps the password of
+  the sign-up it repeats.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
@@ -331,8 +588,82 @@ bundle share one version (spec §11.5).
   output and restored the result even after a failure; it now uses
   `--out`, which leaves no file on failure, and `&&`
   (`docs/disaster-recovery.md`).
+- **A signed thumbnail URL opened the original.** A signed URL with a
+  transform carried an ordinary download token, so changing `render/sign`
+  to `object/sign` in it downloaded the full-size file. A token with a
+  transform now serves only that render (`400 invalid_signature` on the
+  download route).
+- **A signed upload URL skipped the storage policies on what it wrote, and
+  could be used again and again.** The upload's row was written with the
+  edge's own login, so a policy on the type, size or metadata never
+  applied, and an upsert URL could overwrite its path as often as its
+  holder liked, for up to 7 days. A signed upload is now written as the
+  user who signed it (their role and claims are kept with the URL in the
+  new `xb_storage.upload_tokens`, project schema version 8), the URL
+  uploads once (only an upload that commits uses it up, on any edge), and
+  it lasts 2 hours at most, as documented.
+- **A large upload's parts were neither bounded nor counted.** A part's
+  presigned URL signed no length, so each took up to the store's part limit
+  (5 GiB) whatever the upload declared, and uploads in progress were not in
+  the quota check: a 50 MB upload could hold about 20 GB for a day, and
+  uploads started together each passed against the same total. Each part's
+  URL now signs its exact length, uploads in progress hold their declared
+  size against the quota (direct and dashboard uploads count them too, and
+  starting one takes its turn on the project's usage row), and a project
+  may have 100 open at once (`429 too_many_uploads`).
+- **A CDN purge was tried once, and only when a bucket went private.** A
+  purge Cloudflare refused was only logged, so the CDN could keep serving
+  the now-private files for the bucket's cache time (up to a year), and
+  deleting, replacing or moving a public bucket's file, or deleting or
+  emptying the bucket, purged nothing. Every such change now purges the
+  files' URLs (and their image renders'), and a purge waits in the new
+  `cdn_purges` table until Cloudflare takes it: the storage sweep retries
+  it from every minute to every hour.
+- **Some stored files were never billed, and the storage reconciler could
+  never run.** File storage (`storage_gb_hours`) was metered only for
+  projects with backend services on, so turning them off, which keeps the
+  files, stopped the metering; cached image renders were never measured.
+  Every live project holding files is now metered each hour from its last
+  measurement, and the nightly reconciler measures the renders, which are
+  metered with the files. The reconciler's last run was kept in memory and
+  it waited a day from each start, so servers deployed more often never
+  ran it; the last run is now kept in the metadata database and one server
+  runs it each day.
+- **A move to another region left every stored file behind.** The move
+  copied the database and switched the project's region, but its files
+  stayed in the old region's object store, so every file answered "the
+  object's data is missing" afterwards and the old bytes were never
+  removed or billed. A region move is now refused (409) while the project
+  has files or an upload in progress, when it is asked for and again once
+  writes are frozen for the cutover; delete the files first, or move within
+  the region (`docs/regions.md`).
+- **Every edge held credentials that could delete its region's backups.**
+  Files were kept in the region's backup target, so the edge, the process
+  that faces the internet and parses uploads and images, was handed the
+  access key and secret of the bucket holding the region's backups, WAL-G
+  archives and metadata backups. A region can now have a **files target**
+  of its own (Platform → Regions; a bucket for files, or credentials
+  limited to `files/`), which the edges and the storage sweep use instead;
+  it can't be any region's backup or copy target or the default, and can't
+  be deleted while it holds files. A region without one keeps working as
+  before, with a warning in the server's log, a launch-check warning and
+  the new `files_share_backups` alert.
 
 ### Upgrading
+- Backend services' schema version 7 runs on every enabled project with its
+  next reconcile (within seconds of the upgrade). It revokes the request
+  roles' `EXECUTE` on functions an extension installed; the data API no
+  longer serves them, so wrap one in a function of your own if an app calls
+  it.
+  The same version adds `xb_auth.sync_grants`, which the control plane
+  runs straight after: anon and user lose their privileges on tables without
+  row-level security (except `SELECT` on public tables), materialized views
+  and views that run as their owner, in every schema of the project's,
+  exposed or not, including grants made by hand. A view or function that
+  read such a table with the publishable key now answers `403 rls_required`
+  (or `403 permission_denied`): enable row-level security on the table, or
+  list it as public if anyone may read it. See `docs/upgrade.md`
+  ("Upgrading from 4.2.4").
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
 - Migrations 00068 and 00069 move children an earlier transfer left behind to
@@ -344,6 +675,21 @@ bundle share one version (spec §11.5).
 - Migration 00075 gives the nightly and archive backups of projects deleted
   before the upgrade, on platform targets, their final backup's expiry, and
   at least seven days: they are deleted from a week after the upgrade.
+- Signed upload URLs made before the upgrade stop working (`400
+  invalid_signature`): they have no row in `xb_storage.upload_tokens`, so
+  they can't be used once. Apps sign a new URL; they last 2 hours at most.
+  A project's signed uploads fail until its schema reaches version 8, which
+  the backend services reconciler applies within minutes of the upgrade.
+- Migration 00083 adds `cdn_purges`, the CDN purges the storage sweep
+  retries; `project_storage.transform_bytes`, the cached renders' size; and
+  `storage_reconciler`, the reconciler's last run. The first server to
+  start runs the reconciler straight away. Projects whose backend services
+  are off have their files metered from the next sweep.
+- Migration 00082 adds `regions.files_target_id`. Existing regions have
+  none, so their files stay in the backup target and the
+  `files_share_backups` alert fires for each region with backend services:
+  give each a files target, copying `files/` across around the switch
+  (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
 
 ## v4.2.4
 

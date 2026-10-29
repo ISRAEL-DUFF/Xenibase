@@ -1256,6 +1256,11 @@ export const api = {
       "POST",
       `/api/v1/projects/${id}/auth/signing-keys/rotate`,
     ),
+  revokeSigningKey: (id: string, keyId: string) =>
+    request<S["SigningKeyList"]>(
+      "POST",
+      `/api/v1/projects/${id}/auth/signing-keys/${keyId}/revoke`,
+    ),
   authUsers: (id: string, q?: string, page?: number) =>
     getJSON<S["AuthUserList"]>(
       `/api/v1/projects/${id}/auth/users${qs({ q, page, per_page: 50 })}`,

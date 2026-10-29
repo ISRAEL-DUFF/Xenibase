@@ -82,6 +82,9 @@ type Config struct {
 	GarbageGrace time.Duration
 	// CacheBytes bounds the anonymous-read cache (default 64 MB).
 	CacheBytes int
+	// CatalogEvery is how often a project's catalog fingerprint is checked
+	// (default 2 s).
+	CatalogEvery time.Duration
 	// RenderWorker is the command a render worker runs as (V4.1 §12.4),
 	// e.g. {"/usr/local/bin/xenibase-edge", "render-worker"}; empty renders
 	// in the edge's own process.
@@ -169,9 +172,12 @@ func (p *project) exposed() []string {
 }
 
 // publicTable reports whether t may be read without row-level security.
-func (p *project) publicTable(t *Table) bool {
+func (p *project) publicTable(t *Table) bool { return p.publicName(t.Schema + "." + t.Name) }
+
+// publicName is publicTable for a relation's "schema.name".
+func (p *project) publicName(qualified string) bool {
 	for _, n := range p.cfg.PublicTables {
-		if n == t.Schema+"."+t.Name || (t.Schema == "public" && n == t.Name) {
+		if n == qualified || "public."+n == qualified {
 			return true
 		}
 	}
@@ -346,6 +352,11 @@ func (e *Edge) poll(ctx context.Context) error {
 // apply updates the cache. A project's pool is kept unless how it connects
 // changed.
 func (e *Edge) apply(ps []edgeapi.Project) {
+	refs := make([]string, 0, len(ps))
+	defer func() {
+		// Realtime's open connections follow the change (rthub.go).
+		go e.rtProjectsChanged(refs)
+	}()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, pc := range ps {
@@ -353,6 +364,7 @@ func (e *Edge) apply(ps []edgeapi.Project) {
 		if old != nil && old.cfg.Version > pc.Version {
 			continue // an older copy (from a resync racing a poll)
 		}
+		refs = append(refs, pc.Ref)
 		if pc.State == edgeapi.StateDisabled {
 			if old != nil {
 				delete(e.byRef, pc.Ref)

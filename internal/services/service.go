@@ -95,7 +95,8 @@ type Service struct {
 	// Files resolves the object store for files of projects in a region
 	// (V4 §5.1); nil turns storage off.
 	Files func(ctx context.Context, region string, residency bool) (storage.Target, error)
-	// CDN purges public files when their bucket goes private (V4 §5.4).
+	// CDN purges the URLs public files leave (V4 §5.4): a bucket
+	// made private or deleted, an object deleted, replaced or moved.
 	CDN CDNPurger
 	// StorageGrace is how long replaced and deleted files' bytes stay for
 	// downloads in flight (a minute by default; tests shorten it).
@@ -459,8 +460,29 @@ func (s *Service) UpdateExposure(ctx context.Context, projectID uuid.UUID, origi
 			return svc, err
 		}
 	}
-	return q.UpdateServicesSettings(ctx, store.UpdateServicesSettingsParams{ProjectID: projectID, CorsOrigins: clean, Settings: raw,
+	out, err := q.UpdateServicesSettings(ctx, store.UpdateServicesSettingsParams{ProjectID: projectID, CorsOrigins: clean, Settings: raw,
 		ExposedSchemas: schemas, PublicTables: public})
+	if err != nil {
+		return out, err
+	}
+	// A table listed or no longer listed as public: anon and user get its
+	// SELECT back, or lose it (the edges also sync when their catalog
+	// changes, which this alone doesn't).
+	if svc.Enabled && svc.SchemaVersion >= syncGrantsVersion && !sameSet(svc.PublicTables, public) {
+		p, err := q.GetProject(ctx, projectID)
+		if err != nil {
+			return out, err
+		}
+		conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+		if err != nil {
+			return out, err
+		}
+		defer conn.Close(context.Background())
+		if err := syncGrantsOn(ctx, conn, public); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 func sameSet(a, b []string) bool {
@@ -487,6 +509,11 @@ func (s *Service) applyExposure(ctx context.Context, p store.Project, schemas []
 		return err
 	}
 	defer conn.Close(context.Background())
+	return exposeOn(ctx, conn, p, schemas)
+}
+
+// exposeOn is applyExposure on an admin connection to p's database.
+func exposeOn(ctx context.Context, conn *pgx.Conn, p store.Project, schemas []string) error {
 	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		for _, sc := range schemas {
 			if sc == "public" {
@@ -744,7 +771,42 @@ func (s *Service) applySchema(ctx context.Context, p store.Project, all bool) er
 	if all {
 		from = 0
 	}
+	if err := applyVersionsOn(ctx, conn, p, from); err != nil {
+		return err
+	}
 	if all {
+		if err := exposeOn(ctx, conn, p, svc.ExposedSchemas); err != nil {
+			return err
+		}
+	}
+	if err := syncGrantsOn(ctx, conn, svc.PublicTables); err != nil {
+		return err
+	}
+	return q.SetServicesRoles(ctx, store.SetServicesRolesParams{ProjectID: p.ID, EdgeVerifier: svc.EdgeVerifier, LoginVerifiers: svc.LoginVerifiers,
+		SchemaVersion: int32(SchemaVersion), RolesInstance: svc.RolesInstance})
+}
+
+// syncGrantsVersion is the schema version that brings xb_auth.sync_grants.
+const syncGrantsVersion = 7
+
+// syncGrantsOn lets anon and user hold privileges only on what protects
+// itself, and SELECT on the public tables (xb_auth.sync_grants), on an
+// admin connection to the project's database.
+func syncGrantsOn(ctx context.Context, conn *pgx.Conn, public []string) error {
+	if public == nil {
+		public = []string{}
+	}
+	if _, err := conn.Exec(ctx, `SELECT xb_auth.sync_grants($1)`, public); err != nil {
+		return fmt.Errorf("sync the request roles' grants: %w", err)
+	}
+	return nil
+}
+
+// applyVersionsOn runs the schema versions after from on an admin
+// connection to p's database; from 0 re-runs them all, after taking the
+// xb_* schemas back from whoever restored them.
+func applyVersionsOn(ctx context.Context, conn *pgx.Conn, p store.Project, from int) error {
+	if from == 0 {
 		// A restore by the project's owner (a backup, a branch) recreates the
 		// xb_* schemas as the owner's: take them back.
 		if err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
@@ -769,13 +831,7 @@ func (s *Service) applySchema(ctx context.Context, p store.Project, all bool) er
 			return err
 		}
 	}
-	if all {
-		if err := s.applyExposure(ctx, p, svc.ExposedSchemas); err != nil {
-			return err
-		}
-	}
-	return q.SetServicesRoles(ctx, store.SetServicesRolesParams{ProjectID: p.ID, EdgeVerifier: svc.EdgeVerifier, LoginVerifiers: svc.LoginVerifiers,
-		SchemaVersion: int32(SchemaVersion), RolesInstance: svc.RolesInstance})
+	return nil
 }
 
 // Reconcile re-applies roles and schemas for enabled projects that moved
@@ -813,7 +869,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 func (s *Service) Run(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var swept, reconciled time.Time
+	var swept time.Time
 	for {
 		if time.Since(swept) >= StorageSweepEvery {
 			if err := s.StorageSweep(ctx); err != nil && ctx.Err() == nil {
@@ -827,14 +883,9 @@ func (s *Service) Run(ctx context.Context, every time.Duration) {
 			}
 			swept = time.Now()
 		}
-		if time.Since(reconciled) >= ReconcileStorageEvery {
-			// The first run waits a sweep, so a restart doesn't reconcile.
-			if !reconciled.IsZero() {
-				if err := s.ReconcileStorage(ctx); err != nil && ctx.Err() == nil {
-					s.log.Warn("storage reconcile", "err", err)
-				}
-			}
-			reconciled = time.Now()
+		// Nightly, on whichever server's turn comes first (V4 §5.6).
+		if _, err := s.ReconcileStorageDue(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("storage reconcile", "err", err)
 		}
 		if err := s.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			s.log.Warn("backend services reconcile", "err", err)

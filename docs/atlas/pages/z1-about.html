@@ -43,7 +43,7 @@
     <tr><td><code>&lt;x-include name="file.html"/&gt;</code></td><td>A partial.</td></tr>
   </tbody>
 </table></div>
-<p>Attribute values are matched literally. Write <code>&amp;quot;</code> for a quote inside one, as in <code>start="if is(&amp;quot;worker&amp;quot;) {"</code>.</p>
+<p>Attribute values are matched literally. Write <code>&amp;quot;</code> for a quote inside one, as in <code>start="if is(&amp;quot;worker&amp;quot;) {"</code>, and <code>&amp;lt;</code>, <code>&amp;gt;</code> and <code>&amp;amp;</code> for <code>&lt;</code>, <code>&gt;</code> and <code>&amp;</code>: a raw <code>&gt;</code> ends the element, and the build reports what it leaves unexpanded.</p>
 <p>The page script also understands a few classes: <code>callout drift</code> for spec and code that disagree, <code>callout risk</code>, <code>callout note</code>, <code>evt</code> for an event name, <code>stepper</code> with <code>stage</code> items whose <code>data-lit</code> lights the diagram groups marked <code>data-stage</code>, and <code>data-go="page"</code> on any diagram group to make it open that page.</p>
 
 <h2>Keeping it current</h2>

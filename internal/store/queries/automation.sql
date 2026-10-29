@@ -179,6 +179,23 @@ UPDATE scheduled_jobs SET next_run_at = sqlc.narg(next_run_at) WHERE id = @id;
 -- tenant: system - the scheduler.
 UPDATE scheduled_jobs SET consecutive_failures = @consecutive_failures WHERE id = @id;
 
+-- name: LockJob :one
+-- tenant: system - the scheduler, or a job the request already authorized.
+-- Serialises the overlap check and the run insert of one job across servers.
+SELECT id FROM scheduled_jobs WHERE id = @id FOR UPDATE;
+
+-- name: LockOrgHTTPJobRuns :exec
+-- tenant: system - the scheduler, for an org whose job it dispatches.
+-- Serialises the HTTP-runs-per-hour check of one organisation across servers.
+SELECT pg_advisory_xact_lock(hashtext('xenibase_http_job_runs:' || @org_key::text));
+
+-- name: CountOrgHTTPJobRuns :one
+-- HTTP job runs (not skipped) the organisation had since a time: its runs
+-- in the last hour, against the plan's per-hour limit.
+SELECT count(*)::bigint FROM job_runs r JOIN scheduled_jobs j ON j.id = r.job_id JOIN projects p ON p.id = j.project_id
+WHERE p.org_id = @org_id AND j.kind = 'http' AND r.status <> 'skipped'
+  AND coalesce(r.started_at, r.scheduled_for) > @since::timestamptz;
+
 -- name: InsertJobRun :one
 -- tenant: system - the scheduler.
 INSERT INTO job_runs (job_id, scheduled_for, started_at, finished_at, status, error, trigger)
@@ -226,3 +243,11 @@ FROM job_runs r JOIN scheduled_jobs j ON j.id = r.job_id JOIN projects p ON p.id
 JOIN organizations o ON o.id = p.org_id
 WHERE r.scheduled_for >= @from_ts AND r.scheduled_for < @to_ts AND r.status IN ('succeeded', 'failed', 'timed_out')
 GROUP BY 1, 2, 3, 4, 5;
+
+-- name: CountOrgWebhookAttempts :one
+-- The organisation's webhook delivery attempts in the last @seconds: what
+-- a server that takes over delivery counts as already spent of the rate.
+SELECT count(*) FROM webhook_deliveries d
+JOIN webhooks w ON w.id = d.webhook_id
+JOIN projects p ON p.id = w.project_id
+WHERE p.org_id = @org_id AND d.created_at > now() - make_interval(secs => @seconds::float8);

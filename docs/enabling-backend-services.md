@@ -381,6 +381,11 @@ pieces work; if you hit something else, `docker compose logs caddy` and
   and, where the provider allows, to DNS edits only.
 - The edge is reachable only through Caddy; the compose service publishes no
   port. Don't add one.
+- The edge holds the credentials of the region's file storage. Give the
+  region a **files target** of its own (Platform → Regions; see
+  [regions](regions.md#files-target)), or the edge holds the backup
+  target's, which can delete every backup in the region; the
+  `files_share_backups` alert fires until you do.
 - Backend services add a public surface: the data API, auth, storage and
   realtime answer on the internet. Read the
   [security review](security-review.md) and the [penetration test scope](pentest-scope.md)

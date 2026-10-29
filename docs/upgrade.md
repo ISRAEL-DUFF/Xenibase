@@ -383,6 +383,18 @@ below say what each version changed.
   upgrade; the hourly expiry then deletes them. Restore anything you still
   want from them into a new project before then. Backups in organisations'
   own buckets are not touched.
+- **Backend services' grants** (project schema version 7, applied to
+  every enabled project by the reconciler within seconds): the request
+  roles lose `EXECUTE` on functions an extension installed, and the data
+  API stops serving those. anon and user keep privileges only on what
+  row-level security protects, and `SELECT` on the public tables: their
+  grants on tables without it, materialized views and views that run as
+  their owner are taken back and recorded in `xb_auth.withheld`, and come
+  back by themselves once a table has row-level security. Before
+  upgrading, run the security advisor on projects whose apps read through
+  views or functions: a table it reports as `rls_disabled` that such a view
+  or function reads with the publishable key will answer `403`. Enable
+  row-level security on it, or list it as public.
 - **Edge credentials** (migration 00061): the platform-wide
   `XENIBASE_EDGE_SECRET` now serves only the regions without their own API
   domain. **Before upgrading**, give every edge of a region with its own API
@@ -405,6 +417,21 @@ below say what each version changed.
   ignores them) and revoke that token in Hetzner if nothing else uses it. To
   keep agent-side assignment, which also fails over while xenibase-server is
   down, set `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true` instead.
+- **Give each region with backend services a files target** (migration
+  00082). Until now every edge held the credentials of its region's backup
+  target, which can delete the region's backups. Nothing changes at the
+  upgrade: files stay in the backup target, the server logs a warning and
+  the `files_share_backups` alert fires. Then, per region: create a bucket
+  for files (or credentials limited to `files/`), add it as a platform
+  storage target, copy `files/` into it, set it as the region's **Files
+  target**, and copy again ([regions](regions.md#files-target) has the
+  steps). After that the feed carries only the files target's credentials.
+- **Signed upload URLs made before the upgrade stop working**: a signed
+  upload is now written as its signer and used once, which needs the
+  token's row in the project's `xb_storage.upload_tokens` (project schema
+  version 8, applied within minutes of the upgrade). Apps sign a new URL.
+- **A project with stored files can't be moved to another region**; delete
+  its files first ([regions](regions.md#projects-and-regions)).
 
 ## Rolling back
 

@@ -3443,6 +3443,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one */
+        post: operations["revokeSigningKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/auth/users": {
         parameters: {
             query?: never;
@@ -6465,6 +6482,11 @@ export interface components {
              * @description Where backups on platform targets are copied (V3 §2.5).
              */
             copy_target_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
+             */
+            files_target_id?: string | null;
             /** @description The region's pooler floating IP at the provider. */
             floating_ip_id?: string | null;
             residency: boolean;
@@ -6515,6 +6537,11 @@ export interface components {
             storage_target_id?: string | null;
             /** Format: uuid */
             copy_target_id?: string | null;
+            /**
+             * Format: uuid
+             * @description A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
+             */
+            files_target_id?: string | null;
             floating_ip_id?: string | null;
             residency?: boolean;
             /** @description Hidden regions take new projects only from their early-access organisations. */
@@ -7592,8 +7619,10 @@ export interface components {
                 [key: string]: boolean;
             };
             captcha_secret_set?: boolean;
-            /** @description Signs webhook hooks (Xenibase-Signature); set once a hook URL is. */
+            /** @description Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services). */
             hook_secret?: string;
+            /** @description Whether the project has a hook secret (for those who aren't shown it). */
+            hook_secret_set?: boolean;
             /** @description The role Postgres hooks run as; grant it what they read. */
             hook_role?: string;
             phone?: {
@@ -17180,6 +17209,30 @@ export interface operations {
             header?: never;
             path: {
                 id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SigningKeyList"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    revokeSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+                keyId: string;
             };
             cookie?: never;
         };

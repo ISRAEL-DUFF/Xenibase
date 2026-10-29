@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -106,6 +107,9 @@ type Service struct {
 	// (outbound.Service.CheckSource, by default with SourceBlock and
 	// SourceInternal).
 	CheckSource func(ctx context.Context, org uuid.UUID, host string, port int) (netip.Addr, error)
+	// filesWarned is when FilesTarget last warned that a region's files
+	// share its backup target (by region).
+	filesWarned sync.Map
 }
 
 // NewService returns a Service and hooks final backups into deletes.

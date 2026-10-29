@@ -257,6 +257,33 @@ func (s *Service) Check(ctx context.Context, orgID uuid.UUID, rawURL string) (Ta
 	return Target{URL: u, Host: host, Addr: netip.AddrPortFrom(addrs[0].Unmap(), uint16(port))}, nil
 }
 
+// CheckAddr validates host:port for orgID by Check's rules (a project's
+// own SMTP server): public addresses only unless the host is
+// allow-listed, never link-local or metadata addresses. It returns the
+// address to connect to, so a second lookup cannot rebind the name.
+func (s *Service) CheckAddr(ctx context.Context, orgID uuid.UUID, host string, port int) (netip.AddrPort, error) {
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if host == "" || strings.ContainsAny(host, "/@?#[] ") {
+		return netip.AddrPort{}, fmt.Errorf("%w: not a host name or IP address", ErrRefused)
+	}
+	if port < 1 || port > 65535 {
+		return netip.AddrPort{}, fmt.Errorf("%w: bad port", ErrRefused)
+	}
+	t, err := s.Check(ctx, orgID, (&url.URL{Scheme: "https", Host: net.JoinHostPort(host, strconv.Itoa(port))}).String())
+	return t.Addr, err
+}
+
+// Client is an HTTP client for t (from Check) that connects only to its
+// checked address and follows no redirects: for a tenant's URL that isn't
+// a signed webhook (a project's own SMS provider).
+func (s *Service) Client(t Target, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport:     s.transport(t),
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 // CheckSource validates host:port as a database a tenant asks Xenibase to
 // read from (an import's or a Supabase migration's source). Xenibase and
 // its agents connect from addresses every cluster trusts, so the rules are
@@ -564,6 +591,32 @@ func (s *Service) Take(orgID uuid.UUID, kind string, perPeriod int64, period tim
 	}
 	b.tokens--
 	return true
+}
+
+// TakeFrom is Take for a bucket that may already be part spent: when this
+// process has none for the organisation yet, used reports how many of the
+// period's tokens went before (by another server, or before a restart), so
+// a server that takes over the work doesn't start with a full allowance.
+func (s *Service) TakeFrom(orgID uuid.UUID, kind string, perPeriod int64, period time.Duration, used func() (int64, error)) (bool, error) {
+	if perPeriod <= 0 {
+		return true, nil
+	}
+	key := kind + ":" + orgID.String()
+	s.mu.Lock()
+	_, ok := s.buckets[key]
+	s.mu.Unlock()
+	if !ok {
+		n, err := used()
+		if err != nil {
+			return false, err
+		}
+		s.mu.Lock()
+		if _, ok := s.buckets[key]; !ok {
+			s.buckets[key] = &bucket{tokens: float64(max(perPeriod-n, 0)), at: s.cfg.Now()}
+		}
+		s.mu.Unlock()
+	}
+	return s.Take(orgID, kind, perPeriod, period), nil
 }
 
 // Sweep drops counters older than 30 days.

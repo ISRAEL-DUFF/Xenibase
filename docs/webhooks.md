@@ -237,12 +237,24 @@ A job runs SQL, or calls a URL, on a schedule: Database → Scheduled jobs,
 
 - Your plan limits the number of jobs (Personal 20, Team 50), how often
   one may run (every 5 minutes on Personal, every minute on Team), and HTTP
-  job runs per hour (120, 600; runs beyond it are skipped).
+  job runs per hour (120, 600, counted over the last 60 minutes across the
+  organisation's projects; runs beyond it are skipped).
 - **Missed runs are not caught up**: after Xenibase was down, the next
   scheduled time runs and the history shows the gap.
+- **Daylight saving**: a schedule follows the wall clock of its time
+  zone. When the clocks go back and an hour repeats, a job at a fixed time
+  (both minute and hour given, such as `30 1 * * *`) runs once, at the
+  first 01:30; when they go forward, a fixed time the clocks skip (02:30 in
+  New York in March) runs at the first minute after the gap (03:00). A
+  schedule with `*` in the minute or hour (`*/15 * * * *`, `@hourly`)
+  keeps to the clock: it runs in both copies of a repeated hour and not in
+  a skipped one. This is how cronie and Vixie cron behave.
 - Runs are skipped (and recorded as such) while the project is moving
   between tiers, restoring or resetting, while the organisation is
   suspended, and, for HTTP jobs, while its outbound traffic is off.
 - **History**: start, duration, status, rows affected or HTTP status, and
   the error; kept 30 days, at most 1,000 runs per job. **Run now** starts
-  one at once. Three failures in a row email the project's admins.
+  one at once, under the same overlap rule as a scheduled run: while a run
+  is going it is skipped, or queued if the job queues and none is queued
+  yet. A job never has more than one run going, however many servers or
+  clicks start it. Three failures in a row email the project's admins.

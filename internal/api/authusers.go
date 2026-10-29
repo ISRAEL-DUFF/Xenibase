@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/edgeapi"
 	"github.com/israel-duff/xenibase/internal/projauth"
 	"github.com/israel-duff/xenibase/internal/services"
@@ -151,8 +153,8 @@ func (s *Server) authConfigOut(r *http.Request, id uuid.UUID, c services.AuthCon
 	out := gen.AuthConfig{Settings: authSettingsOut(c.Resolved, c.Settings), Templates: templatesOut(c.Templates),
 		DefaultTemplates: templatesOut(services.DefaultTemplates), Sms: phoneProviderOut(c.SMS), Whatsapp: phoneProviderOut(c.WhatsApp),
 		OauthSecretSet: &c.OAuthSecretSet, CaptchaSecretSet: ptr(c.CaptchaSecret)}
-	if c.HookSecret != "" {
-		out.HookSecret = ptr(c.HookSecret)
+	if err := s.hookSecretOut(r.Context(), &out, c.HookSecret); err != nil {
+		return out, err
 	}
 	if c.SMTP != nil {
 		tls := gen.AuthSMTPTls(c.SMTP.TLS)
@@ -211,6 +213,25 @@ func (s *Server) authConfigOut(r *http.Request, id uuid.UUID, c services.AuthCon
 		out.OauthCallbackUrl = ptr(out.AuthUrl + "/callback")
 	}
 	return out, nil
+}
+
+// hookSecretOut fills in what the caller may see of the hook secret: that
+// there is one, for anyone who reads the settings, and the secret itself
+// only for a project admin (project.services), since whoever holds it can
+// sign hook events the project's servers trust.
+func (s *Server) hookSecretOut(ctx context.Context, out *gen.AuthConfig, secret string) error {
+	out.HookSecretSet = ptr(secret != "")
+	if secret == "" {
+		return nil
+	}
+	admin, err := s.can(ctx, authz.ServicesManage)
+	if err != nil {
+		return err
+	}
+	if admin {
+		out.HookSecret = ptr(secret)
+	}
+	return nil
 }
 
 // GetAuthConfig implements GET /api/v1/projects/{id}/auth/config.
@@ -437,11 +458,16 @@ func (s *Server) TestAuthSMTP(w http.ResponseWriter, r *http.Request, id gen.Pro
 		return
 	}
 	if err := s.services.TestSMTP(r.Context(), id, smtpIn(req.Smtp), req.To); err != nil {
-		if errors.Is(err, services.ErrInvalid) {
+		switch {
+		case errors.Is(err, services.ErrInvalid):
 			s.servicesError(w, "smtp test", err)
-			return
+		case errors.Is(err, services.ErrSMTPTest):
+			// The dial or SMTP error isn't shown: it would map the networks
+			// xenibase-server reaches.
+			writeError(w, http.StatusBadGateway, "smtp_failed", err.Error())
+		default:
+			s.servicesError(w, "smtp test", err)
 		}
-		writeError(w, http.StatusBadGateway, "smtp_failed", "the test email couldn't be sent: "+err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -498,6 +524,30 @@ func (s *Server) RotateSigningKey(w http.ResponseWriter, r *http.Request, id gen
 		return
 	}
 	a.set("kid", k.Kid)
+	ks, err := s.services.SigningKeys(r.Context(), id)
+	if err != nil {
+		s.servicesError(w, "signing keys", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, signingKeysOut(ks))
+}
+
+// RevokeSigningKey implements POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke.
+func (s *Server) RevokeSigningKey(w http.ResponseWriter, r *http.Request, id gen.ProjectID, keyID openapi_types.UUID) {
+	if !s.requireServices(w) {
+		return
+	}
+	a := auditFrom(r.Context())
+	a.target("project", id.String())
+	a.set("key_id", keyID.String())
+	k, err := s.services.RevokeSigningKey(r.Context(), id, keyID)
+	if err != nil {
+		s.servicesError(w, "revoke signing key", err)
+		return
+	}
+	if k != nil {
+		a.set("new_kid", k.Kid)
+	}
 	ks, err := s.services.SigningKeys(r.Context(), id)
 	if err != nil {
 		s.servicesError(w, "signing keys", err)

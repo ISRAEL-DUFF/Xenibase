@@ -272,6 +272,14 @@ func (s *Service) DeleteTarget(ctx context.Context, orgID *uuid.UUID, id uuid.UU
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM storage_targets WHERE id = $1 FOR UPDATE`, id); err != nil {
 			return err
 		}
+		// A region's files are in its files target, with nowhere else to go.
+		var files bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM regions WHERE files_target_id = $1)`, id).Scan(&files); err != nil {
+			return err
+		}
+		if files {
+			return fmt.Errorf("%w: it holds a region's files; give the region another files target first", ErrTargetInUse)
+		}
 		q := store.New(tx)
 		u, err := q.StorageTargetUse(ctx, store.StorageTargetUseParams{ID: id})
 		if err != nil {

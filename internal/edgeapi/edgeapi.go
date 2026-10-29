@@ -154,7 +154,8 @@ type Project struct {
 	SpendCapped bool `json:"spend_capped,omitempty"`
 	// RequestsBlocked says the organisation's plan's monthly data API
 	// requests are used up (V4.1 §3): data, storage and realtime answer
-	// 429 plan_limit_reached until the month ends; sign-in carries on.
+	// 429 plan_limit_reached until the month ends, and open realtime
+	// connections are closed; sign-in carries on.
 	RequestsBlocked bool `json:"requests_blocked,omitempty"`
 	// MAUBlocked says the plan's monthly active users are used up: users in
 	// MAUCounted (a bloom filter of this month's counted users) still sign
@@ -172,8 +173,8 @@ type RealtimeConfig struct {
 	// MaxConnections is concurrent WebSocket connections per edge process
 	// (0: unlimited).
 	MaxConnections int `json:"max_connections,omitempty"`
-	// MessagesBlocked refuses new connections and stops delivery: the
-	// month's messages are used up.
+	// MessagesBlocked refuses new connections and HTTP broadcasts and
+	// closes open connections: the month's messages are used up.
 	MessagesBlocked bool `json:"messages_blocked,omitempty"`
 	// MaxChangesPerSecond is the database changes delivered per second
 	// before they are coalesced into a resync signal; MaxGroups the
@@ -213,8 +214,9 @@ type AuthConfig struct {
 	// SiteURL is where links go when a request names no redirect.
 	SiteURL string `json:"site_url"`
 	// RedirectURLs are the allowed redirect_to values: exact, or with
-	// "*" (any characters but "/") and "**" (anything) when
-	// AllowWildcardRedirects is on.
+	// AllowWildcardRedirects on, patterns matched part by part: "*" in the
+	// host within one label, in the path any characters but "/", and "**"
+	// in the path anything.
 	RedirectURLs           []string `json:"redirect_urls"`
 	AllowWildcardRedirects bool     `json:"allow_wildcard_redirects"`
 	SignupEnabled          bool     `json:"signup_enabled"`
@@ -547,13 +549,21 @@ const (
 	// EventBucketPrivate: a public bucket went private; its files leave
 	// the CDN's cache.
 	EventBucketPrivate = "bucket_private"
+	// EventBucketDeleted and EventBucketEmptied: a public bucket was
+	// deleted or emptied; its files leave the CDN's cache.
+	EventBucketDeleted = "bucket_deleted"
+	EventBucketEmptied = "bucket_emptied"
+	// EventObjectsChanged: objects of a public bucket were deleted,
+	// replaced or moved away (Paths); their URLs leave the CDN's cache.
+	EventObjectsChanged = "objects_changed"
 )
 
 // StorageEvent is a storage change for xenibase-server.
 type StorageEvent struct {
-	Ref    string `json:"ref"`
-	Event  string `json:"event"`
-	Bucket string `json:"bucket"`
+	Ref    string   `json:"ref"`
+	Event  string   `json:"event"`
+	Bucket string   `json:"bucket"`
+	Paths  []string `json:"paths,omitempty"`
 }
 
 // StorageEvent sends a storage change.

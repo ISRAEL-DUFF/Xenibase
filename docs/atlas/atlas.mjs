@@ -431,6 +431,12 @@ function renderPage(page, pages, problems, placed) {
 
   body = body.replace(/<x-parts\s*\/>/g, () => partsGrid(pages));
 
+  // An element none of the above matched (a raw > or < in an attribute ends
+  // the match early) would reach the page as text: report it.
+  for (const m of body.matchAll(/<x-[a-z]+\b[^\n]{0,80}/g)) {
+    problem(`unexpanded element ${m[0]}…: write &lt; &gt; &amp; inside attribute values`);
+  }
+
   // Headings get stable ids, a link of their own, and a table of contents.
   const toc = [];
   body = body.replace(/<h([23])(\s[^>]*)?>([\s\S]*?)<\/h\1>/g, (whole, level, rest = "", inner) => {

@@ -822,7 +822,7 @@ export function HooksTab({
             setSend,
             "Receives every email and code (with the text) instead of Xenibase sending them.",
           )}
-          {cfg.hook_secret && (
+          {cfg.hook_secret ? (
             <KeyValues
               items={[
                 [
@@ -837,11 +837,17 @@ export function HooksTab({
                 ],
               ]}
             />
+          ) : (
+            cfg.hook_secret_set && (
+              <KeyValues
+                items={[["Hook secret", "Set (shown to project admins)"]]}
+              />
+            )
           )}
         </Panel>
         <SaveBar admin={admin} busy={busy} err={err} saved={saved} />
       </form>
-      {admin && cfg.hook_secret && (
+      {admin && (cfg.hook_secret || cfg.hook_secret_set) && (
         <div className="flex justify-end">
           <Button
             type="button"
