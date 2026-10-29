@@ -694,6 +694,17 @@ bundle share one version (spec §11.5).
   its limit while soft-locked, is hard-locked at once. A hard lock now
   lifts only when the project is back under its limit (it used to drop to
   the soft lock under 120%, letting the tenant write again).
+- **Shared-cluster tenants can no longer see each other's locks.**
+  `pg_locks` (over `pg_lock_status()`) stayed readable by `PUBLIC` after
+  the activity views were hidden, and lists every lock in the cluster with
+  its database, relation and backend, so a tenant could tell which other
+  projects were active, with how many sessions, and what they touched.
+  `SELECT` on `pg_locks` and `pg_prepared_xacts` and `EXECUTE` on
+  `pg_lock_status`, `pg_blocking_pids`, `pg_safe_snapshot_blocking_pids`,
+  `pg_isolation_test_session_is_blocked` and `pg_prepared_xact` are now
+  revoked from `PUBLIC` in every shared project database, and the
+  isolation check reports any of them readable. Query insights' locks view
+  is unchanged.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
@@ -753,6 +764,13 @@ bundle share one version (spec §11.5).
   the first check after the upgrade can fail on something earlier checks
   missed, such as a grant made by hand, and raise `isolation_check_failed`.
   Its log names each finding.
+- Migration 00090 queues `apply_settings` for each active shared project,
+  which revokes `pg_locks` and the lock functions from `PUBLIC` in its
+  database (a project with an exclusive operation pending gets it from its
+  next `apply_settings`). Tenant SQL, including the SQL console, that
+  reads `pg_locks` or calls `pg_blocking_pids` on the shared tier now
+  answers "permission denied"; the project's Query insights → Locks view
+  shows its blocking chains instead.
 
 ## v4.2.4
 

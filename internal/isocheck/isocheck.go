@@ -366,10 +366,10 @@ func Database(ctx context.Context, conn *pgx.Conn) ([]Finding, error) {
 		out = append(out, Finding{"schema public", "PUBLIC may CREATE in " + db})
 	}
 	// Other sessions' and databases' activity (V2 §10.2).
-	rows, err := conn.Query(ctx, `SELECT v FROM unnest(ARRAY['pg_catalog.pg_stat_activity', 'pg_catalog.pg_stat_database', 'pg_catalog.pg_stat_database_conflicts']) v
+	rows, err := conn.Query(ctx, `SELECT v FROM unnest($1::text[]) v
 		WHERE has_table_privilege('public', v, 'SELECT')
 		UNION ALL SELECT f FROM (`+provision.ActivityFunctions+`) fns(f)
-		WHERE has_function_privilege('public', 'pg_catalog.' || f, 'EXECUTE')`)
+		WHERE has_function_privilege('public', 'pg_catalog.' || f, 'EXECUTE')`, provision.ActivityViews)
 	if err != nil {
 		return nil, err
 	}
@@ -533,6 +533,11 @@ func Probes(ctx context.Context, ps *provision.Service, a, b store.Project, aPas
 		{"read other databases' commits", `SELECT pg_stat_get_db_xact_commit(oid) FROM pg_database LIMIT 1`},
 		{"read other backends' databases", `SELECT pg_stat_get_backend_dbid(1)`},
 		{"read other backends' roles", `SELECT pg_stat_get_backend_userid(1)`},
+		// pg_locks names every backend's database and relations.
+		{"read pg_locks", `SELECT count(*) FROM pg_locks`},
+		{"read other backends' locks", `SELECT count(*) FROM pg_lock_status()`},
+		{"read which backends block another", fmt.Sprintf(`SELECT pg_blocking_pids(%d)`, bPID)},
+		{"read pg_prepared_xacts", `SELECT count(*) FROM pg_prepared_xacts`},
 	} {
 		var n any
 		if err := ca.QueryRow(ctx, at.sql).Scan(&n); err == nil {

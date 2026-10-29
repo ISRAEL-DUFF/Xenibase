@@ -187,6 +187,11 @@ func TestTenantIsolation(t *testing.T) {
 		mustFail(t, a.conn, `SELECT pg_stat_get_db_numbackends(oid) FROM pg_database WHERE datname = '`+b.db()+`'`, "permission denied")
 		mustFail(t, a.conn, `SELECT pg_stat_get_backend_dbid(s) FROM pg_stat_get_backend_idset() s`, "permission denied")
 		mustFail(t, a.conn, `SELECT pg_stat_get_backend_userid(s) FROM pg_stat_get_backend_idset() s`, "permission denied")
+		// Nor which databases have backends and what they lock.
+		mustFail(t, a.conn, `SELECT d.datname, l.pid, l.relation FROM pg_locks l JOIN pg_database d ON d.oid = l.database`, "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_lock_status()`, "permission denied")
+		mustFail(t, a.conn, "SELECT pg_blocking_pids("+itoa(bpid)+")", "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_prepared_xacts`, "permission denied")
 		mustFail(t, a.conn, "SELECT pg_terminate_backend("+itoa(bpid)+")", "permission denied", "must be a member")
 		mustFail(t, a.conn, "SELECT pg_cancel_backend("+itoa(bpid)+")", "permission denied", "must be a member")
 		if _, err := b.conn.Exec(ctx, "SELECT 1"); err != nil {
@@ -392,6 +397,7 @@ func TestLiveIsolationCheck(t *testing.T) {
 		{"dblink installed", "escape-prone extensions", projectDB, "CREATE EXTENSION dblink", "DROP EXTENSION dblink"},
 		{"PUBLIC may read pg_stat_database", "activity privacy", projectDB, "GRANT SELECT ON pg_catalog.pg_stat_database TO PUBLIC", "REVOKE SELECT ON pg_catalog.pg_stat_database FROM PUBLIC"},
 		{"PUBLIC may run pg_stat_get_backend_dbid", "activity privacy", projectDB, "GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_get_backend_dbid(integer) TO PUBLIC", "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_stat_get_backend_dbid(integer) FROM PUBLIC"},
+		{"PUBLIC may read pg_locks", "activity privacy", projectDB, "GRANT SELECT ON pg_catalog.pg_locks TO PUBLIC", "REVOKE SELECT ON pg_catalog.pg_locks FROM PUBLIC"},
 		// V2 §10.2, §10.4, §10.8.
 		{"a descriptive database name", "metadata leak", admin, "CREATE DATABASE customer_invoices", "DROP DATABASE customer_invoices"},
 		{"no temp_file_limit", "temp_file_limit", admin, "ALTER ROLE " + role + " RESET temp_file_limit", "ALTER ROLE " + role + " SET temp_file_limit = '2GB'"},
