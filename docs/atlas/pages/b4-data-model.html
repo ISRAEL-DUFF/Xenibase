@@ -1,0 +1,143 @@
+<!--atlas
+{
+  "id": "data-model",
+  "title": "The metadata data model",
+  "part": "B",
+  "order": 4,
+  "summary": "The metadata database: the migrations and the tables they leave, sqlc and the tenant lint, how organisations are kept apart in queries, what is sealed, hashed or stored in the clear, what is kept and for how long, and how migrations run.",
+  "verified": "9d205b0d83fbf712714dea0b51e2692942b03d1d",
+  "sources": [
+    "internal/store/migrations/",
+    "internal/store/queries/",
+    "internal/store/tenant_lint_test.go",
+    "internal/store/migrate.go",
+    "internal/store/sqlc.yaml",
+    "internal/store/settings.go",
+    "internal/crypto/masterkey.go",
+    "internal/rotate/rotate.go",
+    "Xenibase — V1 Specification & Build Plan.md",
+    "Xenibase — V2 Specification & Build Plan.md",
+    "docs/operations.md"
+  ]
+}
+-->
+<h2 id="data-model--glance">The schema at a glance</h2>
+<div class="stats">
+  <div class="stat"><x-stat name="tables"/><span class="stat-k">tables after every migration</span></div>
+  <div class="stat"><x-stat name="migrations"/><span class="stat-k">migrations, numbered up to <x-stat name="migrations-latest"/></span></div>
+  <div class="stat"><x-stat name="query-files"/><span class="stat-k">query files for sqlc</span></div>
+</div>
+<p>Everything the control plane knows is in one Postgres database, separate from the clusters that hold customers' data: who the users and organisations are, where each project lives, the operations queue, backups, billing, the audit log and the settings. Customer rows never land here, apart from the query texts that query insights and the session reaper keep. Ids are random UUIDs (<code>gen_random_uuid()</code>), times are <code>timestamptz</code>, and money is integer minor units with a currency code.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Group</th><th>Main tables</th><th>Covered in</th></tr></thead>
+  <tbody>
+    <tr><td>Identity</td><td><code>users</code> (was <code>operators</code>), <code>sessions</code>, <code>auth_challenges</code>, <code>email_tokens</code>, <code>terms_versions</code>, <code>terms_acceptances</code>, <code>api_tokens</code>, <code>device_auth_requests</code>, <code>oauth_clients</code>, <code>oauth_codes</code></td><td><x-page id="identity"/></td></tr>
+    <tr><td>Tenancy</td><td><code>organizations</code>, <code>org_members</code>, <code>project_members</code>, <code>invitations</code>, <code>quota_plans</code>, <code>usage_records</code>, <code>break_glass_sessions</code>, <code>region_early_access</code></td><td><a href="#data-model--tenancy">below</a></td></tr>
+    <tr><td>Projects and infrastructure</td><td><code>projects</code>, <code>instances</code>, <code>instance_members</code>, <code>nodes</code>, <code>regions</code>, <code>read_replicas</code>, <code>project_db_users</code>, <code>project_owned_logins</code>, <code>retired_databases</code>, <code>moves</code>, <code>minor_upgrades</code>, <code>pg_versions</code>, <code>etcd_members</code>, <code>pooler_config</code>, <code>pooler_generations</code></td><td><x-page id="control-plane"/>, <x-page id="nodes-agents"/>, <x-page id="ha"/></td></tr>
+    <tr><td>Work</td><td><code>operations</code></td><td><x-page id="control-plane--queue"/></td></tr>
+    <tr><td>Backups</td><td><code>backups</code>, <code>storage_targets</code>, <code>backup_keys</code>, <code>storage_cleanups</code></td><td><x-page id="backups"/></td></tr>
+    <tr><td>Backend services</td><td><code>project_services</code>, <code>project_api_keys</code>, <code>project_jwt_keys</code>, <code>project_auth_config</code>, <code>auth_message_outbox</code>, <code>auth_hook_outbox</code>, <code>auth_mau</code>, <code>project_storage</code>, <code>api_request_logs</code>, <code>edges</code>, <code>edge_reports</code></td><td><x-page id="data-api"/>, <x-page id="project-auth"/></td></tr>
+    <tr><td>Automation</td><td><code>webhooks</code>, <code>webhook_deliveries</code>, <code>scheduled_jobs</code>, <code>job_runs</code>, <code>outbound_allowlist</code>, <code>outbound_counters</code></td><td><x-page id="webhooks-jobs"/></td></tr>
+    <tr><td>Observability</td><td><code>metric_points</code>, <code>alerts</code>, <code>query_stats</code>, <code>query_texts</code>, <code>slow_queries</code>, <code>reaped_sessions</code>, <code>incidents</code>, <code>failover_events</code>, <code>availability_minutes</code></td><td><x-page id="operations"/></td></tr>
+    <tr><td>Billing</td><td><code>billing_accounts</code>, <code>ledger_entries</code>, <code>invoices</code>, <code>payments</code>, <code>virtual_accounts</code>, <code>price_books</code>, and about 15 more</td><td><x-page id="billing"/></td></tr>
+    <tr><td>Platform</td><td><code>audit_log</code>, <code>settings</code>, <code>tickets</code>, <code>legal_documents</code>, <code>capacity_proposals</code>, <code>cost_allocations</code></td><td><a href="#data-model--audit">below</a></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="data-model--core">Projects, instances and nodes</h2>
+<p>A <code>nodes</code> row is a machine with an agent; an <code>instances</code> row is a Postgres server on it, either the node's shared cluster (one per node) or a dedicated container; a <code>projects</code> row is one database on one instance. The project row is the one the rest of the system reads most:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Column</th><th>Holds</th></tr></thead>
+  <tbody>
+    <tr><td><code>db_name</code>, <code>owner_role</code></td><td>Opaque names (<code>p_</code> plus random letters), unique across the platform. <code>alias_db_name</code> and <code>legacy_*</code> keep V1 names working during the switch.</td></tr>
+    <tr><td><code>scram_verifier</code></td><td>The owner's SCRAM-SHA-256 verifier, written into the poolers' auth file. Never the password.</td></tr>
+    <tr><td><code>org_id</code>, <code>instance_id</code>, <code>tier</code>, <code>region</code></td><td>Who owns it and where it runs.</td></tr>
+    <tr><td><code>status</code></td><td><code>provisioning</code>, <code>active</code>, <code>promoting</code>, <code>demoting</code>, <code>moving</code>, <code>upgrading</code>, <code>restoring</code>, <code>deleting</code>, <code>deleted</code>, <code>error</code>. Flows move it under the row lock.</td></tr>
+    <tr><td><code>settings</code></td><td>JSON guardrails: connection limit, pool size, timeouts, disk warning, console read-only, backup retention (<x-ref path="internal/store/settings.go" symbol="type ProjectSettings struct"><code>ProjectSettings</code></x-ref>).</td></tr>
+    <tr><td><code>deleted_at</code></td><td>Projects are never removed. Every "live" query filters <code>deleted_at IS NULL</code>, so the <code>ON DELETE CASCADE</code> on child tables never fires in practice.</td></tr>
+    <tr><td><code>manage_roles</code>, <code>allowed_cidrs</code></td><td>Release 4.2.4: role management on a dedicated project, and the IP allowlist (at most 50 networks, checked in the table).</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="data-model--tenancy">How organisations are kept apart</h2>
+<p>There is no row-level security in the metadata database. The application connects as one role that owns every table, and tenancy is enforced by the API guard (<x-page id="control-plane--guard"/>) and by the queries. Tables that belong to an organisation carry <code>org_id</code>, including child tables where it could be derived (<code>project_members</code>, <code>project_db_users</code>, <code>saved_queries</code>, <code>reaped_sessions</code>, <code>usage_records</code>, <code>audit_log</code>), so a query can scope itself without a join.</p>
+<p>Queries live in <x-ref path="internal/store/queries/"><code>internal/store/queries</code></x-ref> and sqlc turns them into typed Go in <code>internal/store</code> (<x-ref path="internal/store/sqlc.yaml"><code>sqlc.yaml</code></x-ref>; <code>make generate</code>, and CI fails on a diff). Each query either filters by <code>org_id</code> or says why it may not, in a comment the lint reads:</p>
+<x-code path="internal/store/queries/operations.sql" start="-- name: GetOperation :one" lines="3"/>
+<p><x-ref path="internal/store/tenant_lint_test.go" symbol="func TestTenantQueriesAreScoped("><code>TestTenantQueriesAreScoped</code></x-ref> splits every query file on <code>-- name:</code>, and for each query that reads or writes one of the listed tenant tables requires either the text <code>org_id</code> or a <code>-- tenant: system - &lt;reason&gt;</code> line of more than ten characters.</p>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V2 says every sqlc query on a tenant table takes <code>org_id</code> and filters by it, as defence in depth even when the handler has checked (<x-ref path="Xenibase — V2 Specification &amp; Build Plan.md" symbol="### 2.6 Enforcement">V2 2.6</x-ref>). In the code the opt-out is the common case: 579 of the 847 queries carry <code>tenant: system</code>, most of them "a project the request already authorized". For those the only check is the guard and the handler. The lint is also weaker than it reads:</p>
+  <ul>
+    <li>The list of tenant tables is fixed in the test and predates backend services. <code>project_api_keys</code>, <code>project_jwt_keys</code>, <code>project_auth_config</code>, <code>project_services</code>, <code>project_storage</code>, <code>read_replicas</code>, <code>api_request_logs</code>, <code>auth_*</code> and <code>instance_members</code> are not on it, so a new unscoped query on them passes. Today their queries happen to carry the comment anyway.</li>
+    <li>Any occurrence of <code>org_id</code> satisfies it, including <code>SELECT org_id</code> or a join condition, not only a predicate.</li>
+  </ul>
+  <p>Fix: build the list from the schema (every table with <code>org_id</code> or <code>project_id</code>), and match <code>org_id = @…</code> in the <code>WHERE</code>.</p>
+</div>
+<p>Nothing in the schema ties a child's <code>org_id</code> to its project's. <code>project_members.org_id</code> is "the project's org, for scoping", but there is no composite foreign key to <code>projects (id, org_id)</code>, and no check that the member belongs to the organisation. The code keeps them in step: <x-ref path="internal/orgs/orgs.go" symbol="func (s *Service) Transfer("><code>orgs.Transfer</code></x-ref> moves members, logins and saved queries with the project in one transaction. It leaves <code>reaped_sessions</code>, <code>editor_preferences</code> and <code>dedicated_requests</code> under the old organisation, where nobody can reach them through the project any more. A composite key (<code>UNIQUE (id, org_id)</code> on <code>projects</code>, <code>FOREIGN KEY (project_id, org_id) REFERENCES projects (id, org_id) ON UPDATE CASCADE</code>) would make the copies impossible to get wrong.</p>
+
+<h2 id="data-model--operations">The operations table</h2>
+<p><code>operations</code> is the queue described on <x-page id="control-plane--queue"/>: <code>kind</code>, <code>project_id</code> (NULL for platform work), <code>params</code> JSON, <code>status</code>, <code>attempts</code>, <code>run_after</code>, the lease (<code>locked_by</code>, <code>locked_at</code>), the step <code>log</code> as a JSON array, <code>error</code> and timestamps. Two triggers send <code>pg_notify</code> on insert and on changes to status, log or <code>run_after</code>:</p>
+<x-code path="internal/store/migrations/00001_init.sql" start="CREATE TRIGGER operations_notify_update" lines="6"/>
+<p>Each log line rewrites the row (<code>log = log || jsonb_build_array(…)</code>), and finished operations are never deleted, so the table and its TOAST grow for the life of the install.</p>
+
+<h2 id="data-model--secrets">What is sealed, hashed, or in the clear</h2>
+<p>Secrets the control plane must read back are sealed with the master key: AES-256-GCM, a key id in the header so old keys keep working after a rotation, and associated data that names the column and row (<code>"nodes.pg_admin_secret:" + id</code>), so a sealed value copied into another row does not open (<x-ref path="internal/crypto/masterkey.go" symbol="func (k *Keyring) Encrypt("><code>Keyring.Encrypt</code></x-ref>). Secrets it only needs to check are hashed.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>How</th><th>Columns</th></tr></thead>
+  <tbody>
+    <tr><td>Sealed</td><td><code>users.totp_secret</code>, <code>users.recovery_codes</code> (sealed hashes), <code>nodes.pg_admin_secret</code>, <code>instances.admin_secret</code>, <code>instances.patroni_secret</code>, <code>storage_targets.credentials</code>, <code>backup_keys.key_enc</code>, <code>project_jwt_keys.private_enc</code>, <code>project_auth_config.providers_enc</code>, <code>auth_message_outbox.message_enc</code>, <code>webhooks.secret_enc</code>, <code>previous_secret_enc</code>, <code>headers_enc</code>, <code>scheduled_jobs.spec_enc</code>, <code>device_auth_requests.sealed_token</code>, <code>auth_challenges.payload</code>, <code>operations.params.secrets</code> (until the operation ends), and blobs inside <code>settings</code> rows (agent CA and etcd CA keys, platform backup key, SMTP and alert passwords)</td></tr>
+    <tr><td>Hashed (SHA-256)</td><td><code>sessions.id</code>, <code>api_tokens.token_hash</code>, <code>email_tokens</code>, <code>invitations.token_hash</code>, <code>project_api_keys.key_hash</code>, <code>oauth_clients.client_secret_hash</code>, <code>oauth_codes.code_hash</code>, <code>nodes.registration_token</code>. These are high-entropy tokens, so a fast hash is enough. <code>users.password_hash</code> is argon2id.</td></tr>
+    <tr><td>Clear, by design</td><td>SCRAM verifiers the poolers need in their auth file: <code>projects.scram_verifier</code>, <code>legacy_scram_verifier</code>, <code>probe_verifier</code>, <code>project_services.edge_verifier</code> and <code>login_verifiers</code>, <code>project_db_users.scram_verifier</code>, <code>project_owned_logins.scram_verifier</code>. A verifier cannot be used to log in, but it does let its holder pose as the server, so a copy of the metadata database is sensitive even without the master key.</td></tr>
+    <tr><td>Clear, by accident</td><td>A rotate operation's <code>params.verifier</code> and <code>previous_verifier</code>, kept forever (<x-page id="control-plane--operations-api"/>).</td></tr>
+  </tbody>
+</table></div>
+<div class="callout risk"><span class="callout-label">Risk (high): rotating the master key skips most sealed columns</span>
+  <p><code>xenibase-server -rotate-master-key</code> re-encrypts what <x-ref path="internal/rotate/rotate.go" symbol="func collect("><code>rotate.collect</code></x-ref> lists: TOTP secrets, recovery codes, storage credentials, node and instance admin credentials, project signing keys, the operation password handoff, and five <code>settings</code> blobs. It does not list <code>backup_keys.key_enc</code>, <code>instances.patroni_secret</code>, <code>webhooks.secret_enc</code>, <code>previous_secret_enc</code> and <code>headers_enc</code>, <code>scheduled_jobs.spec_enc</code>, <code>project_auth_config.providers_enc</code>, <code>auth_message_outbox.message_enc</code>, <code>device_auth_requests.sealed_token</code>, or the etcd CA key in the <code>etcd_ca</code> setting. Its verify step checks only what it collected, so it reports success. <x-ref path="docs/operations.md" symbol="old=$(grep '^XENIBASE_MASTER_KEY=' .env | cut -d= -f2-)">The documented procedure</x-ref> then replaces the key in <code>.env</code> with the new one alone. From the next start every value above fails to open: per-project backup keys (so those projects' backups and WAL archives can no longer be decrypted or written), HA instances' Patroni and replication passwords, every webhook signature and stored header, every scheduled job, every project's auth SMTP settings and queued messages, and the etcd CA. Nothing warns until each feature is used. Fix: add every sealed column to <code>collect</code>, and add a test that finds every <code>keyring.Encrypt</code> call site's AAD prefix in <code>rotate</code> (or that seals one row of each kind, rotates, and opens them with the new key alone). Until then, keep the old key in <code>XENIBASE_MASTER_KEY_PREVIOUS</code> after a rotation.</p>
+</div>
+
+<h2 id="data-model--audit">The audit log and settings</h2>
+<p><code>audit_log</code> has the actor (user or token, or the system), the organisation and project, the action, target, details, address, user agent and outcome. Migration 00009 makes it append-only with triggers that refuse <code>UPDATE</code>, <code>DELETE</code> and <code>TRUNCATE</code>:</p>
+<x-code path="internal/store/migrations/00009_audit_append_only.sql" start="CREATE TRIGGER audit_log_no_update_delete" lines="4"/>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>The migration says rows can never be changed "even by xenibase-server itself". The server connects as the role that ran the migrations and owns the table, and the migrations grant nothing to a lesser role, so the server can <code>ALTER TABLE audit_log DISABLE TRIGGER</code> or drop it. The triggers stop mistakes, not a compromised server. Making it hold needs a separate owner for migrations and a runtime role with only <code>SELECT, INSERT</code> on <code>audit_log</code>.</p>
+</div>
+<p><code>settings</code> is a key/value table of JSON. Each service owns its keys (<code>db_host</code>, <code>mail</code>, <code>billing</code>, <code>capacity</code>, <code>alerts</code>, <code>backup_key</code>, <code>agent_ca</code>, <code>etcd_ca</code> and others), and secret fields inside are sealed blobs, as V1 §9 asks.</p>
+
+<h2 id="data-model--retention">What is kept, and for how long</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Data</th><th>Kept</th><th>By</th></tr></thead>
+  <tbody>
+    <tr><td><code>metric_points</code></td><td>Minute points 24 h, hourly points 30 days</td><td><code>PruneMetrics</code>, the metrics collector</td></tr>
+    <tr><td><code>query_stats</code>, <code>slow_queries</code>, <code>query_texts</code></td><td>Rolled up to hours after 24 h, removed after 30 days</td><td><code>PruneQueryInsights</code></td></tr>
+    <tr><td><code>api_request_logs</code>, <code>edge_reports</code></td><td>7 days</td><td>backend services' sweep</td></tr>
+    <tr><td><code>webhook_deliveries</code></td><td>7 days; unreplayed dead letters 30</td><td><code>SweepDeliveries</code></td></tr>
+    <tr><td><code>job_runs</code></td><td>30 days, at most 1,000 per job</td><td><code>SweepJobRuns</code></td></tr>
+    <tr><td><code>sessions</code>, <code>auth_challenges</code></td><td>Until idle or absolute expiry</td><td><code>sweepAuth</code>, every 15 minutes</td></tr>
+    <tr><td><code>operations</code></td><td>Forever, with parameters and step logs</td><td>nothing</td></tr>
+    <tr><td><code>audit_log</code></td><td>Forever (append-only)</td><td>nothing</td></tr>
+    <tr><td><code>reaped_sessions</code></td><td>Forever, including the tenant's own query text, after the project is deleted</td><td>nothing</td></tr>
+    <tr><td><code>projects</code> and their children</td><td>Forever (soft delete)</td><td>nothing</td></tr>
+  </tbody>
+</table></div>
+<div class="callout risk"><span class="callout-label">Risk (low): tenant query text outlives the project</span>
+  <p>When the reaper ends a long statement it records the statement's text (truncated) in <code>reaped_sessions</code>. Statements carry literals, so this is customer data, and it is kept with no limit, after the project and even the organisation are deleted, because both are soft deletes and the table's cascade never fires. The same holds for step logs in <code>operations</code>. Fix: prune <code>reaped_sessions</code> (30 days, like slow queries) and drop it with the project; prune finished operations after a set time, keeping a summary row if the history matters.</p>
+</div>
+
+<h2 id="data-model--new">Release 4.2.4's additions</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Migration</th><th>Adds</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path="internal/store/migrations/00056_region_api_domain.sql">00056</x-ref></td><td><code>regions.api_domain</code>, unique when set, so a region's projects' APIs are served by that region's edge; <code>region_early_access</code>, the organisations that may create projects in a hidden region.</td></tr>
+    <tr><td><x-ref path="internal/store/migrations/00057_manage_roles.sql">00057</x-ref></td><td><code>projects.manage_roles</code> and <code>project_owned_logins (project_id, role_name, scram_verifier)</code>, with <code>role_name</code> unique across the platform because each region's pooler auth file is one namespace. The check only requires the verifier to start with <code>SCRAM-SHA-256$</code>; the sync checks the rest.</td></tr>
+    <tr><td><x-ref path="internal/store/migrations/00058_allowed_cidrs.sql">00058</x-ref></td><td><code>projects.allowed_cidrs text[]</code>, at most 50. Canonical form is the API's job (<code>NormalizeAllowedCIDRs</code>); the column does not check it.</td></tr>
+    <tr><td><x-ref path="internal/store/migrations/00059_replica_settings.sql">00059</x-ref></td><td><code>read_replicas.hot_standby_feedback</code>, <code>max_standby_delay_s</code> (0 to 900), and when they were last applied or why not.</td></tr>
+    <tr><td><x-ref path="internal/store/migrations/00060_instance_max_connections.sql">00060</x-ref></td><td><code>instances.max_connections</code>, 20 to 5,000, default 100 for existing instances until they are resized.</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="data-model--migrations">How migrations run</h2>
+<p>Migrations are plain SQL files embedded in the binary and applied by goose when the server starts, before it serves anything (<x-ref path="internal/store/migrate.go" symbol="func MigrateTo("><code>store.MigrateTo</code></x-ref>). A Postgres session advisory lock serializes servers that start together. Each file runs in its own transaction, so a failed migration leaves the previous version. A server refuses to start on a schema newer than the newest migration it carries (<x-ref path="internal/store/migrate.go" symbol="func refuseNewerSchema("><code>refuseNewerSchema</code></x-ref>), because running there could write rows that break constraints it does not know. Each file has a Down section, used only by tests that load data at an older version. Rolling back in production means restoring the metadata backup taken before the upgrade.</p>
+<p>A few migrations change data as well as shape: 00010 turns operators into users and moves every V1 project into its owner's personal organisation, 00018 queues an <code>apply_settings</code> for every active shared project, and several add plan limits to <code>quota_plans</code>. sqlc expands <code>SELECT *</code> into named columns at generation time, so adding a column never breaks a running binary's queries.</p>
+<p>The recent migrations are safe to run on a live install. They add columns with constant defaults (no table rewrite) and small indexes, and the tables they touch have one row per project, instance or region. Adding a column with a <code>CHECK</code> still scans the table under an exclusive lock, which is fine at these sizes.</p>
+<div class="callout risk"><span class="callout-label">Risk (low): some releases cannot run old and new side by side</span>
+  <p>The upgrade is "stop, migrate, start" in practice, and the guide does it that way for one server with Compose. But nothing stops an older server that is already running when a newer one migrates (the newer-schema check runs only at start), and some migrations remove what older binaries use: 00038 renames <code>auth_email_outbox</code>, 00052 drops <code>payment_methods</code> and a <code>billing_accounts</code> column, 00025 drops a column. An install with more than one control-plane server, or a rolling restart, then has the old server's queries fail until it is replaced. Fix: split removals into a later release (expand, then contract), or have each server check the schema version periodically and stop taking work when it is newer than its own.</p>
+</div>
