@@ -285,6 +285,9 @@ type BranchSpec struct {
 	SchemaOnly bool
 	// ExpiresAt is when the hourly sweep deletes it; nil keeps it.
 	ExpiresAt *time.Time
+	// CopyFiles: the parent's stored files are copied in, after every reset
+	// too.
+	CopyFiles bool
 }
 
 // Tiers (spec §4).
@@ -495,6 +498,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 				if err := q.SetProjectBranch(ctx, store.SetProjectBranchParams{
 					ID: proj.ID, ParentProjectID: &p.Branch.ParentID, BranchSource: &p.Branch.Source,
 					BranchSchemaOnly: &p.Branch.SchemaOnly, ExpiresAt: p.Branch.ExpiresAt, SensitiveData: p.Sensitive,
+					BranchCopyFiles: p.Branch.CopyFiles,
 				}); err != nil {
 					return err
 				}
@@ -575,13 +579,26 @@ func (s *Service) Rotate(ctx context.Context, projectID uuid.UUID, by *uuid.UUID
 // name, as typed by the operator. skipFinalBackup skips the final backup
 // (spec §6.2 step 2: on by default, can be skipped).
 func (s *Service) Delete(ctx context.Context, projectID uuid.UUID, confirmName string, skipFinalBackup bool, by *uuid.UUID) (store.Operation, error) {
+	return s.DeleteChecked(ctx, projectID, by, func(p store.Project) (bool, error) {
+		if confirmName != p.Name {
+			return false, fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
+		}
+		return skipFinalBackup, nil
+	})
+}
+
+// DeleteChecked is Delete with check run on the locked project first: it
+// refuses the delete, or says whether to skip the final backup, from the
+// row as it is now (the branch expiry sweep's list may be stale).
+func (s *Service) DeleteChecked(ctx context.Context, projectID uuid.UUID, by *uuid.UUID, check func(store.Project) (skipFinalBackup bool, err error)) (store.Operation, error) {
 	var out store.Operation
 	err := s.withIdleProject(ctx, projectID, []string{StatusActive, StatusError}, func(tx pgx.Tx, p store.Project) error {
-		if confirmName != p.Name {
-			return fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
+		skipFinalBackup, err := check(p)
+		if err != nil {
+			return err
 		}
 		// A parent goes only once its branches are deleted or detached (V2 §8.4).
-		if n, err := store.New(tx).CountLiveBranches(ctx, &p.ID); err != nil {
+		if n, err := store.New(tx).CountLiveBranches(ctx, store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err != nil {
 			return err
 		} else if n > 0 {
 			return fmt.Errorf("%w: the project has %d branch(es); delete or detach them first", ErrConflict, n)

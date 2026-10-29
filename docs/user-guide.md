@@ -106,8 +106,15 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   after a TTL (1 hour to 30 days, 7 days by default); the creator is emailed
   a day before.
 - **Reset** refills it from the parent, keeping its name, URL and
-  passwords, so `.env` files and pipelines keep working.
+  passwords, so `.env` files and pipelines keep working. Since it copies
+  the parent again, it needs the developer role on the parent as well as
+  on the branch, and refilling a full-data branch of a project marked
+  *contains sensitive data* needs the parent's admin role. Removing
+  someone from a project removes them from its branches too.
 - **Detach** makes it an ordinary project (which can then be promoted).
+  It counts as a new project: it needs permission to create projects in
+  the organisation and room in its projects quota, and waits until the
+  branch is active with nothing in progress.
 - **With backend services** on the parent, the branch gets an API of its
   own: a new URL (ref), new publishable and secret keys and a new signing
   key, so neither's keys or users' tokens work on the other. It keeps the
@@ -119,8 +126,12 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   `xenibase branch create --env` give `XENIBASE_API_URL`,
   `XENIBASE_PUBLISHABLE_KEY` and `XENIBASE_SECRET_KEY`. Stored files are not
   copied unless you ask (**Copy its stored files too**, or `--copy-files`):
-  they are then copied in the background and count toward file storage.
-- A branch can't have branches. Its parent's webhooks and jobs are not
+  they are then copied in the background, again after every reset, and
+  count toward file storage. A reset removes the files the branch stored
+  that its refilled data no longer names, its own uploads included.
+- A branch can't have branches, and stays in its parent's organisation:
+  a branch, or a project with branches, can't be transferred (detach or
+  delete the branches first). Its parent's webhooks and jobs are not
   copied. Branches count against your organisation's branch and storage
   quotas, and have no nightly backups unless you turn them on.
 

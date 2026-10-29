@@ -19,6 +19,57 @@ bundle share one version (spec §11.5).
   `docs/user-guide.md` ("Connections").
 
 ### Fixed
+- **A branch reset no longer copies a parent the caller has lost.** Reset
+  checked only the branch, so someone removed from the parent could keep
+  refilling a branch with its current data, and a full-data branch of a
+  parent marked sensitive afterwards kept refilling for any developer. A
+  reset now needs `project.branch` on the parent too, and its admin role
+  for a full copy of sensitive data (403 otherwise); a token restricted to
+  the parent still covers its branches. Removing someone from a project
+  also removes them from its live branches and drops their logins there.
+- **A transfer can no longer split a branch from its parent's
+  organisation.** Transferring a branch, or a project with live branches,
+  is refused with a 409; before, the other organisation's admins could
+  reset a moved branch and keep receiving the parent's data. A branch whose
+  parent is in another organisation is no longer filled or reset (detach
+  or delete it), and a parent's branch count only counts its own
+  organisation's branches.
+- **Detaching a branch now gets a new project's checks.** It needed only
+  the developer role on the branch, so create-then-detach went past the
+  projects quota, and a developer could own a project in an organisation
+  whose members may not create them. Detach now needs `org.create_project`
+  and room in the projects quota (409 `quota_exceeded`), and runs under the
+  branch's lock: it is refused (409) while a reset or anything else is in
+  progress, or the branch isn't active.
+- **A branch's file copy no longer succeeds with files left out.** Every
+  copy error (throttling, the network, the operation's deadline) counted
+  as "not found in the parent". Only a file the parent no longer has
+  counts as missing now; other failures fail the attempt once the rest were
+  tried, and the retry copies only what is left.
+- **A branch reset now copies files again and removes the ones it
+  orphaned.** A reset of a branch made with `copy_files` brought the
+  parent's file rows but not their files, and the files already under the
+  branch's prefix (earlier copies, its own uploads) were left unbilled with
+  no row naming them. Branches now remember `copy_files` (**migration
+  00077** adds `projects.branch_copy_files`, filled from the create
+  operation while that is kept); after every reset the background
+  `copy_branch_files` puts the files no refilled row names on the garbage
+  list for the storage sweep, then copies the parent's files again.
+- **The branch expiry sweep no longer deletes a branch saved at the last
+  minute.** It deleted from a list read at the start of the pass, so a
+  branch extended or detached in between was deleted anyway, without the
+  final backup turned on meanwhile. Each delete now checks the locked row
+  is still an expired branch, and takes the final-backup choice from it.
+- **Branch resets count against operations in flight.** They were counted
+  but never checked, so every branch could be reset at once, each a full
+  dump of the parent with a live source. A reset beyond the plan's limit
+  is refused with 409 `quota_exceeded`, as a new branch is.
+- **A branch create that failed after it went live no longer drops it.**
+  Backend services were turned on after the branch was published, so a
+  failure there retried the whole create, dropping the live database under
+  its clients, and a second failure left an active branch whose API keys
+  never worked. They are now turned on before the branch is published, and
+  a retry that finds the branch active only queues its file copy.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

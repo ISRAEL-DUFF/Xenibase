@@ -203,7 +203,8 @@ or `<parent>/<name>`. `branch create --env` prints `DATABASE_URL=…`,
 lines for `$GITHUB_ENV` or a `.env` file, and, when the parent has
 backend services, the branch's own `XENIBASE_API_URL=…`,
 `XENIBASE_PUBLISHABLE_KEY=…` and `XENIBASE_SECRET_KEY=…`; `--copy-files`
-copies the parent's stored files into the branch in the background;
+copies the parent's stored files into the branch in the background, and
+again after every `branch reset`;
 `--replace` deletes a branch of the same name first.
 
 `policies list <p> [--table t]` shows each table's row-level security

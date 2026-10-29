@@ -33,7 +33,8 @@ func (s *Server) branchError(w http.ResponseWriter, what string, err error) {
 	case errors.Is(err, branching.ErrForbidden):
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	default:
-		s.provisionError(w, what, err)
+		// Quotas, then provisioning's errors.
+		s.tenancyError(w, what, err)
 	}
 }
 
@@ -182,10 +183,17 @@ func (s *Server) ResetBranch(w http.ResponseWriter, r *http.Request, id gen.Proj
 	}
 	a := auditFrom(r.Context())
 	a.target("project", id.String())
-	p := branching.ResetParams{BranchID: id, By: userID(r.Context())}
+	// The parent is checked again in Reset: the caller must still be
+	// allowed to branch it (a token restricted to it covers its branches).
+	p := branching.ResetParams{BranchID: id, By: userID(r.Context()), Actor: accessFrom(r.Context()).Actor}
 	if req.Source != nil {
 		p.Source = string(*req.Source)
 		a.set("source", p.Source)
+	}
+	// A reset is a copy of the parent, like a new branch: it counts
+	// towards operations in flight.
+	if s.tenancy != nil && !s.checkQuota(w, s.tenancy.CheckOperation(r.Context(), accessFrom(r.Context()).OrgID)) {
+		return
 	}
 	op, err := s.branches.Reset(r.Context(), p)
 	if err != nil {
@@ -201,7 +209,13 @@ func (s *Server) DetachBranch(w http.ResponseWriter, r *http.Request, id gen.Pro
 		return
 	}
 	auditFrom(r.Context()).target("project", id.String())
-	p, err := s.branches.Detach(r.Context(), id)
+	// The checks a new project gets: org.create_project and the projects
+	// quota, under the branch's lock.
+	dp := branching.DetachParams{ID: id, Actor: accessFrom(r.Context()).Actor}
+	if s.tenancy != nil {
+		dp.CheckCreateProject = s.tenancy.CheckCreateProject
+	}
+	p, err := s.branches.Detach(r.Context(), dp)
 	if err != nil {
 		s.branchError(w, "detach branch", err)
 		return

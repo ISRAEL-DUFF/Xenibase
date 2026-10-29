@@ -986,6 +986,7 @@ type Project struct {
 	IntegratorRoles     []string
 	ManageRoles         bool
 	AllowedCidrs        []string
+	BranchCopyFiles     bool
 }
 
 type ProjectApiKey struct {
