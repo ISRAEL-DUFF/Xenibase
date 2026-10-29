@@ -580,3 +580,15 @@ func expand(stmt string, p store.Project) string {
 		"{{owner}}", q(p.OwnerRole),
 	).Replace(stmt)
 }
+
+// SchemaStatements are every version's statements for p, in order: what
+// applySchema runs, for tests that build a project database by hand.
+func SchemaStatements(p store.Project) []string {
+	var out []string
+	for _, v := range schemaVersions {
+		for _, st := range v.stmts {
+			out = append(out, expand(st, p))
+		}
+	}
+	return out
+}

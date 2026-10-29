@@ -150,7 +150,9 @@ func (e *Edge) signedDownload(c *call, bucket, path string) {
 		return
 	}
 	t, ok := files.Verify(sc.SigningSecret, c.r.URL.Query().Get("token"), files.TokenGet, c.p.cfg.Ref, bucket, path, time.Now())
-	if !ok {
+	// A token with a transform is for that render only (/render/sign/):
+	// a signed thumbnail must not open the original.
+	if !ok || t.Transform != nil {
 		c.fail(http.StatusBadRequest, "invalid_signature", "the URL's token is invalid or has expired")
 		return
 	}

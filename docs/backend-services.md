@@ -731,7 +731,7 @@ too.
 | `GET /storage/v1/object/<bucket>/<path>` | Download, as the caller's policies allow; `Range` works |
 | `GET /storage/v1/object/info/<bucket>/<path>` | The file's metadata |
 | `GET /storage/v1/public/<bucket>/<path>` | A public bucket's file, no key |
-| `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size) |
+| `POST /storage/v1/object/sign/<bucket>/<path>` | A signed download URL (`expires_in` seconds, 1 hour by default, 7 days at most; `transform` for an image size, a `/render/sign/` URL that serves only that render, never the original) |
 | `POST /storage/v1/object/sign/<bucket>` | Signed URLs for several `paths` |
 | `POST /storage/v1/object/upload/sign/<bucket>/<path>` | A signed upload URL (2 hours) for a client without a session |
 | `POST /storage/v1/upload/<bucket>/<path>` | Start a large upload (`size`, `mime_type`) |

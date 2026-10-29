@@ -331,6 +331,11 @@ bundle share one version (spec §11.5).
   output and restored the result even after a failure; it now uses
   `--out`, which leaves no file on failure, and `&&`
   (`docs/disaster-recovery.md`).
+- **A signed thumbnail URL opened the original.** A signed URL with a
+  transform carried an ordinary download token, so changing `render/sign`
+  to `object/sign` in it downloaded the full-size file. A token with a
+  transform now serves only that render (`400 invalid_signature` on the
+  download route).
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
