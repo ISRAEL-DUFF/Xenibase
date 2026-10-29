@@ -88,7 +88,7 @@ ID=$(curl -s -X POST localhost:8080/api/v1/dev/operations \
 curl -N localhost:8080/api/v1/operations/$ID/stream
 ```
 
-Migrations run automatically on start. The dev server prints the first-run
+Migrations run automatically on start (writing one: [docs/migrations.md](docs/migrations.md)). The dev server prints the first-run
 setup code in its log; `XENIBASE_SETUP_CODE` fixes it instead.
 
 ## Operator authentication

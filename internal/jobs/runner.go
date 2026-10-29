@@ -36,6 +36,9 @@ type RunnerConfig struct {
 	RetryMax  time.Duration
 	// WorkerID identifies this process in locked_by. Default host-pid-rand.
 	WorkerID string
+	// Paused, when set and true, stops new claims (running operations
+	// finish): the schema is newer than this release (store.SchemaWatcher).
+	Paused func() bool
 }
 
 func (c *RunnerConfig) setDefaults() {
@@ -147,6 +150,9 @@ func (r *Runner) Run(ctx context.Context) {
 }
 
 func (r *Runner) claim(ctx context.Context) (store.Operation, bool) {
+	if r.cfg.Paused != nil && r.cfg.Paused() {
+		return store.Operation{}, false
+	}
 	op, err := r.q.ClaimOperation(ctx, store.ClaimOperationParams{Worker: r.cfg.WorkerID, Kinds: r.names})
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) && ctx.Err() == nil {

@@ -334,6 +334,13 @@ below say what each version changed.
 
 ## Upgrading from 4.2.4
 
+- **Old and new servers side by side**: a xenibase-server that finds the
+  metadata database migrated by a newer release while it runs (checked
+  every 30 seconds) logs `schema check: no longer taking operations`, stops
+  claiming operations and answers `/readyz` with 503 until it is replaced.
+  With more than one control-plane server, put `/readyz` in the load
+  balancer's health check, and upgrade them one after another.
+
 - **Projects' children keep their organisation** (migrations 00068 and
   00069): the tables that carry a project's `org_id` (members, their
   logins, saved queries, reaped sessions, editor preferences, dedicated

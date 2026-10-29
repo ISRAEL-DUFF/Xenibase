@@ -60,6 +60,7 @@ type Server struct {
 	exporting map[uuid.UUID]int
 	log       *slog.Logger
 	db        DB
+	schema    func() error
 	audit     *auditlog.Writer
 	streamer  *jobs.Streamer
 	projects  *provision.Service
@@ -128,6 +129,9 @@ type Options struct {
 	// shutdown). Nil means one of NewHandler's own, retried until
 	// StreamCtx ends.
 	Audit *auditlog.Writer
+	// Schema is non-nil while the metadata schema is newer than this
+	// release (store.SchemaWatcher.Err); /readyz then answers 503.
+	Schema func() error
 	// Projects runs provisioning; nil disables the projects endpoints.
 	Projects *provision.Service
 	// UI is the web UI build output; UIIndex names its entry document.
@@ -237,7 +241,7 @@ func NewHandler(opts Options) http.Handler {
 	if opts.DB != nil && opts.Notifier != nil {
 		s.streamer = jobs.NewStreamer(streamCtx, opts.DB, opts.Notifier, opts.Logger)
 	}
-	s.audit = opts.Audit
+	s.audit, s.schema = opts.Audit, opts.Schema
 	if s.audit == nil && opts.DB != nil {
 		s.audit = auditlog.New(opts.DB, opts.Logger, auditlog.Config{})
 		go s.audit.Run(streamCtx)
@@ -299,6 +303,12 @@ func (s *Server) GetReadyz(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.Ping(ctx); err != nil {
 			s.log.Warn("readiness check failed", "err", err)
 			writeJSON(w, http.StatusServiceUnavailable, gen.Health{Status: "metadata database unavailable"})
+			return
+		}
+	}
+	if s.schema != nil {
+		if err := s.schema(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, gen.Health{Status: "metadata schema is newer than this server"})
 			return
 		}
 	}

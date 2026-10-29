@@ -178,6 +178,12 @@ func run() error {
 	defer stopBG()
 	var bg sync.WaitGroup
 
+	// Migrate refused a newer schema just now; a newer release migrating
+	// later (a rolling upgrade) is noticed here.
+	schema := store.NewSchemaWatcher(pool, log)
+	bg.Add(1)
+	go func() { defer bg.Done(); schema.Run(bgCtx, 30*time.Second) }()
+
 	settingsStore := settings.New(pool, cfg.Public.Host)
 	if err := settingsStore.Load(ctx); err != nil {
 		return err
@@ -575,7 +581,9 @@ func run() error {
 	}
 
 	notifier := jobs.NewNotifier(pool, log)
-	runner := jobs.NewRunner(pool, notifier, log, jobs.RunnerConfig{Concurrency: cfg.Workers}, kinds)
+	runner := jobs.NewRunner(pool, notifier, log, jobs.RunnerConfig{
+		Concurrency: cfg.Workers, Paused: func() bool { return schema.Err() != nil },
+	}, kinds)
 	bg.Add(2)
 	go func() { defer bg.Done(); notifier.Run(bgCtx) }()
 	go func() { defer bg.Done(); runner.Run(bgCtx) }()
@@ -600,6 +608,7 @@ func run() error {
 		Logger:       log,
 		DB:           pool,
 		Audit:        auditWriter,
+		Schema:       schema.Err,
 		Notifier:     notifier,
 		DevEndpoints: cfg.DevEndpoints,
 		StreamCtx:    bgCtx,
