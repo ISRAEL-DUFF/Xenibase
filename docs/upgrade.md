@@ -347,6 +347,15 @@ below say what each version changed.
   Edge nodes created before the upgrade carry the platform-wide secret in
   their cloud-init: issue them credentials too, and if any of them served
   a region with its own domain, rotate `XENIBASE_EDGE_SECRET` afterwards.
+- **Pooler hosts no longer assign the floating IP.** xenibase-server's
+  arbiter now moves it to the host keepalived makes MASTER, so make sure
+  xenibase-server has `XENIBASE_FLOATING_IP_ID` and a Hetzner token
+  ([edge poolers](edge-poolers.md)) before upgrading the pooler hosts. Then
+  remove `XENIBASE_AGENT_HETZNER_TOKEN` and `XENIBASE_AGENT_FLOATING_IP_ID`
+  from each host's `.env` (an agent that still has them logs a warning and
+  ignores them) and revoke that token in Hetzner if nothing else uses it. To
+  keep agent-side assignment, which also fails over while xenibase-server is
+  down, set `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true` instead.
 
 ## Rolling back
 

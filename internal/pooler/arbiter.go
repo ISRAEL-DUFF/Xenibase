@@ -35,6 +35,9 @@ func (h HostView) healthy() bool { return h.Reachable && h.Ready }
 type Decision struct {
 	// AssignTo is the host the floating IP should move to, if it must move.
 	AssignTo *HostView
+	// Follow: AssignTo is keepalived's MASTER, so the move is keepalived's
+	// failover and happens without the grace checks.
+	Follow bool
 	// Holder is the host the floating IP routes to now (nil if none or an
 	// unknown server).
 	Holder *HostView
@@ -44,18 +47,23 @@ type Decision struct {
 	NoHealthy bool
 }
 
-// Decide is the arbiter's rule (V3 §2.1). The floating IP stays where it
-// is while that host is healthy, even if keepalived disagrees: keepalived's
-// own claim moves it within seconds, and fighting it would flap. When the
-// holder is unhealthy, unknown, or the IP is unassigned, it goes to a
-// healthy host, preferring the one keepalived made MASTER.
+// Decide is the arbiter's rule (V3 §2.1). The pooler hosts' agents no
+// longer assign the floating IP themselves (that needs a Hetzner token on
+// an internet-facing host), so the arbiter follows keepalived: when one
+// healthy host is MASTER and the IP is elsewhere, it moves there at once
+// (Follow). Otherwise the IP stays where it is while that host is healthy;
+// with two MASTERs (split brain) it is not moved. When the holder is
+// unhealthy, unknown, or the IP is unassigned, it goes to a healthy host,
+// preferring the one keepalived made MASTER.
 func Decide(hosts []HostView, holder string, manageIP bool) Decision {
 	var d Decision
 	masters, healthy := 0, 0
+	var master *HostView
 	for i := range hosts {
 		h := &hosts[i]
 		if h.Reachable && h.VRRP == "MASTER" {
 			masters++
+			master = h
 		}
 		if h.healthy() {
 			healthy++
@@ -66,6 +74,10 @@ func Decide(hosts []HostView, holder string, manageIP bool) Decision {
 	}
 	d.SplitBrain = masters > 1
 	d.NoHealthy = len(hosts) > 0 && healthy == 0
+	if manageIP && masters == 1 && master.healthy() && master.ServerID != "" && master.ServerID != holder {
+		d.AssignTo, d.Follow = master, true
+		return d
+	}
 	if !manageIP || (d.Holder != nil && d.Holder.healthy()) {
 		return d
 	}
@@ -317,7 +329,7 @@ func (a *Arbiter) tickRegion(ctx context.Context, hs *hostSet, region string, en
 		rs.badChecks++
 		bad := rs.badChecks
 		a.mu.Unlock()
-		if bad >= a.Grace {
+		if d.Follow || bad >= a.Grace {
 			to := *d.AssignTo
 			from := "nobody"
 			if d.Holder != nil {
@@ -329,13 +341,21 @@ func (a *Arbiter) tickRegion(ctx context.Context, hs *hostSet, region string, en
 			if err != nil {
 				a.log.Error("could not move the floating IP", "to", to.Name, "err", err)
 			} else {
-				a.log.Warn("moved the floating IP: keepalived did not", "from", from, "to", to.Name)
-				a.m.event(ctx, &to.ID, "reassigned", map[string]any{"from": from, "to": to.Name, "by": "arbiter"})
 				holder = to.ServerID
 				a.mu.Lock()
 				rs.badChecks = 0
-				rs.lastHolder = holder
+				if !d.Follow {
+					rs.lastHolder = holder
+				}
 				a.mu.Unlock()
+				if d.Follow {
+					// keepalived's failover: the next check records it as
+					// took_ip, as when an agent assigned it.
+					a.log.Info("moved the floating IP to keepalived's MASTER", "from", from, "to", to.Name)
+				} else {
+					a.log.Warn("moved the floating IP: keepalived did not", "from", from, "to", to.Name)
+					a.m.event(ctx, &to.ID, "reassigned", map[string]any{"from": from, "to": to.Name, "by": "arbiter"})
+				}
 			}
 		}
 	} else {

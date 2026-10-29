@@ -49,6 +49,12 @@ bundle share one version (spec §11.5).
   which doesn't name theirs. xenibase-server now keeps one per region, in the
   `XENIBASE_POOLER_TLS` mode, in the region's directory. In `files` mode
   the certificate must name every region's hostname (`docs/regions.md`).
+- **No Hetzner token on pooler hosts.** The agent on each internet-facing
+  pooler host held a full-access Hetzner token to assign the floating IP.
+  xenibase-server's arbiter now moves it to keepalived's MASTER and the
+  agent only reports its state; `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`
+  keeps agent-side assignment (faster failover while the control plane is
+  down). See `docs/upgrade.md`.
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
 

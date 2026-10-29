@@ -20,7 +20,9 @@ func TestDecide(t *testing.T) {
 		none     bool
 	}{
 		{"healthy holder stays", []HostView{up("a", "1", "MASTER"), up("b", "2", "BACKUP")}, "1", true, "", false, false},
-		{"healthy holder stays even if keepalived prefers the other", []HostView{up("a", "1", "BACKUP"), up("b", "2", "MASTER")}, "1", true, "", false, false},
+		// Agents no longer assign the IP: keepalived's MASTER gets it.
+		{"keepalived's MASTER takes it from a healthy holder", []HostView{up("a", "1", "BACKUP"), up("b", "2", "MASTER")}, "1", true, "b", false, false},
+		{"a MASTER that can't serve doesn't take it", []HostView{up("a", "1", "BACKUP"), stale("b", "2", "MASTER")}, "1", true, "", false, false},
 		{"dead holder moves to the healthy host", []HostView{down("a", "1"), up("b", "2", "BACKUP")}, "1", true, "b", false, false},
 		{"stale holder moves to the current host", []HostView{stale("a", "1", "MASTER"), up("b", "2", "BACKUP")}, "1", true, "b", false, false},
 		{"unassigned goes to keepalived's MASTER", []HostView{up("a", "1", "BACKUP"), up("b", "2", "MASTER")}, "", true, "b", false, false},
