@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -16,7 +17,8 @@ import (
 // failed download instead of a complete-looking truncated archive; one
 // that fails before it is an ordinary error response.
 func TestDownloadFailingMidStreamIsAborted(t *testing.T) {
-	var interrupted error
+	// The handler runs on the server's goroutine: hand the error over.
+	interrupted := make(chan error, 1)
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Get("/{when}", func(w http.ResponseWriter, req *http.Request) {
@@ -29,7 +31,7 @@ func TestDownloadFailingMidStreamIsAborted(t *testing.T) {
 				}
 			}
 			return errors.New("chunk 3 failed authentication")
-		}, func(err error) { interrupted = err })
+		}, func(err error) { interrupted <- err })
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		}
@@ -46,7 +48,9 @@ func TestDownloadFailingMidStreamIsAborted(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a download cut short read as complete: %d, %q", res.StatusCode, body)
 	}
-	if interrupted == nil {
+	select {
+	case <-interrupted:
+	case <-time.After(5 * time.Second):
 		t.Fatal("the interruption was not reported")
 	}
 
