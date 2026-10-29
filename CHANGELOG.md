@@ -154,6 +154,10 @@ bundle share one version (spec §11.5).
   claimed failed with "xenibase-server restarted?" and the import rolled
   back, as did any retry. They now travel with the operation, encrypted
   with the master key, and are removed when it ends.
+- Nothing pinned the OpenPGP keys derived from the backup key and project
+  keys, which are never stored: a crypto library update that derived them
+  differently would have left every WAL-G archive and project-key backup
+  unreadable, unnoticed until a restore. A test now fixes them.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
