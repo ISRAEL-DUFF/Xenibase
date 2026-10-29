@@ -198,9 +198,3 @@ func (s *Service) DestroyScratch(ctx context.Context, key uuid.UUID) {
 		}
 	}
 }
-
-// RandomPITRSource picks a running dedicated project with a recorded base
-// backup, for the restore test.
-func (s *Service) RandomPITRSource(ctx context.Context) (store.Project, error) {
-	return store.New(s.db).RandomProjectWithBaseBackup(ctx)
-}
