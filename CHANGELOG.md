@@ -21,10 +21,37 @@ bundle share one version (spec §11.5).
 ### Fixed
 - `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
   the new standby streaming, and failed on a busy host; it now waits.
+- An audit row the metadata database refused was only logged. It is now
+  retried until written (in order, with the request's time), and `/metrics`
+  counts failures, the backlog and rows given up on, which are logged in full
+  (`docs/operations.md`, "The audit log").
+- The audit log's append-only triggers were said to hold "even against
+  xenibase-server itself"; the server owns the table and could disable them.
+  The migration's comment and `docs/security-review.md` now say what they
+  guarantee.
+- The tenant lint's table list missed every backend services table and more,
+  and any mention of `org_id` passed. It now reads the tables from the
+  migrations and requires a real `org_id` predicate.
+- Transferring a project left its reaped sessions, editor preferences and
+  dedicated requests under the old organisation. Every child that carries the
+  project's `org_id` now follows it by a foreign key.
+- Reaped statements (with the tenant's statement text) and finished
+  operations' parameters and step logs were kept forever. Reaped statements
+  now go after 30 days and with their project, and operations keep a summary
+  after 90 days (`docs/operations.md`, "What is kept").
+- A server already running when a newer release migrated the database kept
+  taking operations. It now stops, and answers `/readyz` with 503, within 30
+  seconds. `docs/migrations.md` sets the expand-then-contract rule.
+- Each call to a node's agent opened a new TLS connection; calls now reuse one
+  per node.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
+- Migrations 00068 and 00069 move children an earlier transfer left behind to
+  their project's organisation and add the keys; 00070 builds two indexes
+  concurrently for the retention sweep (`docs/upgrade.md`, "Upgrading from
+  4.2.4").
 
 ## v4.2.4
 
