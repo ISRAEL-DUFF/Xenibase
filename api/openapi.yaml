@@ -11629,7 +11629,10 @@ components:
           type: boolean
         hook_secret:
           type: string
-          description: Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
+          description: Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+        hook_secret_set:
+          type: boolean
+          description: Whether the project has a hook secret (for those who aren't shown it).
         hook_role:
           type: string
           description: The role Postgres hooks run as; grant it what they read.

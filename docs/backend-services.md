@@ -556,7 +556,8 @@ A failing custom-claims hook fails the sign-in (`500`), so test it before
 turning it on. Webhooks are signed with the project's **hook secret**
 (`Xenibase-Signature`, the same scheme as database webhooks), go through the
 organisation's outbound rules, and are listed with their results under
-Authentication → Hooks.
+Authentication → Hooks. Only project admins see the secret (developers see
+that it is set); an admin can rotate it there.
 
 ### Captcha
 

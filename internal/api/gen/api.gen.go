@@ -4489,9 +4489,12 @@ type AuthConfig struct {
 	// HookRole The role Postgres hooks run as; grant it what they read.
 	HookRole *string `json:"hook_role,omitempty"`
 
-	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
-	HookSecret         *string `json:"hook_secret,omitempty"`
-	MonthlyActiveUsers int64   `json:"monthly_active_users"`
+	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+	HookSecret *string `json:"hook_secret,omitempty"`
+
+	// HookSecretSet Whether the project has a hook secret (for those who aren't shown it).
+	HookSecretSet      *bool `json:"hook_secret_set,omitempty"`
+	MonthlyActiveUsers int64 `json:"monthly_active_users"`
 
 	// OauthCallbackUrl The redirect URI to register with OAuth providers.
 	OauthCallbackUrl *string          `json:"oauth_callback_url,omitempty"`

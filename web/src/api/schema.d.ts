@@ -7592,8 +7592,10 @@ export interface components {
                 [key: string]: boolean;
             };
             captcha_secret_set?: boolean;
-            /** @description Signs webhook hooks (Xenibase-Signature); set once a hook URL is. */
+            /** @description Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services). */
             hook_secret?: string;
+            /** @description Whether the project has a hook secret (for those who aren't shown it). */
+            hook_secret_set?: boolean;
             /** @description The role Postgres hooks run as; grant it what they read. */
             hook_role?: string;
             phone?: {

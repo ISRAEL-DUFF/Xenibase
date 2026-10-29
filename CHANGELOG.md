@@ -31,6 +31,13 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Only project admins see the auth hook signing secret.** The auth
+  settings (`GET …/auth/config`) are readable by developers and `read`
+  tokens, and they carried the `whsec_` secret in full, so anyone with
+  them could forge hook events the project's servers trust. The secret is
+  now included only for callers who may change the settings
+  (`project.services`); everyone else gets the new `hook_secret_set`, and
+  Authentication → Hooks shows "Set".
 - **Email codes are capped per address.** Beyond one a minute an address
   could be sent codes without limit, so with the project's own SMTP a
   chosen user's sign-in code could take 7,200 guesses a day. An address
