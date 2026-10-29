@@ -748,20 +748,41 @@ func (s *Service) BaseBackup(ctx context.Context, p store.Project, opID *uuid.UU
 		return store.Backup{}, err
 	}
 	// Retention happened in WAL-G; forget backups it no longer lists.
-	if list, err := agent.BaseBackups(ctx, agentKey(inst)); err == nil {
-		keep := map[string]bool{}
-		for _, l := range list {
-			keep[l.Name] = true
-		}
-		rows, _ := q.ListBaseBackups(ctx, store.ListBaseBackupsParams{ProjectID: &p.ID, WalgPrefix: inst.WalgPrefix})
-		for _, r := range rows {
-			if !keep[r.ObjectKey] {
-				_ = q.MarkBackupDeleted(ctx, r.ID)
-			}
-		}
+	list, err := agent.BaseBackups(ctx, agentKey(inst))
+	if err != nil {
+		_ = log.Warn(ctx, "backup", "could not list the archive's base backups, so none is forgotten: %v", err)
+	} else if err := s.forgetUnlisted(ctx, p, inst, b.Name, list, log); err != nil {
+		_ = log.Warn(ctx, "backup", "could not forget the base backups WAL-G deleted: %v", err)
 	}
 	return row, log.Info(ctx, "backup", "base backup %s: %s compressed (%s of data) in %s", b.Name,
 		human(b.CompressedSize), human(b.UncompressedSize), (time.Duration(res.DurationMS) * time.Millisecond).Round(time.Millisecond))
+}
+
+// forgetUnlisted marks deleted the project's base backups under the
+// instance's archive that WAL-G's listing no longer has. A listing without
+// taken, the backup just made, is incomplete (an older agent that read a
+// failed listing as empty, or a store that lists late) and forgets nothing.
+func (s *Service) forgetUnlisted(ctx context.Context, p store.Project, inst store.Instance, taken string, list []agentapi.WALGBackup, log *jobs.StepLogger) error {
+	keep := map[string]bool{}
+	for _, l := range list {
+		keep[l.Name] = true
+	}
+	if !keep[taken] {
+		return log.Warn(ctx, "backup", "the archive's listing lacks %s, so no base backup is forgotten", taken)
+	}
+	q := store.New(s.db)
+	rows, err := q.ListBaseBackups(ctx, store.ListBaseBackupsParams{ProjectID: &p.ID, WalgPrefix: inst.WalgPrefix})
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if !keep[r.ObjectKey] {
+			if err := q.MarkBackupDeleted(ctx, r.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func human(n int64) string {

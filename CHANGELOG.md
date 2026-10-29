@@ -123,6 +123,12 @@ bundle share one version (spec §11.5).
   original or a copy, between two existing ones are refused too. If two of
   your targets already share a place, send new backups to one of them;
   don't change either's prefix, which leaves the backups on it unreachable.
+- **One failed WAL-G listing forgot every base backup.** The agent read a
+  failed `wal-g backup-list` as an empty archive, and the base backup that
+  followed it marked all of the project's base backups deleted, so its
+  point-in-time window restarted at the next night's backup. A failed
+  listing is now an error, and a listing without the backup just taken
+  forgets nothing.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

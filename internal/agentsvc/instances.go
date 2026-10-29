@@ -529,11 +529,23 @@ func lastLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// Backups lists the instance's base backups, oldest first.
+// Backups lists the instance's base backups, oldest first. A listing that
+// fails is an error, not an empty archive: the control plane forgets the
+// base backups a listing lacks.
 func (in *instances) Backups(ctx context.Context, id string) ([]agentapi.WALGBackup, error) {
-	r, err := in.walgShell(ctx, id, `wal-g backup-list --json --detail 2>/dev/null || true`)
+	r, err := in.walgShell(ctx, id, `wal-g backup-list --json --detail`)
+	return parseBackupList(r, err)
+}
+
+// parseBackupList reads wal-g backup-list --json --detail. An archive with
+// no backups yet lists nothing; some WAL-G releases say so on stderr with
+// a failing exit, which is still an empty list.
+func parseBackupList(r docker.ExecResult, err error) ([]agentapi.WALGBackup, error) {
 	if err != nil {
-		return nil, err
+		if r.ExitCode != 0 && strings.Contains(r.Stderr, "No backups found") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("wal-g backup-list: %w", err)
 	}
 	out := strings.TrimSpace(r.Stdout)
 	if out == "" || out == "null" {
@@ -547,6 +559,20 @@ func (in *instances) Backups(ctx context.Context, id string) ([]agentapi.WALGBac
 	return list, nil
 }
 
+// newBackup is the backup a backup-push begun at start made: the newest
+// listed, which must have started since (a minute's slack for clocks). A
+// listing without it would report an older backup as the new one.
+func newBackup(list []agentapi.WALGBackup, start time.Time) (agentapi.WALGBackup, error) {
+	if len(list) == 0 {
+		return agentapi.WALGBackup{}, errors.New("wal-g reported success but lists no backups")
+	}
+	b := list[len(list)-1]
+	if b.StartTime.Before(start.Add(-time.Minute)) {
+		return agentapi.WALGBackup{}, fmt.Errorf("wal-g reported success but its newest listed backup, %s, started before this one", b.Name)
+	}
+	return b, nil
+}
+
 // Backup takes a base backup (spec §6.4) and applies retention.
 func (in *instances) Backup(ctx context.Context, id string, req agentapi.WALGBackupRequest) (agentapi.WALGBackupResult, error) {
 	defer in.lock(id)()
@@ -558,10 +584,11 @@ func (in *instances) Backup(ctx context.Context, id string, req agentapi.WALGBac
 	if err != nil {
 		return agentapi.WALGBackupResult{}, err
 	}
-	if len(list) == 0 {
-		return agentapi.WALGBackupResult{}, errors.New("wal-g reported success but lists no backups")
+	newest, err := newBackup(list, start)
+	if err != nil {
+		return agentapi.WALGBackupResult{}, err
 	}
-	res := agentapi.WALGBackupResult{Backup: list[len(list)-1], DurationMS: time.Since(start).Milliseconds()}
+	res := agentapi.WALGBackupResult{Backup: newest, DurationMS: time.Since(start).Milliseconds()}
 	if req.RetainFull > 0 {
 		r, err := in.walgShell(ctx, id, fmt.Sprintf(`wal-g delete retain FULL %d --confirm 2>&1`, req.RetainFull))
 		if err != nil {
