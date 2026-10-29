@@ -383,6 +383,18 @@ below say what each version changed.
   upgrade; the hourly expiry then deletes them. Restore anything you still
   want from them into a new project before then. Backups in organisations'
   own buckets are not touched.
+- **Backend services' grants** (project schema version 7, applied to
+  every enabled project by the reconciler within seconds): the request
+  roles lose `EXECUTE` on functions an extension installed, and the data
+  API stops serving those. anon and user keep privileges only on what
+  row-level security protects, and `SELECT` on the public tables: their
+  grants on tables without it, materialized views and views that run as
+  their owner are taken back and recorded in `xb_auth.withheld`, and come
+  back by themselves once a table has row-level security. Before
+  upgrading, run the security advisor on projects whose apps read through
+  views or functions: a table it reports as `rls_disabled` that such a view
+  or function reads with the publishable key will answer `403`. Enable
+  row-level security on it, or list it as public.
 - **Edge credentials** (migration 00061): the platform-wide
   `XENIBASE_EDGE_SECRET` now serves only the regions without their own API
   domain. **Before upgrading**, give every edge of a region with its own API

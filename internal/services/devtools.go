@@ -61,7 +61,12 @@ func (s *Service) Types(ctx context.Context, p store.Project, lang, pkg string) 
 	if svc, err := store.New(s.db).GetProjectServices(ctx, p.ID); err == nil {
 		ref = svc.Ref
 	}
-	return typegen.Generate(cat, lang, typegen.Options{Ref: ref, Package: pkg})
+	out, err := typegen.Generate(cat, lang, typegen.Options{Ref: ref, Package: pkg})
+	if err != nil {
+		// A name the language can't carry, or a package name that isn't one.
+		return "", fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	return out, nil
 }
 
 // Finding is one thing the security advisor noticed.
@@ -84,6 +89,16 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 	if err != nil {
 		return nil, err
 	}
+	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close(context.Background())
+	return advise(ctx, conn, schemas, public, store.AnonRole(p.DbName))
+}
+
+// advise is Advisor on a connection to the project's database.
+func advise(ctx context.Context, conn *pgx.Conn, schemas, public []string, anon string) ([]Finding, error) {
 	isPublic := map[string]bool{}
 	for _, t := range public {
 		if !strings.Contains(t, ".") {
@@ -91,12 +106,6 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 		}
 		isPublic[t] = true
 	}
-	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close(context.Background())
-	anon := store.AnonRole(p.DbName)
 	var out []Finding
 	q := func(sql string, args []any, scan func(pgx.Rows) error) error {
 		rows, err := conn.Query(ctx, sql, args...)
@@ -126,7 +135,7 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 		case !rls && isPublic[obj]:
 			out = append(out, Finding{"info", "public_table", obj, "Marked public: anyone with your app's publishable key can read every row.", ""})
 		case !rls:
-			out = append(out, Finding{"danger", "rls_disabled", obj, "Row-level security is off: the publishable key can't reach this table, and nothing protects it if it is marked public.",
+			out = append(out, Finding{"danger", "rls_disabled", obj, "Row-level security is off: anon and user hold no privileges on it while it stays off, so the publishable key can't reach it, directly or through a view or function; mark it public and anyone can read every row.",
 				fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY; -- then add policies", pgx.Identifier{schema, name}.Sanitize())})
 		case policies == 0:
 			out = append(out, Finding{"info", "rls_no_policies", obj, "Row-level security is on with no policies: only the secret key can read or write it.", ""})
@@ -164,7 +173,9 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 	}
 	// SECURITY DEFINER functions callable through the API.
 	if err := q(`SELECT n.nspname, p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = ANY($1) AND p.prosecdef ORDER BY 1, 2`, []any{schemas}, func(r pgx.Rows) error {
+		WHERE n.nspname = ANY($1) AND p.prosecdef
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+		ORDER BY 1, 2`, []any{schemas}, func(r pgx.Rows) error {
 		var schema, name string
 		if err := r.Scan(&schema, &name); err != nil {
 			return err
@@ -189,26 +200,49 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 			return nil
 		}
 		out = append(out, Finding{"warn", "view_not_invoker", schema + "." + name,
-			"The view runs as its owner, so the tables' row-level security doesn't apply to callers; the publishable key can't read it.",
+			"The view runs as its owner, so the tables' row-level security doesn't apply to callers; the publishable key can't read it, directly or through a function.",
 			fmt.Sprintf("ALTER VIEW %s SET (security_invoker = true);", pgx.Identifier{schema, name}.Sanitize())})
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	// Secret-looking columns anon may select.
-	if err := q(`SELECT n.nspname, c.relname, a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+	// Views that run as the caller but read a table nothing protects: the
+	// edge refuses them to the publishable key.
+	cat, err := datacat.Introspect(ctx, conn, schemas)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range cat.Tables() {
+		for _, u := range t.Unprotected {
+			if isPublic[u] || isPublic[t.Schema+"."+t.Name] {
+				continue
+			}
+			out = append(out, Finding{"warn", "view_reads_unprotected", t.Schema + "." + t.Name,
+				fmt.Sprintf("The view reads %s, which has no row-level security, so the publishable key can't read the view.", u),
+				fmt.Sprintf("Enable row-level security on %s and add policies (a materialized view or a view that runs as its owner can't have it: read the tables instead), or list it as a public table.", u)})
+			break
+		}
+	}
+	// Secret-looking columns anon may select. Revoking one column does
+	// nothing while anon holds SELECT on the whole table (the version 1
+	// grants), so the fix swaps that for the other columns.
+	if err := q(`SELECT n.nspname, c.relname, a.attname, has_table_privilege($3, c.oid, 'SELECT'),
+		  coalesce((SELECT array_agg(o.attname::text ORDER BY o.attnum) FROM pg_attribute o
+		    WHERE o.attrelid = c.oid AND o.attnum > 0 AND NOT o.attisdropped AND o.attname !~* $2), '{}')
+		FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = ANY($1) AND c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped
 		  AND a.attname ~* $2 AND has_column_privilege($3, c.oid, a.attnum, 'SELECT') ORDER BY 1, 2, 3`,
 		[]any{schemas, strings.Join(secretNames, "|"), anon}, func(r pgx.Rows) error {
 			var schema, table, col string
-			if err := r.Scan(&schema, &table, &col); err != nil {
+			var whole bool
+			var keep []string
+			if err := r.Scan(&schema, &table, &col, &whole, &keep); err != nil {
 				return err
 			}
 			out = append(out, Finding{"warn", "secret_column", schema + "." + table + "." + col,
 				"Looks like a secret, and the anonymous role may select it (row-level security still decides which rows).",
-				fmt.Sprintf("REVOKE SELECT (%s) ON %s FROM %s;", pgx.Identifier{col}.Sanitize(), pgx.Identifier{schema, table}.Sanitize(),
-					pgx.Identifier{anon}.Sanitize())})
+				hideColumnFix(pgx.Identifier{schema, table}, anon, col, whole, keep)})
 			return nil
 		}); err != nil {
 		return nil, err
@@ -217,6 +251,26 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 		out = []Finding{}
 	}
 	return out, nil
+}
+
+// hideColumnFix is the SQL that stops role selecting col of table. A
+// column-level REVOKE is enough only when role has no table-level SELECT;
+// otherwise the table-level grant goes, and the columns to keep (keep, in
+// order) are granted one by one.
+func hideColumnFix(table pgx.Identifier, role, col string, tableGrant bool, keep []string) string {
+	r := pgx.Identifier{role}.Sanitize()
+	if !tableGrant {
+		return fmt.Sprintf("REVOKE SELECT (%s) ON %s FROM %s;", pgx.Identifier{col}.Sanitize(), table.Sanitize(), r)
+	}
+	fix := fmt.Sprintf("REVOKE SELECT ON %s FROM %s;", table.Sanitize(), r)
+	if len(keep) > 0 {
+		cols := make([]string, len(keep))
+		for i, k := range keep {
+			cols[i] = pgx.Identifier{k}.Sanitize()
+		}
+		fix += fmt.Sprintf(" GRANT SELECT (%s) ON %s TO %s;", strings.Join(cols, ", "), table.Sanitize(), r)
+	}
+	return fix
 }
 
 // ---- The request explorer --------------------------------------------------

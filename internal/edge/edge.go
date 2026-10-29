@@ -82,6 +82,9 @@ type Config struct {
 	GarbageGrace time.Duration
 	// CacheBytes bounds the anonymous-read cache (default 64 MB).
 	CacheBytes int
+	// CatalogEvery is how often a project's catalog fingerprint is checked
+	// (default 2 s).
+	CatalogEvery time.Duration
 	// RenderWorker is the command a render worker runs as (V4.1 §12.4),
 	// e.g. {"/usr/local/bin/xenibase-edge", "render-worker"}; empty renders
 	// in the edge's own process.
@@ -169,9 +172,12 @@ func (p *project) exposed() []string {
 }
 
 // publicTable reports whether t may be read without row-level security.
-func (p *project) publicTable(t *Table) bool {
+func (p *project) publicTable(t *Table) bool { return p.publicName(t.Schema + "." + t.Name) }
+
+// publicName is publicTable for a relation's "schema.name".
+func (p *project) publicName(qualified string) bool {
 	for _, n := range p.cfg.PublicTables {
-		if n == t.Schema+"."+t.Name || (t.Schema == "public" && n == t.Name) {
+		if n == qualified || "public."+n == qualified {
 			return true
 		}
 	}

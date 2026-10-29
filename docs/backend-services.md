@@ -57,7 +57,8 @@ Project → Settings → **API** → **Enable backend services**, or
    the platform, with `xb_auth.uid()`, `role()`, `claims()` and
    `claim(text)` for your row-level security policies;
 3. grants the three request roles use of what the owner creates in
-   `public` (row-level security decides which rows);
+   `public` (row-level security decides which rows; anon and user keep
+   privileges only on what row-level security protects, below);
 4. makes the first publishable and secret keys and the project's signing
    key.
 
@@ -127,23 +128,49 @@ Views must run as the caller (`CREATE VIEW … WITH (security_invoker = true)`)
 so the underlying tables' policies apply; embedded tables are checked the
 same way. The secret key bypasses row-level security entirely.
 
+A table without row-level security is out of reach through views and
+functions too. While it stays that way, `<db>_anon` and `<db>_user` hold no
+privileges on it (on a public table, `SELECT` only): Xenibase takes them back
+within a couple of seconds of the table appearing or losing row-level
+security, and gives exactly those back once it has it, so the usual order
+(create the table, then enable row-level security and add policies) works.
+`xb_auth.withheld` lists what is held back. The same goes for materialized
+views and views that run as their owner. A view that runs as the caller but
+reads such a table answers `403 rls_required` naming it, and so does a
+function that runs as the caller while anon or user can still reach one
+(after a grant made by hand, say).
+
 ```sql
 ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY readable ON posts FOR SELECT
   USING (published OR author_id = xb_auth.uid());
 ```
 
-Column privileges hold too: `REVOKE SELECT (email) ON profiles FROM "<db>_anon"`
-hides a column from anonymous callers.
+Column privileges hold too. To hide a column from anonymous callers, take
+away the table-level `SELECT` and grant the columns they may read; a
+column-level `REVOKE` alone does nothing while the table-level grant stands:
+
+```sql
+REVOKE SELECT ON profiles FROM "<db>_anon";
+GRANT SELECT (id, name, avatar_url) ON profiles TO "<db>_anon";
+```
+
+Do the same for `"<db>_user"` to hide it from signed-in users. Xenibase keeps
+these grants when it re-applies the request roles' grants after a move or
+restore. `select=*` then answers `403 permission_denied`: name the columns
+(`select=id,name`). The security advisor's `secret_column` finding gives the
+statements for the table.
 
 ### Guardrails
 
 - Each request has its statement timeout (8 s by default), at most 30
   filters and 3 levels of relations, and a 10 MB result.
-- Every new shape of query is planned once (`EXPLAIN`) and refused with
-  `400 query_too_expensive` when its estimated cost is over the project's
-  limit (1,000,000 by default: a scan of a few million rows). Add an index or
-  a filter, or raise the limit in the settings.
+- Every read is planned (`EXPLAIN`) as the caller, with its own values, and
+  refused with `400 query_too_expensive` when its estimated cost is over the
+  project's limit (1,000,000 by default: a scan of a few million rows). Add an
+  index or a filter, or raise the limit in the settings. A set-returning
+  function's call is checked the same way, and `count=exact` over the limit
+  is not run (`"count": null`, as when it times out).
 - Schema changes are picked up within about two seconds, with no restart.
 
 ### Errors
@@ -194,7 +221,7 @@ curl -X DELETE ".../data/v1/todos/7"
 | --- | --- |
 | `on_conflict` | Upsert: the columns of a unique constraint (`on_conflict=email`). Conflicting rows are updated with the sent columns; with `resolution=ignore` they are left alone. |
 | `select` | Which columns of the written rows come back (the read API's `select`, without relations). |
-| `return` | `representation` (default) or `minimal` (only `affected`). |
+| `return` | `representation` (default) or `minimal` (only `affected`; the rows aren't read back, so an `INSERT`-only policy is enough, as for a contact form). |
 | `where`, `or` | Which rows an update or delete changes, as for reads. **An update or delete needs a filter or a key**: `400 filter_required` otherwise. |
 | `max_affected` | Refuse (`400 too_many_rows`, nothing changed) when more rows would change; 1,000 by default, at most 100,000. |
 
@@ -266,7 +293,10 @@ At most 3,600 seconds and 100 entries.
 - **The key** is the project, the path and its query with the parameters
   sorted (the `apikey` parameter left out), the project's configuration
   version and its schema's fingerprint, so changing the settings or the
-  schema starts afresh.
+  schema starts afresh. The fingerprint includes policies, grants and
+  row-level security: closing a policy, revoking a grant or turning
+  row-level security off empties the project's cache within about two
+  seconds, whatever the TTL.
 - **Headers:** `X-Cache: HIT` or `MISS`, `Age`, and
   `Cache-Control: public, max-age=<seconds left>` with
   `Vary: Authorization, Read-Replica`, so a CDN in front may cache too
@@ -303,6 +333,10 @@ curl ".../data/v1/rpc/search_todos?q=milk&limit=5"   # STABLE or IMMUTABLE only
   ambiguous_function` when more than one fits.
 - `SECURITY DEFINER` functions run as their owner and skip row-level
   security: the security advisor lists them.
+- Functions an extension installed (`pg_stat_statements_reset`, PostGIS's)
+  are not served (`404 unknown_function`), and the request roles are not
+  granted them, so one an extension keeps from `PUBLIC` stays the
+  platform's. Wrap one in a function of your own to call it through the API.
 
 ## Generated types
 
@@ -322,6 +356,13 @@ xenibase gen types --lang go --project my-app --package db -o db/types.go
 The same files download from Project → Settings → API → Generate types, or
 `GET /api/v1/projects/{id}/services/types?lang=ts|dart|go`.
 
+Table and column names appear in the files only as escaped strings; field and
+class names keep their letters and digits (`price$usd` becomes `PriceUsd`, a
+Dart field named `class` becomes `class_`, and a second name that comes out
+the same gets a number). Go's JSON tags can't hold some characters (quotes,
+a comma, a backslash, control characters), so Go generation refuses a column
+with one, naming it (`400`); rename the column or use TypeScript or Dart.
+
 ## Security advisor
 
 Project → Settings → API → Security advisor (or
@@ -330,7 +371,7 @@ Project → Settings → API → Security advisor (or
 | Level | Finding |
 | --- | --- |
 | danger | A table without row-level security (`rls_disabled`); a write policy open to anon (or `PUBLIC`) with no condition (`policy_allows_everything`). |
-| warn | `SECURITY DEFINER` functions (`security_definer_function`); views that don't run as the caller (`view_not_invoker`); columns named like secrets (password, token, secret…) readable by anon or user (`secret_column`). |
+| warn | `SECURITY DEFINER` functions (`security_definer_function`); views that don't run as the caller (`view_not_invoker`); views that run as the caller but read a table without row-level security (`view_reads_unprotected`); columns named like secrets (password, token, secret…) readable by anon or user (`secret_column`). |
 | info | Public tables; row-level security with no policies (only the secret key gets in); read policies open to everyone. |
 
 Each finding says what to do and, where one statement fixes it, gives it.

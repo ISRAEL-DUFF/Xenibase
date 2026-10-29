@@ -133,6 +133,70 @@ bundle share one version (spec §11.5).
   million. Only broadcasts, presence and database changes count now;
   heartbeats, joins, leaves, token updates, replies and status messages
   are free, so `realtime_messages` drops for most projects.
+- **The publishable key could reset `pg_stat_statements` for the whole
+  instance.** Backend services granted the request roles `EXECUTE` on every
+  function in `public` and each exposed schema, including extensions'
+  functions locked from `PUBLIC`; with `pg_stat_statements` installed, anon
+  could call `POST /data/v1/rpc/pg_stat_statements_reset` and empty every
+  tenant's Query Insights on a shared cluster. Functions are now granted one
+  by one, leaving out any an extension owns (the owner's later functions
+  still get `EXECUTE` from the default privileges), schema version 7 takes
+  back the grants already made, and the data API, type generation and the
+  advisor leave extensions' functions out (`404 unknown_function`).
+- **A table without row-level security could be read through a view or a
+  function.** The edge refused such a table only when a URL named it, while
+  anon and user held every privilege on it, so a `security_invoker` view over
+  it, or any function running as the caller, returned every row to the
+  publishable key. Now anon and user lose their privileges on a relation
+  nothing protects (a table without row-level security, a materialized view,
+  a view running as its owner; a public table keeps `SELECT`) as soon as an
+  edge sees it, through the new `xb_auth.sync_grants`, and get back exactly
+  what was taken once it has row-level security (`xb_auth.withheld` records
+  it). The edge also refuses an invoker view that reads such a relation, and
+  any invoker function while the caller's role still reaches one (`403
+  rls_required`, naming it). Running version 1 again after a move or restore
+  no longer re-grants a table the owner narrowed. The advisor's
+  `rls_disabled` message says what is now true, and `view_reads_unprotected`
+  names an invoker view over such a table.
+- **The documented way to hide a column did nothing.** The guide and the
+  advisor's `secret_column` fix said `REVOKE SELECT (email) ON profiles FROM
+  "<db>_anon"`, which Postgres ignores while anon holds `SELECT` on the whole
+  table, as it does from the request roles' grants. Both now give
+  `REVOKE SELECT ON profiles FROM …; GRANT SELECT (id, name, …) ON profiles
+  TO …` (the advisor lists the table's other columns, or gives the column
+  `REVOKE` when anon has only column grants), and re-applying the grants
+  after a move or restore no longer undoes it.
+- **The data API's cost guard could be bypassed with a cheap value
+  first.** It planned each SQL text once and kept the estimate, and filter
+  values are parameters, so a request for a common value admitted a later one
+  that scans the whole table (about 100 times the cost), and a plan made for
+  the service role admitted anon. Every read is now planned with its own
+  values as its own role (planning costs a small fraction of the read).
+  Set-returning functions now go through the guard too, and an exact count
+  over the limit is not run (`count: null`, as when it times out).
+- **Generated types could carry code from a column's name.** `xenibase gen
+  types` wrote table and column names into the Go, TypeScript and Dart files
+  as they were, in identifiers, tags, comments and strings, so whoever could
+  create a column could, with a 37-byte name, add `init` functions to every
+  program built with the generated Go package, and a `$` or `'` broke the
+  Dart file. Names now appear only escaped, identifiers are made from their
+  letters and digits (numbered when two clash, kept off reserved words), and
+  Go generation refuses, with a `400` naming it, a column its JSON tags can't
+  carry.
+- **Closing a policy didn't empty the anonymous-read cache.** The schema
+  fingerprint behind the cache key left out policies, and a cache hit never
+  checked it, so after `DROP POLICY`, `ALTER POLICY` or a `REVOKE` a popular
+  cached URL kept serving the rows for up to its TTL (an hour). The
+  fingerprint now covers policies, grants and row-level security, a hit
+  waits for the catalog check every 2 seconds, and a changed fingerprint
+  drops the project's cached answers.
+- **`return=minimal` writes needed a `SELECT` policy.** Every data API
+  write asked for its rows back (`RETURNING *`) even with `return=minimal`,
+  and Postgres checks returned rows against the table's `SELECT` policies, so
+  a table anon may insert into but not read (a contact form, a waitlist)
+  refused every insert with `403 permission_denied`. Minimal inserts,
+  updates and deletes now leave `RETURNING` out and count from the command
+  tag. (An upsert still needs `SELECT`, which Postgres requires.)
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
@@ -435,6 +499,20 @@ bundle share one version (spec §11.5).
   (`docs/disaster-recovery.md`).
 
 ### Upgrading
+- Backend services' schema version 7 runs on every enabled project with its
+  next reconcile (within seconds of the upgrade). It revokes the request
+  roles' `EXECUTE` on functions an extension installed; the data API no
+  longer serves them, so wrap one in a function of your own if an app calls
+  it.
+  The same version adds `xb_auth.sync_grants`, which the control plane
+  runs straight after: anon and user lose their privileges on tables without
+  row-level security (except `SELECT` on public tables), materialized views
+  and views that run as their owner, in every schema of the project's,
+  exposed or not, including grants made by hand. A view or function that
+  read such a table with the publishable key now answers `403 rls_required`
+  (or `403 permission_denied`): enable row-level security on the table, or
+  list it as public if anyone may read it. See `docs/upgrade.md`
+  ("Upgrading from 4.2.4").
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
 - Migrations 00068 and 00069 move children an earlier transfer left behind to
