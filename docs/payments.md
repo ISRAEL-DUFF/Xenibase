@@ -157,8 +157,11 @@ owes, **all of it or nothing**:
 
 **An unanswered debit is never repeated.** If the call timed out or came
 back with a server error, Xenibase looks the key up at the provider before
-doing anything else: found, the debit happened and is booked; not found,
-nothing was posted and it is safe to try again with a new key. A charge
+doing anything else: found and completed, the debit happened and is
+booked; found and failed, nothing moved and it counts as a decline; not
+found, nothing was posted and it is safe to try again with a new key. A
+request the provider has finished in a state Xenibase doesn't know is
+neither booked nor retried: it waits for a person, with an error logged. A charge
 still unresolved blocks the next attempt on the same invoice (the database
 allows one in flight per invoice). The provider replays an answer for 24
 hours; a pending charge older than that is escalated by hand, never

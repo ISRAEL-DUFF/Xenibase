@@ -36,7 +36,7 @@ Xenibase first designed for, and a few things don't exist at all:
 | `GET /v1/wallets/{id}/balance` | The balance. Xenibase reads `balances[]` (the top-level `balance` is the canonical currency for older integrators) and uses `available`. |
 | `GET /v1/platform/account` | Xenibase's operating wallet, where debits go. Provisioned per tenant: Xenibase never creates one. |
 | `POST /v1/transfers` (`Idempotency-Key`) | The debit: customer wallet → operating wallet, with the invoice number as `narration` (255 characters at most; transfers have no structured metadata). Synchronous and final: a `200` means the money moved. |
-| `GET /v1/requests/{key}` | What happened to a call made under an idempotency key. A `404 IDEMPOTENCY_KEY_NOT_FOUND` guarantees nothing was posted. |
+| `GET /v1/requests/{key}` | What happened to a call made under an idempotency key. A `404 IDEMPOTENCY_KEY_NOT_FOUND` guarantees nothing was posted. A debit is booked only when the request is `terminal` **and** its `status` says it completed (`completed`; `succeeded` and `successful` are accepted too); terminal and `failed` (or `declined`, `rejected`, `cancelled`, `expired`, `reversed`) is a declined attempt, booked as nothing; terminal in any other status stays pending and is logged as an error for a person. Not terminal waits for the re-query. |
 | `GET /v1/rates?from=USD&to=NGN&amount=100` | The dollar's price in naira: `market_rate`, `spread_bps`, `effective_rate`, `fetched_at`, `sources`, `derived`. Rates are exact decimal strings. |
 | `GET /v1/wallets/{id}/transactions/{txn}` | Verify a deposit before booking it. |
 | `GET /v1/ledger/export?from&to&format=json` | Xenibase's transactions in a window, a day at a time, for the hourly re-query and the nightly reconciliation. |

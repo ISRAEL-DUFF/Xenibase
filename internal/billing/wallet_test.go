@@ -24,6 +24,7 @@ type walletWorld struct {
 	clk    *clock
 	sent   *sentMail
 	fake   *iswallet.Fake
+	p      *iswallet.Client
 	events chan string
 }
 
@@ -43,6 +44,7 @@ func newWalletWorld(t *testing.T) *walletWorld {
 	t.Cleanup(srv.Close)
 	p := iswallet.New(iswallet.Config{BaseURL: srv.URL, APIKey: "isw-key", WebhookSecret: "isw-secret-0123456789", Now: clk.Now})
 	s.SetWallets(p, "xenibase:test")
+	w.p = p
 	hook := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		ev, err := p.ParseWebhook(r.Context(), r)
 		if err != nil {

@@ -648,6 +648,18 @@ bundle share one version (spec §11.5).
   be deleted while it holds files. A region without one keeps working as
   before, with a warning in the server's log, a launch-check warning and
   the new `files_share_backups` alert.
+- **A wallet debit that failed is no longer booked as paid.** When a
+  transfer's answer was lost, Xenibase looked its key up at the wallet
+  provider and settled the invoice as soon as the provider called the
+  request finished, without reading how it finished: a transfer that ended
+  `failed` marked the invoice paid with no money moved, and only the
+  nightly balance reconciliation showed it. A debit is now booked only when
+  the provider says it completed. One that ended failed (or was declined,
+  cancelled, expired or reversed) is a declined attempt: nothing is posted
+  and dunning starts as for a wallet that is short. A finished request in
+  a status nobody has written down is neither booked nor retried: it stays
+  pending, with an error in the log, for a person to look at. See
+  `docs/iswallet.md`.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its

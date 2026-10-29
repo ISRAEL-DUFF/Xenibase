@@ -397,6 +397,17 @@ func (s *Service) chargeInvoiceFromWallet(ctx context.Context, inv store.Invoice
 			return WalletCharge{Unavailable: true, Message: err.Error()}, nil
 		case lerr != nil || !st.Terminal:
 			return WalletCharge{Unavailable: true, Message: "the debit is being confirmed: " + err.Error()}, nil
+		case st.Failed():
+			// It ended and moved nothing: a decline, booked as nothing.
+			msg := "the provider says the debit " + st.Status
+			_ = q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("declined: " + msg)})
+			s.notifyDeclined(ctx, inv, !explicit, msg)
+			return WalletCharge{Message: msg}, nil
+		case !st.Succeeded():
+			// Ended in a state nobody has written down: neither booked nor
+			// tried again (either could be wrong), but left for a person.
+			s.log.Error("billing: a wallet debit ended in a state Xenibase doesn't know; left pending", "reference", ref, "invoice", deref(inv.Number), "status", st.Status)
+			return WalletCharge{Unavailable: true, Message: "the debit is being confirmed: the provider says " + st.Status}, nil
 		}
 		tr = TransferResult{TransferID: st.ResourceID, At: s.Now()}
 	}
@@ -559,6 +570,19 @@ func (s *Service) resolveWalletIntent(ctx context.Context, in store.PaymentInten
 	case err != nil:
 		return false, nil // still can't tell
 	case !st.Terminal:
+		return false, nil
+	case st.Failed():
+		// It ended and moved nothing: a decline, booked as nothing.
+		msg := "the provider says the debit " + st.Status
+		if err := q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: in.Reference, Status: "failed", Error: ptr0("declined: " + msg)}); err != nil {
+			return false, err
+		}
+		if inv, err := q.GetInvoice(ctx, *in.InvoiceID); err == nil {
+			s.notifyDeclined(ctx, inv, in.Automatic, msg)
+		}
+		return true, nil
+	case !st.Succeeded():
+		s.log.Error("billing: a wallet debit ended in a state Xenibase doesn't know; left pending", "reference", in.Reference, "status", st.Status)
 		return false, nil
 	}
 	a, err := q.GetBillingAccount(ctx, in.OrgID)
