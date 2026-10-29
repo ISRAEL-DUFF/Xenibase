@@ -11392,8 +11392,10 @@ export interface components {
             table: string;
         };
         ReapedSession: {
-            /** @enum {string} */
-            /** @description statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended. */
+            /**
+             * @description statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+             * @enum {string}
+             */
             kind: "statement" | "statement_terminated" | "idle_in_transaction";
             role: string;
             duration_s: number;
