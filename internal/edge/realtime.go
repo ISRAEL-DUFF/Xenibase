@@ -171,7 +171,6 @@ func (rc *rtConn) run(parent context.Context) {
 			return
 		}
 		rc.lastSeen.Store(time.Now().UnixNano())
-		rc.hub.counted(1)
 		m, v2, err := decodeMsg(data)
 		if err != nil {
 			rc.shutdown(websocket.StatusUnsupportedData, "not a realtime message")
@@ -249,7 +248,9 @@ func (rc *rtConn) send(m rtMsg) bool {
 	}
 	select {
 	case rc.out <- b:
-		rc.hub.counted(1)
+		if billable(m) {
+			rc.hub.counted(1)
+		}
 		return true
 	default:
 		go rc.shutdown(websocket.StatusTryAgainLater, "too slow to keep up; reconnect and refetch")
@@ -275,7 +276,25 @@ func (ch *rtChannel) system(status, extension, message string) {
 		"status": status, "extension": extension, "message": message, "channel": strings.TrimPrefix(ch.topic, rtTopicPrefix)})})
 }
 
+// billable reports whether a message counts as one of the month's realtime
+// messages: what clients send each other and what the edge delivers, not
+// the protocol around it (heartbeats, joins, leaves, tokens, replies and
+// status messages).
+func billable(m rtMsg) bool {
+	if m.Topic == phxTopic {
+		return false
+	}
+	switch m.Event {
+	case evBroadcast, evPresence, evPresenceState, evPresenceDiff, evPostgresChanges:
+		return true
+	}
+	return false
+}
+
 func (rc *rtConn) handle(ctx context.Context, m rtMsg) {
+	if billable(m) {
+		rc.hub.counted(1)
+	}
 	if m.Topic == phxTopic {
 		if m.Event == phxHeartbeat {
 			rc.reply(m, "ok", nil)

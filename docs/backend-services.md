@@ -946,7 +946,8 @@ A private channel and a public one of the same name don't hear each other.
 Clients send a heartbeat every 25 seconds; a connection silent for 2
 minutes is closed, as is one too slow to take its messages (it reconnects
 and refetches). A connection joins at most 100 channels, sends at most 600
-broadcasts and presence updates a minute, and a message is at most 256 KB. Messages to and from clients (`realtime_messages`) and
+broadcasts and presence updates a minute, and a message is at most 256 KB. Messages to and from clients (`realtime_messages`: broadcasts,
+presence and database changes; heartbeats, joins and replies are free) and
 connection time (`realtime_connection_minutes`) are metered.
 
 ## Settings

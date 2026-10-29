@@ -31,6 +31,13 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Heartbeats are no longer billed as realtime messages.** Every frame a
+  client sent and every message queued to it counted, heartbeats and their
+  replies included, so an idle connection cost about 207,000 messages a
+  month and five idle browser tabs used up a Personal organisation's
+  million. Only broadcasts, presence and database changes count now;
+  heartbeats, joins, leaves, token updates, replies and status messages
+  are free, so `realtime_messages` drops for most projects.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
