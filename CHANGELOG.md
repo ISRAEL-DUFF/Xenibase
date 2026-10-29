@@ -60,6 +60,10 @@ bundle share one version (spec §11.5).
   branch extended or detached in between was deleted anyway, without the
   final backup turned on meanwhile. Each delete now checks the locked row
   is still an expired branch, and takes the final-backup choice from it.
+- **Branch resets count against operations in flight.** They were counted
+  but never checked, so every branch could be reset at once, each a full
+  dump of the parent with a live source. A reset beyond the plan's limit
+  is refused with 409 `quota_exceeded`, as a new branch is.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

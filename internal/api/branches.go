@@ -190,6 +190,11 @@ func (s *Server) ResetBranch(w http.ResponseWriter, r *http.Request, id gen.Proj
 		p.Source = string(*req.Source)
 		a.set("source", p.Source)
 	}
+	// A reset is a copy of the parent, like a new branch: it counts
+	// towards operations in flight.
+	if s.tenancy != nil && !s.checkQuota(w, s.tenancy.CheckOperation(r.Context(), accessFrom(r.Context()).OrgID)) {
+		return
+	}
 	op, err := s.branches.Reset(r.Context(), p)
 	if err != nil {
 		s.branchError(w, "reset branch", err)
