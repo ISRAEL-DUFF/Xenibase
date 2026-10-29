@@ -497,8 +497,11 @@ func (rc *rtConn) join(ctx context.Context, m rtMsg, existing *rtChannel) {
 	rc.mu.Lock()
 	rc.channels[m.Topic] = ch
 	rc.mu.Unlock()
+	// The hub owns ch.subs once joined (it drops a subscription whose
+	// table loses row-level security).
+	changes := len(ch.subs) > 0
 	rc.hub.join(ch)
-	if len(ch.subs) > 0 {
+	if changes {
 		rc.hub.waitReady(jctx)
 	}
 	resp := map[string]any{}

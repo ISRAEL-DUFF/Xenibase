@@ -485,6 +485,21 @@ func TestRealtime(t *testing.T) {
 	// ---- Heartbeats ------------------------------------------------------------------
 	ref := alice.send("phoenix", "heartbeat", map[string]any{})
 	alice.next(5*time.Second, "heartbeat reply", func(m rtMessage) bool { return m.Event == "phx_reply" && m.Ref != nil && *m.Ref == ref })
+
+	// ---- Row-level security turned off after subscribing ----------------------------
+	if _, err := app.Exec(ctx, `ALTER TABLE todos DISABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Exec(ctx, `INSERT INTO todos (owner, body) VALUES ($1, 'bob after rls')`, rp.bobID); err != nil {
+		t.Fatal(err)
+	}
+	alice.next(10*time.Second, "the subscription closed for want of row-level security", func(m rtMessage) bool {
+		return m.Event == "system" && strings.Contains(string(m.Payload), "no longer has row-level security")
+	})
+	alice.quiet(time.Second, "bob's row at alice without row-level security", isChange("INSERT", "bob after rls"))
+	if _, err := app.Exec(ctx, `ALTER TABLE todos ENABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func isBroadcast(event string) func(rtMessage) bool {

@@ -661,6 +661,15 @@ func (h *rtHub) deliver(ctx context.Context, p *project, keys map[string][]strin
 				continue
 			}
 			rows, columns, err := h.visibleRows(ctx, p, g.req, k, keys[k], need[k])
+			if errors.Is(err, errNoRLS) {
+				// Row-level security went off after they subscribed: what
+				// they would read now is every row (§6.3).
+				h.dropSubs(g.subs)
+				for _, s := range g.subs {
+					s.ch.system("error", evPostgresChanges, fmt.Sprintf("%s no longer has row-level security, so the subscription is closed: turn it back on (or list the table as public) and subscribe again", k))
+				}
+				continue
+			}
 			if err != nil {
 				h.e.cfg.Log.Warn("realtime visibility check", "ref", h.ref, "table", k, "role", g.req.Role, "err", err)
 				for _, s := range g.subs {
@@ -799,6 +808,23 @@ func (h *rtHub) visibleRows(ctx context.Context, p *project, req Request, k stri
 		if t == nil {
 			return fmt.Errorf("%s isn't in an exposed schema", k)
 		}
+		if req.Role != "service" && !p.publicTable(t) {
+			// As bindChanges requires. The catalogue is cached for a moment,
+			// so the table itself is asked too, under a lock that keeps
+			// ALTER TABLE from turning it off before the read below.
+			on := t.RLS
+			if on {
+				if _, err := tx.Exec(qctx, `LOCK TABLE `+t.Qualified()+` IN ACCESS SHARE MODE`); err != nil {
+					return err
+				}
+				if err := tx.QueryRow(qctx, `SELECT relrowsecurity FROM pg_class WHERE oid = $1::regclass`, t.Qualified()).Scan(&on); err != nil {
+					return err
+				}
+			}
+			if !on {
+				return errNoRLS
+			}
+		}
 		sql, err := visibilitySQL(t, pk)
 		if err != nil {
 			return err
@@ -822,6 +848,32 @@ func (h *rtHub) visibleRows(ctx context.Context, p *project, req Request, k stri
 		return rows.Err()
 	})
 	return out, columns, err
+}
+
+// errNoRLS is a table anon or users subscribed to whose row-level security
+// is now off, and that isn't listed as public.
+var errNoRLS = errors.New("the table has no row-level security")
+
+// dropSubs ends subscriptions (their channels stay joined).
+func (h *rtHub) dropSubs(subs []*rtSub) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range subs {
+		k := s.schema + "." + s.table
+		if m := h.subs[k]; m != nil {
+			delete(m, s)
+			if len(m) == 0 {
+				delete(h.subs, k)
+			}
+		}
+		kept := s.ch.subs[:0:0]
+		for _, o := range s.ch.subs {
+			if o != s {
+				kept = append(kept, o)
+			}
+		}
+		s.ch.subs = kept
+	}
 }
 
 // visibilitySQL selects table t's rows with the given primary keys (a JSON

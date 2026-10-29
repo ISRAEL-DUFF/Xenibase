@@ -880,7 +880,9 @@ see the row:
   session ids aside) in one query per group, and sends a subscriber the
   row as they see it. Anon and signed-in users can subscribe only to
   tables with row-level security on (or listed as public tables); the
-  secret key sees everything.
+  secret key sees everything. Turning row-level security off closes their
+  subscriptions to the table at its next change (a `system` message with
+  `status` `error`); subscribe again once it is back on.
 - **Deletes** carry the primary key only (`old_record`), and reach only
   subscribers the edge sent the row to before: a client that loads rows
   over the data API and then subscribes gets deletes for rows that change

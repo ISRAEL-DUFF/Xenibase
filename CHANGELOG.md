@@ -31,6 +31,13 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Realtime subscriptions no longer outlive their table's row-level
+  security.** It was checked only when a client subscribed, so after the
+  owner turned it off (a migration that does so for a moment was enough)
+  every anon and user subscriber received every row until they
+  disconnected. Each batch of changes now checks it again; when it is off,
+  and the table isn't listed as public, those subscriptions are closed
+  with a `system` error and the channel stays joined.
 - **A private channel's broadcast history is no longer readable with the
   publishable key.** History was kept by topic name alone and checked the
   read policy only when asked for `private=true`, so

@@ -213,3 +213,91 @@ func TestRealtimeHistoryKeepsPrivateApart(t *testing.T) {
 		t.Fatalf("the public broadcast's row: private=%v %v", private, err)
 	}
 }
+
+// changesOn adds a subscription to every change of public.<table> on a new
+// channel of rc.
+func changesOn(rc *rtConn, topic, table string) (*rtChannel, *rtSub) {
+	ch := &rtChannel{c: rc, topic: topic, req: rc.base, readBroadcast: true, writeBroadcast: true, readPresence: true, writePresence: true}
+	s := &rtSub{id: rtSubIDs.Add(1), ch: ch, event: "*", schema: "public", table: table, seen: newPKSet(10000)}
+	ch.subs = []*rtSub{s}
+	rc.mu.Lock()
+	rc.channels[topic] = ch
+	rc.mu.Unlock()
+	h := rc.hub
+	h.mu.Lock()
+	h.channels[ch] = struct{}{}
+	k := "public." + table
+	if h.subs[k] == nil {
+		h.subs[k] = map[*rtSub]struct{}{}
+	}
+	h.subs[k][s] = struct{}{}
+	h.mu.Unlock()
+	return ch, s
+}
+
+// inserted is an outbox row for an insert of row into public.<table>.
+func inserted(table string, row map[string]any) change {
+	b, _ := json.Marshal(row)
+	rec := decodeRow(b)
+	return change{schema: "public", table: table, op: "INSERT", record: rec, at: time.Now(), pk: pkKey([]string{"id"}, rec)}
+}
+
+// TestRealtimeChangesStopWithoutRLS: a subscription made while its table
+// had row-level security is closed, not sent every row, once the owner
+// turns it off.
+func TestRealtimeChangesStopWithoutRLS(t *testing.T) {
+	rp := newRTProject(t)
+	ctx := context.Background()
+	for _, st := range []string{
+		`CREATE TABLE public.items (id int PRIMARY KEY, owner text NOT NULL)`,
+		`GRANT SELECT ON public.items TO ` + rp.pc.AnonRole,
+		`ALTER TABLE public.items ENABLE ROW LEVEL SECURITY`,
+		`CREATE POLICY mine ON public.items FOR SELECT TO ` + rp.pc.AnonRole + ` USING (owner = 'anon')`,
+		`INSERT INTO public.items VALUES (1, 'anon'), (2, 'someone')`,
+	} {
+		if _, err := rp.db.Exec(ctx, st); err != nil {
+			t.Fatalf("%s: %v", st, err)
+		}
+	}
+	p := rp.project(t)
+	h := rp.e.hub(rp.pc.Ref)
+	rc := testConn(h, Request{Role: "anon"})
+	ch, _ := changesOn(rc, "realtime:items", "items")
+	keys := map[string][]string{"public.items": {"id"}}
+	changes := func(got []rtMsg) (n int, closed bool) {
+		for _, m := range got {
+			switch {
+			case m.Event == evPostgresChanges:
+				n++
+			case m.Event == evSystem && strings.Contains(string(m.Payload), "no longer has row-level security"):
+				closed = true
+			}
+		}
+		return n, closed
+	}
+
+	h.deliver(ctx, p, keys, []change{inserted("items", map[string]any{"id": 1, "owner": "anon"}), inserted("items", map[string]any{"id": 2, "owner": "someone"})})
+	if n, closed := changes(received(t, rc)); n != 1 || closed {
+		t.Fatalf("with row-level security: %d changes (want only the subscriber's own row), closed=%v", n, closed)
+	}
+	if _, err := rp.db.Exec(ctx, `ALTER TABLE public.items DISABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
+	h.deliver(ctx, p, keys, []change{inserted("items", map[string]any{"id": 2, "owner": "someone"})})
+	if n, closed := changes(received(t, rc)); n != 0 || !closed {
+		t.Fatalf("without row-level security: %d changes, closed=%v", n, closed)
+	}
+	h.mu.Lock()
+	left, own := len(h.subs["public.items"]), len(ch.subs)
+	h.mu.Unlock()
+	if left != 0 || own != 0 {
+		t.Fatalf("the subscription is still there: hub %d, channel %d", left, own)
+	}
+	// The channel itself stays, for its broadcasts.
+	rc.mu.Lock()
+	still := rc.channels["realtime:items"] == ch
+	rc.mu.Unlock()
+	if !still {
+		t.Fatal("the channel was closed")
+	}
+}
