@@ -31,6 +31,21 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Scheduled jobs keep to their time across daylight saving.** A job's
+  next run was found by stepping through wall-clock hours, which went wrong
+  at both changes. When the clocks went back, a once-a-day job in the
+  repeated hour (`30 1 * * *` in New York on 1 November) ran at 01:30 EDT
+  and again an hour later at 01:30 EST. When they went forward, a job in a
+  zone behind UTC whose time fell in the skipped hour (`30 2 * * *` in New
+  York) sent the search backwards in a loop that never ended, which hung
+  the scheduler and any request that saved the job; in London or Berlin
+  the run was dropped for the day. The schedule is now matched
+  one offset period at a time: a fixed time (minute and hour both given)
+  runs once on the day an hour repeats, and a fixed time the clocks skip
+  runs at the first minute after the gap, as in cronie; schedules with `*`
+  in the minute or hour run by the clock through both. No run is ever less
+  than a minute after the one before. See `docs/webhooks.md` ("Scheduled
+  jobs").
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
