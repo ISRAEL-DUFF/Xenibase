@@ -318,7 +318,7 @@ func (s *Service) rollbackCreate(ctx context.Context, op store.Operation, log *j
 	cleanup, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID, Background: true,
 		Params: map[string]any{"after": op.ID}})
 	if qerr != nil {
-		return fmt.Errorf("%w (and queueing the cleanup failed: %v)", err, qerr)
+		return fmt.Errorf("%w (and queueing the cleanup failed: %w)", err, qerr)
 	}
 	_ = log.Warn(ctx, "rollback", "operation %s keeps retrying the drop of %s and its roles", cleanup.ID, p.DbName)
 	return err

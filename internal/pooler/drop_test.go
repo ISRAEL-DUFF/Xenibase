@@ -17,8 +17,7 @@ import (
 func TestDropDisallowed(t *testing.T) {
 	alias := "app_v1"
 	p := store.Project{DbName: "p_aaaaaaaaaa", AliasDbName: &alias}
-	clients := fakeTable{cols: []string{"type", "user", "database", "state", "addr", "port", "id"}}
-	for _, c := range [][]string{
+	clients := fakeTable{cols: []string{"type", "user", "database", "state", "addr", "port", "id"}, rows: [][]string{
 		{"C", "p_aaaaaaaaaa_owner", "p_aaaaaaaaaa", "active", "198.51.100.7", "50000", "1"},     // removed network
 		{"C", "p_aaaaaaaaaa_owner", "p_aaaaaaaaaa", "active", "203.0.113.9", "50001", "2"},      // still allowed
 		{"C", "p_aaaaaaaaaa_u_ab12cd", "p_aaaaaaaaaa_ro", "idle", "198.51.100.8", "50002", "3"}, // the _ro route
@@ -26,9 +25,7 @@ func TestDropDisallowed(t *testing.T) {
 		{"C", "p_aaaaaaaaaa_edge", "p_aaaaaaaaaa", "active", "198.51.100.10", "50004", "5"},     // the edge: exempt
 		{"C", "p_aaaaaaaaaa_owner", "p_aaaaaaaaaa", "active", "unix", "6432", "6"},              // a local socket
 		{"C", "p_bbbbbbbbbb_owner", "p_bbbbbbbbbb", "active", "198.51.100.7", "50005", "7"},     // another project
-	} {
-		clients.rows = append(clients.rows, c)
-	}
+	}}
 	fake := startFakeConsole(t, map[string]fakeTable{"SHOW CLIENTS": clients})
 	m, err := NewManager(t.TempDir(), 0o640, nil, []*Admin{fake.admin(t)}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
