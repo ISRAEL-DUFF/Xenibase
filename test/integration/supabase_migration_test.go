@@ -193,6 +193,7 @@ func TestSupabaseMigration(t *testing.T) {
 	e := testenv.Start(t, testenv.Options{})
 	e.StartAgent()
 	e.ConfigureBackups() // file storage
+	allowSource(t, e, h.db)
 	ctx := context.Background()
 
 	// 1. The database, through the V1 import.

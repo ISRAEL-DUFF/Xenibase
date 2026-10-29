@@ -331,6 +331,18 @@ Only one xenibase-server delivers webhooks and runs the scheduler at a time
 (advisory locks), so more servers can be added later without double
 deliveries.
 
+Imports and Supabase migrations connect to a database the tenant names, from
+xenibase-server and an agent, whose addresses every cluster trusts. Their
+source goes through the same rules, and stricter ones: the host must resolve
+to public addresses (or be allow-listed for the organisation, as above), and
+loopback, link-local, the nodes' and instances' own addresses,
+`XENIBASE_OUTBOUND_BLOCK` and, with machines Xenibase creates,
+`XENIBASE_CLOUD_PRIVATE_CIDR` are refused even when allow-listed. The server
+and the agent's copy connect to the address that was checked, so the name
+can't be rebound in between, and a connection string may name only one host
+and port (no `host=` parameter). A preflight passes if any of the caller's
+organisations allows the host.
+
 ## Secrets
 
 - `.env` holds `XENIBASE_MASTER_KEY`; keep a copy off the server.

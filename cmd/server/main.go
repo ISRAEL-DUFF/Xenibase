@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -903,6 +904,15 @@ func setupBackups(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, ke
 		return nil, nil, err
 	}
 	bc := backup.Config{Hour: cfg.Backups.Hour, Jitter: cfg.Backups.Jitter}
+	// Import sources may never be the platform's own networks: the
+	// operator's XENIBASE_OUTBOUND_BLOCK and, with machines Xenibase
+	// creates, their private network.
+	bc.SourceInternal = append(bc.SourceInternal, cfg.Insight.OutboundBlock...)
+	if cfg.Cloud.CanCreate() {
+		if pfx, err := netip.ParsePrefix(cfg.Cloud.PrivateCIDR); err == nil {
+			bc.SourceInternal = append(bc.SourceInternal, pfx)
+		}
+	}
 	if u := cfg.Backups.MetadataURL; u != "" {
 		pg, err := agentapi.ParseURL(u)
 		if err != nil {

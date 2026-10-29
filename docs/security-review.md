@@ -142,6 +142,14 @@ a test that failed before.
   Read-only sessions now sign in as `<db>_console_ro`, granted only
   `<db>_ro` (`WITH INHERIT FALSE, SET TRUE`), created on first use like the
   console login; `isocheck.Roles` flags it if it can become the owner.
+- **An import's source address wasn't checked** (medium-high). The server
+  and the agent's `/v1/copy` connected to any host, from addresses the
+  clusters trust, so an import of `postgres://<owner>:<password>@shared-pg/…`
+  got past that project's IP allowlist, and the path probed the private
+  network. Import and Supabase migration sources now pass
+  `outbound.CheckSource` (public only unless allow-listed; loopback, the
+  nodes' and instances' addresses and the platform's networks never), and
+  the server and agent connect to the checked address (`hostaddr`).
 
 ## V3 review of payments and billing (M27)
 

@@ -51,6 +51,11 @@ It doesn't apply to Xenibase itself:
 So an allowlist keeps everyone else off the database, without stopping the
 dashboard or the API.
 
+Xenibase's own addresses can't be borrowed to get round it: an import or a
+Supabase migration refuses a source on loopback, on the nodes' and instances'
+addresses or on the platform's networks, even one the platform admin
+allow-listed ([outbound traffic](operations.md#outbound-traffic)).
+
 The poolers see the address a connection comes from. If clients reach them
 through a NAT gateway, list the gateway's public address; from a Kubernetes
 cluster or a serverless platform, list its egress addresses.
