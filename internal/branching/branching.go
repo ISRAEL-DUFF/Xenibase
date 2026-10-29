@@ -598,7 +598,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 		return err
 	}
 	for _, b := range expired {
-		if _, err := s.projects.Delete(ctx, b.ID, b.Name, !b.BranchBackups, nil); err != nil && !errors.Is(err, provision.ErrConflict) {
+		if _, err := s.expire(ctx, b.ID, now); err != nil && !errors.Is(err, provision.ErrConflict) {
 			errs = append(errs, fmt.Errorf("expire branch %s: %w", b.ID, err))
 		} else if err == nil {
 			s.log.Info("branch expired; deleting", "project_id", b.ID, "expired_at", b.ExpiresAt)
@@ -629,6 +629,18 @@ func (s *Service) Sweep(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// expire deletes a branch the sweep listed as expired, if its locked row
+// still is one: a branch extended or detached since the list was read is
+// skipped (ErrConflict). Whether it takes a final backup is the row's too.
+func (s *Service) expire(ctx context.Context, id uuid.UUID, now time.Time) (store.Operation, error) {
+	return s.projects.DeleteChecked(ctx, id, nil, func(p store.Project) (bool, error) {
+		if p.ParentProjectID == nil || p.ExpiresAt == nil || p.ExpiresAt.After(now) {
+			return false, fmt.Errorf("%w: %s is no longer an expired branch", provision.ErrConflict, p.Name)
+		}
+		return !p.BranchBackups, nil
+	})
 }
 
 // Run sweeps every interval until ctx ends.

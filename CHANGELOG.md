@@ -55,6 +55,11 @@ bundle share one version (spec §11.5).
   operation while that is kept); after every reset the background
   `copy_branch_files` puts the files no refilled row names on the garbage
   list for the storage sweep, then copies the parent's files again.
+- **The branch expiry sweep no longer deletes a branch saved at the last
+  minute.** It deleted from a list read at the start of the pass, so a
+  branch extended or detached in between was deleted anyway, without the
+  final backup turned on meanwhile. Each delete now checks the locked row
+  is still an expired branch, and takes the final-backup choice from it.
 - **A read-only member could read as the project owner in the SQL console.**
   Read-only sessions, read-scope tokens and the table browser's raw filter
   now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects

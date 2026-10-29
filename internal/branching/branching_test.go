@@ -2,9 +2,11 @@ package branching
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -195,7 +197,63 @@ func TestBranchInAnotherOrganisationIsNotFilled(t *testing.T) {
 	}
 }
 
-// TestResetCopiesFilesAgain: a branch made with copy_files remembers it,
+// TestSweepChecksTheLockedRow: the sweep deletes from a list it read
+// earlier, so each delete looks at the locked row again: a branch extended
+// or detached since is kept, and the final backup follows the row as it is.
+func TestSweepChecksTheLockedRow(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	q := store.New(h.db)
+	parent := h.project(t, "Shop", nil)
+	extended, detached, backedUp, expired := h.project(t, "a", &parent), h.project(t, "b", &parent), h.project(t, "c", &parent), h.project(t, "d", &parent)
+	past := h.now.Add(-time.Minute)
+	if _, err := h.db.Exec(ctx, `UPDATE projects SET expires_at = $1 WHERE parent_project_id = $2`, past, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	list, err := q.ExpiredBranches(ctx, h.now)
+	if err != nil || len(list) != 4 {
+		t.Fatalf("expired: %d %v", len(list), err)
+	}
+	// Between the list and the deletes, users act.
+	if _, err := h.s.SetExpiry(ctx, extended.ID, ptr(h.now.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.DetachBranch(ctx, detached.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.s.SetBackups(ctx, backedUp.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range list {
+		op, err := h.s.expire(ctx, b.ID, h.now)
+		switch b.ID {
+		case extended.ID, detached.ID:
+			if !errors.Is(err, provision.ErrConflict) {
+				t.Errorf("%s: %v", b.Name, err)
+			}
+			if p := h.get(t, b.ID); p.Status != provision.StatusActive {
+				t.Errorf("%s was deleted: %s", b.Name, p.Status)
+			}
+		case backedUp.ID, expired.ID:
+			if err != nil {
+				t.Fatalf("%s: %v", b.Name, err)
+			}
+			var params struct {
+				Skip bool `json:"skip_final_backup"`
+			}
+			if err := json.Unmarshal(op.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if params.Skip != (b.ID == expired.ID) {
+				t.Errorf("%s: skip_final_backup %v", b.Name, params.Skip)
+			}
+		}
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestResetCopiesFilesAgain:a branch made with copy_files remembers it,
 // and its resets copy the parent's files again.
 func TestResetCopiesFilesAgain(t *testing.T) {
 	h := newHarness(t)
