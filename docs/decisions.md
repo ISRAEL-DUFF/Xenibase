@@ -921,3 +921,14 @@ The spec's own decisions log is §16.
 | 5 | Detach | `ALTER SYSTEM RESET` of all three after promotion. | They would otherwise pass to the new project's own standbys. |
 | 6 | Done-when | `TestReplicaStandbySettings`: a 901 s delay is refused; a replica created with feedback on and 120 s runs with them (both delays) while the primary keeps feedback off; the primary holds the replica's xmin on its slot; a `PATCH` to off and 5 s applies without the replica restarting and the primary releases the xmin; a partial `PATCH` keeps the other field; an unknown replica gets 404. | |
 
+## Connections per dedicated instance (October 2026)
+
+| # | Topic | Decision | Why |
+| --- | --- | --- | --- |
+| 1 | The rule | `max_connections` = 50 per GB of the instance's memory, clamped to 100–500 (`provision.MaxConnectionsFor`), stored on `instances.max_connections`. A project's connection limit may be at most that less 10 (`ConnectionReserve`). | Every size had 100, so a dedicated project topped out at 90; Taskiem asked for 100–150. A backend is a process with its own `work_mem`; 50 per GB keeps a busy one inside memory next to `shared_buffers` (a quarter of memory). 10 covers Xenibase's own logins: backups, HA replication, the SLA probe, backend services, admin operations. |
+| 2 | Stored, not derived | The value is a column, set at creation and changed only by a resize. Existing instances keep 100. | A restore must never get fewer than its source, which a value derived from a different size could give; and an upgrade shouldn't restart every instance to change it. |
+| 3 | Restores and detaches | A PITR or a detached replica's instance takes `max(its own size's, the source's)` (`CreateParams.MinMaxConnections`); a major upgrade or a same-size move keeps at least the source's. | Postgres refuses to replay WAL as a hot standby with fewer `max_connections` than the server that wrote it. |
+| 4 | Patroni | A resize that changes it `PATCH`es Patroni's dynamic configuration before the members restart (and puts it back if the resize fails). | `max_connections` lives in the DCS and must match on every member; the bootstrap value in the member spec only counts when the cluster is created. |
+| 5 | Limits | `provision.Update` refuses a dedicated limit over the ceiling, naming it. A resize or a resized move to less memory lowers the stored limit (and pool size) and applies it; `ensureRole` also never sets a role limit above the ceiling. Shared projects keep the plan's limit. | The customer pays for the size; the plan's connection limit was written for shared clusters. |
+| 6 | Done-when | `TestDedicatedConnectionLimit`: a 4 GB instance runs with 200 and reports a ceiling of 190; a limit of 150 reaches the role; 190 is accepted, 191 refused; a resize to 1 GB runs with 100 and the limit becomes 90 on the role too. `TestDedicatedResizeHA` resizes to 3 GB and every member runs with 150. | |
+

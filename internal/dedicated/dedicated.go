@@ -151,11 +151,12 @@ func ProfileByName(name string) (provision.Profile, bool) {
 	return provision.Profile{}, false
 }
 
-// settings is postgresql.conf for a profile (spec §4.2: its own tuning).
-func settings(p provision.Profile) map[string]string {
+// settings is postgresql.conf for a profile (spec §4.2: its own tuning)
+// with maxConnections connections.
+func settings(p provision.Profile, maxConnections int) map[string]string {
 	mb := func(n int) string { return strconv.Itoa(n) + "MB" }
 	return map[string]string{
-		"max_connections":            "100",
+		"max_connections":            strconv.Itoa(maxConnections),
 		"shared_buffers":             mb(p.MemoryMB / 4),
 		"effective_cache_size":       mb(p.MemoryMB * 3 / 4),
 		"maintenance_work_mem":       mb(min(max(p.MemoryMB/16, 64), 2048)),
@@ -464,7 +465,7 @@ func (s *Service) instanceSpec(ctx context.Context, inst store.Instance) (agenta
 	prof := profileOf(inst)
 	return agentapi.InstanceSpec{
 		ID: inst.ID.String(), Kind: agentapi.InstanceDedicated, CPUs: prof.CPUs, MemoryMB: prof.MemoryMB,
-		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof), WALG: &w,
+		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, int(inst.MaxConnections)), WALG: &w,
 		PGVersion: int(inst.PgVersion),
 	}, nil
 }

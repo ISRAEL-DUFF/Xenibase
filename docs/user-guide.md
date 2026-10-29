@@ -203,6 +203,28 @@ storage:
 Statements running over 10 minutes, and transactions idle over 5, are
 ended on the shared tier.
 
+### Connections
+
+A project's **connection limit** (Project Settings → Connections and timeouts → **Max
+backend connections**) caps how many connections its logins hold open to
+Postgres. It is not the number of clients your apps can open: those
+connect to the pooler (up to 2,000 on each port). In transaction mode,
+port 6543, many clients share a small pool of Postgres connections; in
+session mode, port 5432 (needed for `LISTEN/NOTIFY` and migrations), each
+client holds one.
+
+- **Shared projects**: 20 by default, up to your plan's limit.
+- **Dedicated projects**: 90 by default. Each Postgres connection is a
+  process, so how many an instance holds depends on its memory:
+  `max_connections` is 50 per GB, from 100 (2 GB or less) to 500 (10 GB
+  or more), for example 200 on a 4 GB instance and 400 on 8 GB. The
+  project can have all of it but 10, which Xenibase keeps for backups,
+  replication, probes and backend services: up to 190 on 4 GB. The
+  panel shows the most this instance allows. Resizing to less
+  memory lowers the limit to fit.
+
+Instances created before connections grew with memory keep 100 until they are resized.
+
 ## Free projects that sleep
 
 On the Free plan, a project with no client connections for 7 days is

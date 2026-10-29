@@ -251,6 +251,10 @@ type CreateParams struct {
 	// new): a detached read replica's instance keeps its member's id,
 	// which names its container and volume (V4 §7).
 	InstanceID *uuid.UUID
+	// MinMaxConnections floors a dedicated instance's max_connections: a
+	// restore's or a detached replica's source value (Postgres won't replay
+	// WAL from a server that allowed more connections).
+	MinMaxConnections int
 	// PgVersion is the Postgres major (0: the default, the newest
 	// supported). Preview allows a major in preview (V4.1 §6.1).
 	PgVersion int
@@ -453,9 +457,10 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 				prefix := "instances/" + iid.String() + "/wal-g"
 				mem := int32(profile.MemoryMB)
 				vol := int32(p.VolumeGB)
+				maxConns := int32(max(MaxConnectionsFor(profile.MemoryMB), p.MinMaxConnections))
 				ni, err := q.InsertInstance(ctx, store.InsertInstanceParams{
 					ID: iid, NodeID: *p.NodeID, Kind: TierDedicated, PgVersion: int32(p.PgVersion), CpuLimit: numeric(profile.CPUs),
-					MemLimitMb: &mem, VolumeGb: &vol, Profile: &profile.Name, WalgPrefix: &prefix,
+					MemLimitMb: &mem, VolumeGb: &vol, Profile: &profile.Name, WalgPrefix: &prefix, MaxConnections: &maxConns,
 				})
 				if err != nil {
 					return err

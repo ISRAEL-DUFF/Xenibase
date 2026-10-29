@@ -287,7 +287,9 @@ function NetworkPanel({ p }: { p: Project }) {
             />
             {d?.your_ip && (
               <span
-                className={d.your_ip_allowed ? "text-fg-muted" : "text-warn-text"}
+                className={
+                  d.your_ip_allowed ? "text-fg-muted" : "text-warn-text"
+                }
               >
                 Your address is <span className="font-mono">{d.your_ip}</span>
                 {d.your_ip_allowed
@@ -614,7 +616,11 @@ function GuardrailsPanel({ p }: { p: Project }) {
       >
         <FormRow
           label="Max backend connections"
-          description="Connections Postgres accepts for this database."
+          description={
+            p.instance?.connection_limit_max != null
+              ? `Connections Postgres accepts for this database: up to ${p.instance.connection_limit_max} on this instance (max_connections ${p.instance.max_connections}; Xenibase keeps ${(p.instance.max_connections ?? 0) - p.instance.connection_limit_max} for backups, replication and backend services). A larger instance allows more. Clients beyond it wait in the pooler.`
+              : "Connections Postgres accepts for this database."
+          }
           htmlFor="g-conn"
         >
           <Input
@@ -622,7 +628,7 @@ function GuardrailsPanel({ p }: { p: Project }) {
             aria-label="Max backend connections"
             type="number"
             min={1}
-            max={1000}
+            max={p.instance?.connection_limit_max ?? 1000}
             value={form.connection_limit}
             onChange={set("connection_limit")}
           />

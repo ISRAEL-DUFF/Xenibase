@@ -142,7 +142,7 @@ func (q *Queries) DeleteRegionEtcdMembers(ctx context.Context, region string) er
 }
 
 const etcdRegionInstances = `-- name: EtcdRegionInstances :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days FROM instances WHERE patroni AND deleted_at IS NULL AND etcd_region = $1 ORDER BY created_at
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections FROM instances WHERE patroni AND deleted_at IS NULL AND etcd_region = $1 ORDER BY created_at
 `
 
 // tenant: system - the instances under Patroni whose state is in a region's etcd cluster.
@@ -188,6 +188,7 @@ func (q *Queries) EtcdRegionInstances(ctx context.Context, region *string) ([]In
 			&i.PatroniSecret,
 			&i.EtcdRegion,
 			&i.PitrDays,
+			&i.MaxConnections,
 		); err != nil {
 			return nil, err
 		}
@@ -600,7 +601,7 @@ func (q *Queries) ListInstanceMembers(ctx context.Context, instanceID uuid.UUID)
 }
 
 const listPatroniInstances = `-- name: ListPatroniInstances :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days FROM instances WHERE patroni AND deleted_at IS NULL ORDER BY created_at
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections FROM instances WHERE patroni AND deleted_at IS NULL ORDER BY created_at
 `
 
 // tenant: system - the HA leader watcher.
@@ -646,6 +647,7 @@ func (q *Queries) ListPatroniInstances(ctx context.Context) ([]Instance, error) 
 			&i.PatroniSecret,
 			&i.EtcdRegion,
 			&i.PitrDays,
+			&i.MaxConnections,
 		); err != nil {
 			return nil, err
 		}

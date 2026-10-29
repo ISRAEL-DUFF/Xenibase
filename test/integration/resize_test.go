@@ -184,7 +184,9 @@ func TestDedicatedResizeHA(t *testing.T) {
 
 	w := startWriter(t, e, c.Connection.PooledUrl)
 	time.Sleep(time.Second)
-	cpus, mem := float32(2), 2048
+	// 3 GB: max_connections grows from 100 to 150, a change in Patroni's
+	// cluster configuration that every member takes on its restart.
+	cpus, mem := float32(2), 3072
 	resize(t, e, c.Project.Id, gen.InstanceUpdate{Cpus: &cpus, MemoryMb: &mem})
 	time.Sleep(time.Second)
 	w.Stop()
@@ -202,8 +204,11 @@ func TestDedicatedResizeHA(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range members(t, e, p.InstanceID) {
-		if got := limits(t, m.ID); got != "2000000000 2147483648" {
+		if got := limits(t, m.ID); got != "2000000000 3221225472" {
 			t.Errorf("member on %s: limits %s", m.NodeName, got)
+		}
+		if got := memberSQL(t, m.ID, "postgres", "SHOW max_connections"); got != "150" {
+			t.Errorf("member on %s: max_connections %s", m.NodeName, got)
 		}
 	}
 	conn := e.MustConnect(c.Connection.PooledUrl)

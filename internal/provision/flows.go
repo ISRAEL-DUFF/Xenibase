@@ -126,6 +126,13 @@ func (s *Service) ensureRole(ctx context.Context, p store.Project, set store.Pro
 	if set.ConnectionLimit < 1 || set.ConnectionLimit > 10000 {
 		return jobs.Permanent(fmt.Errorf("invalid connection limit %d", set.ConnectionLimit))
 	}
+	// Never more than the instance holds, whatever the settings say (they
+	// are lowered with a resize; this covers a move to a smaller size).
+	if most, ok, err := s.dedicatedLimitMax(ctx, store.New(s.db), p); err != nil {
+		return err
+	} else if ok && set.ConnectionLimit > most {
+		set.ConnectionLimit = most
+	}
 	conn, err := s.connectInstance(ctx, p.InstanceID, "postgres")
 	if err != nil {
 		return err

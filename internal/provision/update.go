@@ -130,6 +130,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, p UpdateParams, by *
 			if set, backend, err = applyPatch(set, *p.Settings); err != nil {
 				return err
 			}
+			if p.Settings.ConnectionLimit != nil {
+				if err := s.checkConnectionLimit(ctx, store.New(tx), proj, set.ConnectionLimit); err != nil {
+					return err
+				}
+			}
 		}
 		raw, err := json.Marshal(set)
 		if err != nil {
@@ -166,6 +171,15 @@ func (s *Service) runApplySettings(ctx context.Context, op store.Operation, log 
 	if err != nil {
 		return jobs.Permanent(err)
 	}
+	if err := s.applySettings(ctx, p, set, log); err != nil {
+		return err
+	}
+	return log.Info(ctx, "done", "settings applied")
+}
+
+// applySettings pushes set to p's role and the poolers, and recycles the
+// pooled server connections.
+func (s *Service) applySettings(ctx context.Context, p store.Project, set store.ProjectSettings, log *jobs.StepLogger) error {
 	if err := s.ensureRole(ctx, p, set, log); err != nil {
 		return err
 	}
@@ -176,8 +190,5 @@ func (s *Service) runApplySettings(ctx context.Context, op store.Operation, log 
 	if err := s.pooler.Reconnect(ctx, store.PoolerNames(p)...); err != nil {
 		return fmt.Errorf("recycle pooled connections: %w", err)
 	}
-	if err := log.Info(ctx, "pooler", "pooled server connections recycled"); err != nil {
-		return err
-	}
-	return log.Info(ctx, "done", "settings applied")
+	return log.Info(ctx, "pooler", "pooled server connections recycled")
 }

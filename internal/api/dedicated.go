@@ -65,7 +65,8 @@ func (s *Server) instanceSummaries(ctx context.Context) map[uuid.UUID]gen.Instan
 		}
 		if r.Kind == "dedicated" {
 			pd := int(r.PitrDays)
-			sum.PitrDays = &pd
+			mc, most := int(r.MaxConnections), provision.ConnectionLimitMax(r.MaxConnections)
+			sum.PitrDays, sum.MaxConnections, sum.ConnectionLimitMax = &pd, &mc, &most
 		}
 		if v, ok := life[int(r.PgVersion)]; ok {
 			st := gen.InstanceSummaryPgVersionStatus(v.Status)

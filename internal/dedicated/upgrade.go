@@ -219,7 +219,7 @@ func (s *Service) scratchTrial(ctx context.Context, p store.Project, src *pgx.Co
 	prof := provision.Profile{Name: name, CPUs: 0.5, MemoryMB: int(mem)}
 	res, err := agent.CreateInstance(ctx, agentapi.InstanceSpec{
 		ID: id.String(), Kind: agentapi.InstanceDedicated, CPUs: prof.CPUs, MemoryMB: prof.MemoryMB,
-		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof), PGVersion: version,
+		AdminUser: secret.User, AdminPassword: secret.Password, Settings: settings(prof, provision.MaxConnectionsFor(prof.MemoryMB)), PGVersion: version,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start a Postgres %d instance to test on: %w", version, err)
@@ -352,9 +352,10 @@ func (s *Service) Upgrade(ctx context.Context, up UpgradeParams) (store.Operatio
 			if src.VolumeGb != nil {
 				vol = *src.VolumeGb
 			}
+			maxConns := max(int32(provision.MaxConnectionsFor(prof.MemoryMB)), src.MaxConnections)
 			if _, err := q.InsertInstance(ctx, store.InsertInstanceParams{
 				ID: target, NodeID: src.NodeID, Kind: provision.TierDedicated, PgVersion: int32(up.PgVersion), CpuLimit: numeric(prof.CPUs),
-				MemLimitMb: &mem, VolumeGb: &vol, Profile: &prof.Name, WalgPrefix: &prefix,
+				MemLimitMb: &mem, VolumeGb: &vol, Profile: &prof.Name, WalgPrefix: &prefix, MaxConnections: &maxConns,
 			}); err != nil {
 				return nil, err
 			}

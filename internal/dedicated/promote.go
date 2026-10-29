@@ -125,9 +125,10 @@ func (s *Service) Promote(ctx context.Context, p PromoteParams) (store.Operation
 			prefix := "instances/" + target.String() + "/wal-g"
 			mem := int32(prof.MemoryMB)
 			vol := int32(cp.VolumeGB)
+			maxConns := int32(provision.MaxConnectionsFor(prof.MemoryMB))
 			if _, err := store.New(tx).InsertInstance(ctx, store.InsertInstanceParams{
 				ID: target, NodeID: *cp.NodeID, Kind: provision.TierDedicated, PgVersion: src.PgVersion, CpuLimit: numeric(prof.CPUs),
-				MemLimitMb: &mem, VolumeGb: &vol, Profile: &prof.Name, WalgPrefix: &prefix,
+				MemLimitMb: &mem, VolumeGb: &vol, Profile: &prof.Name, WalgPrefix: &prefix, MaxConnections: &maxConns,
 			}); err != nil {
 				return nil, err
 			}

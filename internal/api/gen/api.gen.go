@@ -6392,16 +6392,21 @@ type InstanceState struct {
 
 // InstanceSummary defines model for InstanceSummary.
 type InstanceSummary struct {
-	Cpus  *float32 `json:"cpus,omitempty"`
-	Error *string  `json:"error,omitempty"`
+	// ConnectionLimitMax Dedicated only. The highest connection limit the project can have on this instance: max_connections less what Xenibase keeps for its own connections (backups, replication, probes, backend services).
+	ConnectionLimitMax *int     `json:"connection_limit_max,omitempty"`
+	Cpus               *float32 `json:"cpus,omitempty"`
+	Error              *string  `json:"error,omitempty"`
 
 	// HaEnabled A primary and a streaming standby on another node (V3 §2.2).
 	HaEnabled *bool               `json:"ha_enabled,omitempty"`
 	Id        openapi_types.UUID  `json:"id"`
 	Kind      InstanceSummaryKind `json:"kind"`
-	MemoryMb  *int                `json:"memory_mb,omitempty"`
-	NodeId    openapi_types.UUID  `json:"node_id"`
-	NodeName  string              `json:"node_name"`
+
+	// MaxConnections Dedicated only. Postgres's max_connections, which grows with the instance's memory (50 per GB, 100 to 500).
+	MaxConnections *int               `json:"max_connections,omitempty"`
+	MemoryMb       *int               `json:"memory_mb,omitempty"`
+	NodeId         openapi_types.UUID `json:"node_id"`
+	NodeName       string             `json:"node_name"`
 
 	// PgRelease The release the instance runs ("18.1"), as its agent last reported.
 	PgRelease *string `json:"pg_release,omitempty"`
