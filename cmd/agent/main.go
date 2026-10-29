@@ -5,7 +5,7 @@
 //
 //	xenibase-agent register --server https://xenibase.example.com --token <one-time>
 //	xenibase-agent run
-//	xenibase-agent decrypt --key-file xenibase-backup-key.txt < x.dump.enc > x.dump
+//	xenibase-agent decrypt --key-file xenibase-backup-key.txt --in x.dump.enc --out x.dump
 //
 // Environment variables mirror the flags (XENIBASE_AGENT_*).
 package main
@@ -380,12 +380,14 @@ func keepalivedConfig(args []string) error {
 
 // decrypt turns a backup object back into a pg_dump archive with the
 // downloaded backup key, without xenibase-server: the disaster-recovery path
-// for metadata self-backups (docs/disaster-recovery.md).
+// for metadata self-backups (docs/disaster-recovery.md). With --out, a
+// wrong key or a damaged object leaves no file; on stdout, what was
+// written before the failure stays, and only the exit status says so.
 func decrypt(args []string) error {
 	fs := flag.NewFlagSet("decrypt", flag.ContinueOnError)
 	keyFile := fs.String("key-file", "", "the backup key file downloaded from Xenibase")
 	in := fs.String("in", "-", "encrypted object (- for stdin)")
-	out := fs.String("out", "-", "pg_dump archive to write (- for stdout)")
+	out := fs.String("out", "-", "pg_dump archive to write, only if it decrypts whole (- for stdout, which keeps a partial archive on failure)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

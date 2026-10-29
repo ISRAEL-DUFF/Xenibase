@@ -168,6 +168,14 @@ bundle share one version (spec §11.5).
   platform admin allow-listed for the organisation, so a tenant who
   controls that host's DNS could point it at platform services. It now
   uses the import's check.
+- **A backup download that failed part-way looked complete.** Once the
+  first bytes were sent, a decryption error ended the response normally,
+  so the browser or `curl` saved a truncated archive as a finished
+  download. The connection is now cut instead, and the download fails. The
+  disaster-recovery runbook decrypted the metadata backup through standard
+  output and restored the result even after a failure; it now uses
+  `--out`, which leaves no file on failure, and `&&`
+  (`docs/disaster-recovery.md`).
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
