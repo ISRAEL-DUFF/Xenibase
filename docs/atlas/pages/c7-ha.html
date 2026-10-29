@@ -4,17 +4,8 @@
   "title": "Dedicated instances, HA and moves",
   "part": "C",
   "order": 3,
-  "status": "planned",
   "summary": "The dedicated tier: instances on nodes, Patroni and etcd for HA, failure domains, regions, read replicas, moves between nodes, resizes and promotion from shared.",
-  "scope": [
-    "Dedicated instances: profiles, placement, resize, the maintenance window",
-    "HA: the etcd cluster, Patroni, the HA watcher, failover and the SLA probes",
-    "Failure domains and regions",
-    "Read replicas, the <code>_ro</code> route, detaching, and per-replica standby settings (<code>hot_standby_feedback</code>, standby delays; migration 00059)",
-    "<code>max_connections</code> sized from memory and kept through restores and resizes",
-    "Moves between nodes and regions, with logical replication",
-    "Promotion from shared to dedicated and demotion back"
-  ],
+  "verified": "c67d14d81fea439156a49a243aa0839d7bf5ff47",
   "sources": [
     "internal/dedicated/",
     "internal/ha/",
@@ -23,11 +14,240 @@
     "internal/logical/",
     "internal/dedicated/replica_settings.go",
     "internal/store/migrations/00059_replica_settings.sql",
+    "internal/provision/connections.go",
+    "internal/agentsvc/patroni.go",
+    "internal/store/queries/infra.sql",
+    "internal/store/queries/moves.sql",
+    "internal/store/queries/maintenance.sql",
+    "internal/pooler/manager.go",
+    "internal/backup/targets.go",
     "docs/ha.md",
     "docs/read-replicas.md",
     "docs/moves.md",
     "docs/regions.md",
-    "docs/failure-domains.md"
+    "docs/failure-domains.md",
+    "docs/decisions.md",
+    "Xenibase — V1 Specification & Build Plan.md",
+    "Xenibase — V3 Specification & Build Plan.md",
+    "Xenibase — V3.1 Specification & Build Plan.md"
   ]
 }
 -->
+<p>A dedicated project has a Postgres container of its own on a node, created by that node's agent and archiving WAL with WAL-G from its first segment. Everything here builds on that container: HA adds a second member under Patroni, a read replica adds a member that never leads, a resize recreates the container with new limits, and a move builds a container elsewhere and copies the database into it by logical replication. Every long step is an operation (<x-page id="control-plane--queue">the operations queue</x-page>); the kinds and their attempts are in <x-ref path="internal/dedicated/shared.go" symbol="func (s *Service) Kinds() map[string]jobs.Kind {"><code>Kinds</code></x-ref>.</p>
+<x-packages names="dedicated,ha,faildomain,regions,logical"/>
+
+<h2 id="ha--instances">Dedicated instances</h2>
+<p>An instance is an <code>instances</code> row with its node, limits, volume, major, <code>max_connections</code>, WAL-G prefix and sealed superuser secret; the project points at it through <code>projects.instance_id</code>. Sizes are three profiles (<x-ref path="internal/dedicated/dedicated.go" symbol="var Profiles = []provision.Profile{"><code>Profiles</code></x-ref>) or any size a resize asks for:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Profile</th><th>vCPU</th><th>Memory</th><th><code>max_connections</code></th></tr></thead>
+  <tbody>
+    <tr><td><code>small</code> (default)</td><td>1</td><td>1 GB</td><td>100</td></tr>
+    <tr><td><code>medium</code></td><td>2</td><td>4 GB</td><td>200</td></tr>
+    <tr><td><code>large</code></td><td>4</td><td>8 GB</td><td>400</td></tr>
+    <tr><td><code>custom</code></td><td>0.25 to 64</td><td>512 MB to 256 GB</td><td>50 per GB, 100 to 500</td></tr>
+  </tbody>
+</table></div>
+<p>The volume defaults to 20 GB (1 to 16,384). Docker local volumes cannot enforce it, so it is an allowance: what is billed and where the disk warning sits. Postgres settings follow memory, and the agent adds <code>wal_level=logical</code> and the WAL-G <code>archive_command</code>:</p>
+<x-code path="internal/dedicated/dedicated.go" start="func settings(p provision.Profile, maxConnections int) map[string]string {"/>
+
+<h3 id="ha--placement">Placement and creation</h3>
+<p><x-ref path="internal/dedicated/dedicated.go" symbol="func (s *Service) Validate(ctx context.Context, p *provision.CreateParams)"><code>Validate</code></x-ref> refuses a dedicated create while no default storage target or backup key exists, then places it with <x-ref path="internal/dedicated/hosts.go" symbol="func (s *Service) placeDedicated("><code>placeDedicated</code></x-ref>: among the region's healthy, active <code>dedicated</code> or <code>both</code> nodes where the size <x-ref path="internal/dedicated/resize.go" symbol="func fits(n store.CapacityNodesRow"><code>fits</code></x-ref> (the agent's reported CPUs, memory and disk, less what dedicated instances there are allocated), the one with the fewest dedicated instances. When nothing fits and capacity automation is on, it asks for a new machine and the create waits up to 25 minutes for it to join (<x-ref path="internal/dedicated/hosts.go" symbol="func (s *Service) waitForHost("><code>waitForHost</code></x-ref>). A node chosen by hand gets the same checks.</p>
+<p><x-ref path="internal/dedicated/dedicated.go" symbol="func (s *Service) Ensure(ctx context.Context, op store.Operation"><code>Ensure</code></x-ref> is the instance half of the create flow (<x-page id="control-plane--provisioning"/>): it generates <code>xenibase_admin</code> (a point-in-time restore takes the source's, which is in the data), fixes where the archive goes, has the agent create the container, records its address, and revokes <code>CONNECT</code> on <code>postgres</code> and <code>template1</code> from <code>PUBLIC</code>. The first base backup follows, always taken on the current leader; WAL-G keeps 7, or one per day of a longer PITR add-on (<x-page id="backups"/>). A restart from the Instance panel is a <x-ref path="internal/dedicated/dedicated.go" symbol="func (s *Service) Recreate(ctx context.Context, inst store.Instance)"><code>Recreate</code></x-ref>, a fresh container from the node's current image on the same volume. Start, stop and restart are refused with HA on.</p>
+
+<h3 id="ha--reaper">The orphan reaper</h3>
+<p>A create whose rollback could not reach the node leaves an instance behind. Every minute <x-ref path="internal/dedicated/dedicated.go" symbol="func (s *Service) ReapOrphans(ctx context.Context) (int, error) {"><code>ReapOrphans</code></x-ref> destroys the container, volume and WAL-G archive of each instance this returns, once its node is healthy:</p>
+<x-code path="internal/store/queries/infra.sql" start="-- name: ListOrphanedInstances :many" end="ORDER BY i.created_at;" lang="sql"/>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The reaper destroys the target of a running move, promotion or major upgrade.</strong> These insert the target instance when they are queued, but the project points at the source until the cutover commits, so the target matches every condition above. Five minutes after queueing (a promotion waiting for a host, or any copy of more than a few GB) the sweep destroys it mid-copy, deletes its archive and marks it deleted. The retry recreates an empty container under a row that keeps <code>deleted_at</code>, so the project can finish on an instance every <code>deleted_at IS NULL</code> query ignores. If the sweep lists the target just before the cutover commits and removes it just after, the project's only running copy is gone and only the stopped source, kept 48 hours, remains. A scratch test confirmed the query returns a 10-minute-old target while the project is still on its source. Exclude instances named as <code>target_instance</code> by a queued or running operation.</p>
+</div>
+
+<h2 id="ha--connections"><code>max_connections</code></h2>
+<p><x-ref path="internal/provision/connections.go" symbol="func MaxConnectionsFor(memMB int) int {"><code>MaxConnectionsFor</code></x-ref> gives 50 per whole GB, between 100 and 500, stored per instance (migration 00060). A project's connection limit may reach that less 10 kept for Xenibase's own logins (<code>ConnectionReserve</code>).</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Path</th><th>The new instance's <code>max_connections</code></th></tr></thead>
+  <tbody>
+    <tr><td>Create, promotion</td><td>From memory.</td></tr>
+    <tr><td>Point-in-time restore, replica detach</td><td>At least the source's (<code>MinMaxConnections</code>): a standby will not replay WAL from a server that allowed more.</td></tr>
+    <tr><td>Same-size node move, major upgrade</td><td>The larger of the formula and the source's.</td></tr>
+    <tr><td>Resize, or a move that is one</td><td>From the new memory; <x-ref path="internal/provision/connections.go" symbol="func (s *Service) FitConnectionLimit("><code>FitConnectionLimit</code></x-ref> then lowers the project's limit and pool if they no longer fit.</td></tr>
+    <tr><td>Under Patroni</td><td>It lives in the cluster's dynamic configuration, the same on every member, so a resize patches it in etcd first (<code>setClusterMaxConnections</code>).</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="ha--resize">Resizing</h2>
+<p><x-ref path="internal/dedicated/resize.go" symbol="func (s *Service) PlanResize("><code>PlanResize</code></x-ref> refuses a smaller disk and checks that the difference fits on every node holding a member. <x-ref path="internal/dedicated/resize.go" symbol="func (s *Service) runResize("><code>runResize</code></x-ref> writes the size onto the row and recreates. Without HA the poolers freeze the routes (<x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) Freeze("><code>Freeze</code></x-ref>: PAUSE on the transaction pooler, KILL on the session pooler) around one recreate, then replicas follow one at a time. With HA the standby and replicas go first, the project switches over, then the old primary is recreated, so writes pause only for the switchover. A disk change alone needs no restart. When the node cannot hold the new size, a project without HA or replicas is moved into an instance of the new size on another node; with them the resize is refused. <code>failResize</code> puts the old size back on the row and, without HA, recreates at it.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A resized instance cannot be restored or detached.</strong> A size that matches no profile is recorded as profile <code>custom</code> (<x-ref path="internal/dedicated/resize.go" symbol="func profileName(sz Size) string {"><code>profileName</code></x-ref>). A point-in-time restore and a replica detach copy the source's profile name into the new project, and <code>Validate</code> looks it up in <code>Profiles</code>, which has no <code>custom</code>. Every restore of a project resized to a non-profile size fails at once with <code>unknown profile "custom"</code> (confirmed with a scratch test), and restore is the path used in an incident. Pass the source's CPUs and memory as a size, as <code>Move</code> does.</p>
+</div>
+
+<h2 id="ha--maintenance">The maintenance window</h2>
+<p>Agents report each instance's running release and its image's, checked hourly. Every 5 minutes <x-ref path="internal/dedicated/maintenance.go" symbol="func (s *Service) MaintenanceSweep("><code>MaintenanceSweep</code></x-ref>, inside the window (default Sunday 02:00 to 06:00 UTC), upgrades at most one instance that is behind, dedicated first, skipping any with a project not <code>active</code> or with an operation pending (<x-ref path="internal/store/queries/maintenance.sql" symbol="-- name: InstanceBusy :one"><code>InstanceBusy</code></x-ref>). <x-ref path="internal/dedicated/maintenance.go" symbol="func (s *Service) MinorUpgrade(ctx"><code>MinorUpgrade</code></x-ref> freezes the poolers for every project on it, recreates, resumes, and records the pause. An HA instance is switched over instead (<x-ref path="internal/dedicated/maintenance.go" symbol="func (s *Service) minorUpgradeHA("><code>minorUpgradeHA</code></x-ref>), and only inside maintenance announced to it 72 hours ahead; the sweep drafts that announcement for the first window at least 96 hours away, for an admin to confirm.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A maintenance restart is not an operation, so nothing keeps other work off the instance.</strong> The sweep checks <code>InstanceBusy</code> once and never takes the project's exclusive lock. For an HA instance <code>minorUpgradeHA</code> recreates the standby and waits for it to stream (up to an hour), and meanwhile the owner can queue <code>ha_disable</code>, which removes the standby it is about to switch to, or a resize, which runs its own <code>minorUpgradeHA</code> on the same members. The loop also runs on every <code>xenibase-server</code> without a lock, so two servers can restart instances at once, or the same one twice. Run minor upgrades through <code>EnqueueExclusive</code> as operations, or take a per-instance advisory lock.</p>
+</div>
+
+<h2 id="ha--ha">High availability</h2>
+<p>An HA project runs two Patroni members on nodes in different failure domains, with Patroni's state in its region's three-member etcd cluster. Patroni decides who leads; <code>xenibase-server</code> follows the leader and moves the pooler route.</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 320" role="img" aria-labelledby="ha-topo-title">
+  <title id="ha-topo-title">An HA project: the poolers route to the leader, the standby and read replicas stream from it, the leader holds its lease in the region's etcd cluster, and xenibase-server watches the members' Patroni APIs</title>
+  <defs><marker id="ha-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0L10 5L0 10z"/></marker></defs>
+  <g data-go="control-plane"><rect class="d-box" x="20" y="30" width="190" height="60" rx="7"/><text class="d-title" x="115" y="55" text-anchor="middle">xenibase-server</text><text class="d-sub" x="115" y="74" text-anchor="middle">HA watcher, every second</text></g>
+  <g data-go="connections"><rect class="d-box" x="300" y="30" width="200" height="60" rx="7"/><text class="d-title" x="400" y="55" text-anchor="middle">poolers</text><text class="d-sub" x="400" y="74" text-anchor="middle">route &lt;db&gt; → the leader</text></g>
+  <rect class="d-band" x="560" y="24" width="180" height="140" rx="8"/>
+  <text class="d-row" x="650" y="44" text-anchor="middle">ETCD · ONE PER REGION</text>
+  <rect class="d-box" x="575" y="54" width="150" height="28" rx="5"/><text class="d-mono" x="650" y="72" text-anchor="middle">member · domain A</text>
+  <rect class="d-box" x="575" y="88" width="150" height="28" rx="5"/><text class="d-mono" x="650" y="106" text-anchor="middle">member · domain B</text>
+  <rect class="d-box" x="575" y="122" width="150" height="28" rx="5"/><text class="d-mono" x="650" y="140" text-anchor="middle">member · domain C</text>
+  <g class="d-core"><rect class="d-box" x="20" y="190" width="170" height="72" rx="7"/><text class="d-title" x="105" y="214" text-anchor="middle">leader</text><text class="d-sub" x="105" y="232" text-anchor="middle">Patroni + Postgres, archives</text><text class="d-mono" x="105" y="250" text-anchor="middle">node 1 · domain A</text></g>
+  <rect class="d-box" x="240" y="190" width="170" height="72" rx="7"/><text class="d-title" x="325" y="214" text-anchor="middle">standby</text><text class="d-sub" x="325" y="232" text-anchor="middle">async, or sync on request</text><text class="d-mono" x="325" y="250" text-anchor="middle">node 2 · domain B</text>
+  <rect class="d-box" x="460" y="190" width="170" height="72" rx="7"/><text class="d-title" x="545" y="214" text-anchor="middle">read replica</text><text class="d-sub" x="545" y="232" text-anchor="middle">nofailover, nosync</text><text class="d-mono" x="545" y="250" text-anchor="middle">node 3 · any region</text>
+  <path class="d-line" d="M210 60H298" marker-end="url(#ha-ah)"/><text class="d-msg" x="254" y="52" text-anchor="middle">PAUSE · route · RESUME</text>
+  <path class="d-line" d="M60 90V188" marker-end="url(#ha-ah)"/><text class="d-msg" x="66" y="140">GET /cluster</text>
+  <path class="d-line" d="M380 90L150 188" marker-end="url(#ha-ah)"/><text class="d-msg" x="300" y="135" text-anchor="middle">client traffic</text>
+  <path class="d-line" d="M190 226H238" marker-end="url(#ha-ah)"/><text class="d-msg" x="214" y="219" text-anchor="middle">WAL</text>
+  <path class="d-line" d="M105 262C105 305 545 305 545 264" marker-end="url(#ha-ah)"/><text class="d-msg" x="325" y="300" text-anchor="middle">WAL, from whichever member leads</text>
+  <path class="d-line dash" d="M190 200L573 110" marker-end="url(#ha-ah)"/><text class="d-msg" x="470" y="146" text-anchor="middle">leader key, lease 20 s</text>
+</svg>
+<figcaption class="d-caption">Every member talks to etcd; only the leader's lease is drawn. The poolers only ever route to the member holding the lease.</figcaption>
+</figure>
+
+<h3 id="ha--etcd">The etcd cluster and its CA</h3>
+<p>Each region has its own cluster, so its failover depends only on its own machines (V3.1 §3.1). <x-ref path="internal/ha/etcd.go" symbol="func (s *Service) Setup(ctx context.Context, nodeIDs"><code>ha.Setup</code></x-ref> takes three distinct healthy nodes of one region in three failure domains, refuses while any etcd setup or replacement is pending anywhere, and has each agent run <code>etcd:v3.6.5</code> as a new cluster with a random token. Health is refreshed every 30 seconds; <x-ref path="internal/ha/etcd.go" symbol="func (s *Service) Ready(ctx context.Context, region string) error {"><code>Ready</code></x-ref>, checked before HA or a replica is added, wants three members with a majority healthy.</p>
+<p>The etcd CA is separate from the agent CA, so neither's certificates pass for the other's. <x-ref path="internal/ha/ca.go" symbol="func LoadCA("><code>LoadCA</code></x-ref> creates it once under an advisory lock (P-256, 20 years, key sealed with the master key). Members get 5-year server-and-client certificates, and each HA instance a client certificate <code>patroni:&lt;instance&gt;</code>. Etcd checks client certificates on both ports but has no per-cluster authorisation: every Patroni scope sits under <code>/xenibase/</code> and any certificate from the CA can write any key. Isolation between projects rests on tenants never getting a shell or superuser in a member container, whose environment holds the key.</p>
+<p><x-ref path="internal/ha/replace.go" symbol="func (s *Service) Replace(ctx context.Context, oldNode"><code>Replace</code></x-ref> swaps a member: a dead one is removed first so the other two keep a quorum, a live one (a drained node) only after the new one joins. <x-ref path="internal/dedicated/ha_etcd.go" symbol="func (s *Service) MoveToRegionEtcd("><code>MoveToRegionEtcd</code></x-ref> moves a project whose state is still in the home region's cluster: it removes the standby, restarts the leader on the new cluster under a pooler pause, and builds a new standby, so the project has none until the end.</p>
+
+<h3 id="ha--members">Patroni members</h3>
+<p>An HA instance stays one row that follows its leader: <code>node_id</code>, <code>leader_member</code> and the addresses are the leader's. Each member is a container keyed by its own ID in <code>instance_members</code>, and the first member's ID is the instance's (<x-ref path="internal/dedicated/ha.go" symbol="func leaderKey(inst store.Instance) uuid.UUID {"><code>leaderKey</code></x-ref>). <x-ref path="internal/dedicated/ha.go" symbol="func (s *Service) memberSpec("><code>memberSpec</code></x-ref> is the plain spec plus a Patroni block: the scope, the region's etcd endpoints, the instance's etcd certificate, the replication and REST passwords and synchronous mode. The agent writes the configuration:</p>
+<x-code path="internal/agentsvc/patroni.go" start="&quot;bootstrap&quot;: map[string]any{" lines="11"/>
+
+<h3 id="ha--enable">Turning HA on and off</h3>
+<p><x-ref path="internal/dedicated/ha.go" symbol="func (s *Service) EnableHA("><code>EnableHA</code></x-ref> needs a running instance, its region's etcd ready, and a node from <x-ref path="internal/dedicated/ha.go" symbol="func (s *Service) standbyNode("><code>standbyNode</code></x-ref>: healthy, dedicated-capable, in the region, holding no member, in another failure domain, with the fewest instances. Unlike <code>placeDedicated</code> it does not check that the size fits there. <x-ref path="internal/dedicated/ha.go" symbol="func (s *Service) runHAEnable("><code>runHAEnable</code></x-ref> then creates <code>xenibase_replicator</code> and the Patroni secret, recreates the container under Patroni on the same data with the poolers frozen (about 4 seconds; on failure back to a plain container), starts the standby from the newest base backup (<code>pg_basebackup</code> as fallback), waits until it streams, and adds the SLA probe login. A standby that never joins is removed. Turning HA off removes the standby and leaves Patroni with one member, so turning it on again needs no restart. With HA on, node moves, demotion, major upgrades and stop or restart are refused.</p>
+
+<h3 id="ha--watcher">The HA watcher: failover and routing</h3>
+<p>Patroni promotes the standby when the leader's 20-second lease expires and the standby is under 1 MB behind. The route is the server's job: <x-ref path="internal/dedicated/ha_watch.go" symbol="func (s *Service) RunHAWatcher("><code>RunHAWatcher</code></x-ref> polls every instance under Patroni once a second, and <x-ref path="internal/dedicated/ha_watch.go" symbol="func (s *Service) watchOne(ctx context.Context, id uuid.UUID) error {"><code>watchOne</code></x-ref> decides:</p>
+<x-code path="internal/dedicated/ha_watch.go" start="current := leaderKey(inst)" end="return nil"/>
+<p>No running leader for two polls freezes the routes so clients queue. The current leader counts as gone as soon as its own API stops answering, about 15 seconds before the other member stops listing it. A new leader is written onto the row and the poolers synced (<x-ref path="internal/dedicated/ha_watch.go" symbol="func (s *Service) routeTo("><code>routeTo</code></x-ref>), a <code>failover_events</code> row records the outage, and the poolers resume. The old primary rejoins through <code>pg_rewind</code>. Writes come back 17 to 20 seconds after the primary's node dies in the tests. When etcd loses its quorum, failsafe mode keeps a primary that reaches every member serving, and no failover happens until the quorum returns; <code>ensureFailsafe</code> turns it on for clusters made before it was the default.</p>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p><x-ref path="Xenibase — V3 Specification &amp; Build Plan.md" symbol="### 2.2 High availability for dedicated instances">V3 §2.2</x-ref> fences with "Patroni's watchdog plus the leader lease". Containers have no watchdog device, so Patroni runs with <code>watchdog: off</code> and the lease alone fences (<x-ref path="docs/decisions.md" symbol="| 6 | Fencing |">decision M19 #6</x-ref>): a primary whose Patroni hangs while Postgres runs is stopped by nothing, and only the poolers' following the lease keeps traffic off it. The spec also puts etcd on the control node and moves archiving with Patroni callbacks; the code runs a cluster per region on tenant nodes and needs no callbacks, as Postgres archives only on a primary.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The watcher pauses a healthy project whenever the control plane loses sight of its primary.</strong> "No leader" includes the leader's REST API not answering <code>xenibase-server</code> within 2 seconds, twice (<code>memberUp</code>). A fault between the server and one node freezes every HA project led there, although Patroni, etcd and the poolers are fine, until the server sees the leader again or PgBouncer's wait timeout fails the clients. With two servers on one metadata database it is worse: the watcher has no lock and its <code>paused</code> flag and switchover mutex are per process, so one server's partial view pauses the poolers that only it will resume, and the other records a "failover" for the first's switchover. Pause only when Patroni agrees (the other members stop listing the leader too), and run the watcher on one server through an advisory lock.</p>
+</div>
+
+<h3 id="ha--switchover">Switchover and synchronous replication</h3>
+<p><x-ref path="internal/dedicated/ha_watch.go" symbol="func (s *Service) switchOver("><code>switchOver</code></x-ref> holds the instance's watcher lock, picks the least-lagging streaming standby that is not a replica (with synchronous replication, the synchronous standby, waiting up to 30 seconds for one), freezes the poolers, calls Patroni's <code>/switchover</code>, waits for the candidate to lead, routes and resumes. The old primary stops cleanly first, so nothing is lost; about 2 seconds of pause. Synchronous replication patches <code>synchronous_mode</code> in Patroni's configuration; without it a failover can lose up to 1 MB of acknowledged commits.</p>
+
+<h2 id="ha--sla">The SLA probes</h2>
+<p>HA projects carry 99.9% monthly availability of the pooler endpoint. <x-ref path="internal/dedicated/sla.go" symbol="func (s *Service) ensureProbe("><code>ensureProbe</code></x-ref> creates a login <code>&lt;db&gt;_sla</code> with only <code>CONNECT</code> and a limit of 5 connections. Every minute <x-ref path="internal/dedicated/sla.go" symbol="func (s *Service) SLATick("><code>SLATick</code></x-ref> connects through each project's pooled URL and runs <code>SELECT 1</code> within five seconds; with a status page it also pushes the targets to <code>xenibase-status</code> and pulls its per-minute results, both signed. A minute is unavailable when every vantage point that probed in it failed. Minutes while the project is not <code>active</code> or its organisation is suspended are excluded, as are minutes inside maintenance announced to the project 72 hours before them (<code>ApplyMaintenanceExclusions</code>, over the last six hours on every tick).</p>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p><x-ref path="Xenibase — V3 Specification &amp; Build Plan.md" symbol="### 2.7 SLA">V3 §2.7</x-ref> counts a minute unavailable "if the probe fails from two vantage points". The code needs only every vantage point that probed to fail, so without a status page one failed internal probe makes a minute unavailable (<x-ref path="docs/decisions.md" symbol="| 11 | SLA probes |">decision M19 #11</x-ref>).</p>
+</div>
+
+<h2 id="ha--domains">Failure domains and regions</h2>
+<p>A failure domain is what fails with a node: a rack, a host, a power feed. <x-ref path="internal/faildomain/faildomain.go" symbol="func Separated(a, b store.Node) bool {"><code>Separated</code></x-ref> decides whether two nodes can fail together. A recorded domain wins and a node without one counts as alone; otherwise two Hetzner servers are apart only inside the same spread placement group, and a node with neither is its own domain. The rule binds an HA pair (<code>standbyNode</code> refuses), a region's etcd members (setup and replacement refuse) and a region's pooler pair (a warning); read replicas never take over, so they are exempt. Changing a domain moves nothing: <x-ref path="internal/faildomain/check.go" symbol="func Check(ctx context.Context, q *store.Queries) ([]Problem, error) {"><code>faildomain.Check</code></x-ref> lists the groups that now break it, for a banner and a <code>failure_domain</code> alert.</p>
+<p>A region groups nodes, a pooler pair with its own hostname (<x-page id="connections--pooler-hosts">pooler hosts</x-page>), a storage target and a copy target. Placement, standbys, promotions and demotions stay in the project's region. A hidden region's launch checks (<x-ref path="internal/regions/readiness.go" symbol="func (s *Service) Readiness("><code>Readiness</code></x-ref>) block opening it without a healthy node, with etcd that is not three members in three domains, or with a pair sharing a domain.</p>
+
+<h2 id="ha--replicas">Read replicas</h2>
+<p>A read replica is a member tagged <code>nofailover</code> and <code>nosync</code>: it streams from whichever member leads, is never promoted and never holds up a commit. A project may have two. <x-ref path="internal/dedicated/replicas.go" symbol="func (s *Service) runCreateReplica("><code>runCreateReplica</code></x-ref> first puts a plain instance under Patroni (the same restart as HA), then builds the member from the newest base backup on a healthy node holding no member, in the project's region or, without data residency, another. Every replica of an instance publishes on one port, <code>20000 + fnv32(instance) % 10000</code>, because PgBouncer takes one port for a host list. Moves, demotions, major upgrades and the regional etcd move are refused while a project has replicas.</p>
+<p>The pooler renders <code>&lt;db&gt;_ro</code> for such a project: the same logins, each server connection started with <code>SET default_transaction_read_only = on</code>, balanced across the replicas in rotation in the pooler's region, else all in rotation, else the primary (<x-ref path="internal/pooler/manager.go" symbol="func replicaHosts("><code>replicaHosts</code></x-ref>). Read-only is a session default the client can change, not a permission. On every watcher poll <x-ref path="internal/dedicated/replica_watch.go" symbol="func (s *Service) checkReplicas("><code>checkReplicas</code></x-ref> measures each replica's lag as how long ago the leader was first seen past the position the replica has not replayed, so a replica that stops replaying lags even while the leader is idle. Over 10 seconds, or not streaming, takes it out of rotation; under half that brings it back.</p>
+
+<h3 id="ha--replica-settings">Per-replica standby settings</h3>
+<p>Each replica has its own <code>hot_standby_feedback</code> and one delay for both <code>max_standby_streaming_delay</code> and <code>max_standby_archive_delay</code>; the primary and standbys keep Postgres's defaults.</p>
+<x-code path="internal/store/migrations/00059_replica_settings.sql" start="ALTER TABLE read_replicas" end="ADD COLUMN settings_error text;" lang="sql"/>
+<p>They reach the replica twice: in <code>memberSpec</code>'s local parameters, so a recreated container starts with them, and through <x-ref path="internal/dedicated/replica_settings.go" symbol="func (s *Service) UpdateReplicaSettings("><code>UpdateReplicaSettings</code></x-ref>, which stores them and, on a streaming replica, runs <code>ALTER SYSTEM</code> and a reload and reads back what the server runs with. The values can only be <code>on</code>, <code>off</code> or <code>&lt;n&gt;s</code>, checked before quoting. The watcher re-confirms them every 5 minutes (30 seconds after a failure), which also covers a replica rebuilt from a base backup with the primary's <code>postgresql.auto.conf</code>.</p>
+
+<h3 id="ha--detach">Detaching a replica</h3>
+<p><x-ref path="internal/dedicated/replica_detach.go" symbol="func (s *Service) DetachReplica("><code>DetachReplica</code></x-ref> turns a streaming replica into a new dedicated project while the source runs on. The new instance takes the member's ID, so container and volume keep their names. <x-ref path="internal/dedicated/replica_detach.go" symbol="func (s *Service) ensureDetached("><code>ensureDetached</code></x-ref> deletes the member row, recreates the container as a plain instance with the source's superuser, promotes it with <code>pg_promote</code>, resets <code>primary_conninfo</code>, the slot and the standby settings, and renames the database and owner as a restore does. A failure removes the new project and the replica.</p>
+
+<h2 id="ha--moves">Moves</h2>
+<p>A node move (<code>logical_move</code>), a major upgrade (<x-page id="postgres-versions"/>), a promotion and a demotion all copy through one engine. A node move to another region's node is a region move. Each holds the project in a non-active status, which keeps other operations off it, for two attempts. <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) Move(ctx context.Context, mp MoveParams)"><code>Move</code></x-ref> refuses HA, replicas, the same node, and a region the project's data residency or a hidden region's early access forbids. A shared project goes into the target node's shared cluster of the same major; a dedicated one gets a new instance of the same size.</p>
+
+<figure class="diagram seq" aria-labelledby="mv-cap">
+<svg viewBox="0 0 700 470" role="img" aria-labelledby="mv-title">
+  <title id="mv-title">A logical move: prepare the target, replicate while the source serves, freeze writes, wait for a marker row, copy sequences, commit the switch in the metadata database, resume the poolers</title>
+  <defs><marker id="mv-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0L10 5L0 10z"/></marker></defs>
+  <text class="d-lane" x="60" y="22" text-anchor="middle">worker</text>
+  <text class="d-lane" x="200" y="22" text-anchor="middle">source</text>
+  <text class="d-lane" x="340" y="22" text-anchor="middle">target</text>
+  <text class="d-lane" x="480" y="22" text-anchor="middle">poolers</text>
+  <text class="d-lane" x="620" y="22" text-anchor="middle">metadata</text>
+  <path class="d-life" d="M60 34V460M200 34V460M340 34V460M480 34V460M620 34V460"/>
+  <path class="d-line" d="M60 58H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="200" y="52" text-anchor="middle">Ensure · roles, same verifiers</text>
+  <path class="d-line" d="M60 86H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="200" y="80" text-anchor="middle">schema, owners kept</text>
+  <path class="d-line" d="M60 114H198" marker-end="url(#mv-ah)"/><text class="d-msg" x="130" y="108" text-anchor="middle">publication · DDL block</text>
+  <path class="d-line" d="M60 140H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="270" y="134" text-anchor="middle">CREATE SUBSCRIPTION</text>
+  <path class="d-line dash" d="M200 168H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="270" y="162" text-anchor="middle">copy, then stream</text>
+  <text class="d-msg" x="66" y="190">poll: lag &lt; 1 MB for 30 s</text>
+  <rect class="d-note" x="20" y="204" width="660" height="140" rx="6"/>
+  <text class="d-row" x="30" y="220">WRITES FROZEN</text>
+  <path class="d-line" d="M60 236H198" marker-end="url(#mv-ah)"/><text class="d-msg" x="130" y="230" text-anchor="middle">NOLOGIN · end sessions</text>
+  <path class="d-line" d="M60 258H478" marker-end="url(#mv-ah)"/><text class="d-msg" x="410" y="252" text-anchor="middle">PAUSE / KILL</text>
+  <path class="d-line" d="M60 282H198" marker-end="url(#mv-ah)"/><text class="d-msg" x="130" y="276" text-anchor="middle">INSERT marker</text>
+  <path class="d-line dash" d="M200 296H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="270" y="292" text-anchor="middle">marker arrives</text>
+  <path class="d-line" d="M60 318H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="270" y="312" text-anchor="middle">setval +1000 · counts</text>
+  <rect class="d-tx" x="613" y="326" width="14" height="30" rx="2"/>
+  <path class="d-line" d="M60 338H611" marker-end="url(#mv-ah)"/><text class="d-msg" x="520" y="332" text-anchor="middle">cutover: instance_id, retired row</text>
+  <path class="d-line" d="M60 372H478" marker-end="url(#mv-ah)"/><text class="d-msg" x="270" y="366" text-anchor="middle">route to target · RESUME</text>
+  <path class="d-line" d="M60 400H198" marker-end="url(#mv-ah)"/><text class="d-msg" x="130" y="394" text-anchor="middle">stop, or read-only</text>
+  <path class="d-line" d="M60 428H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="200" y="422" text-anchor="middle">drop subscription, slot, publication</text>
+  <path class="d-line" d="M60 452H338" marker-end="url(#mv-ah)"/><text class="d-msg" x="200" y="446" text-anchor="middle">first base backup</text>
+</svg>
+<figcaption class="d-caption" id="mv-cap">The metadata commit is the point of no return: before it a failure rolls back to the source, after it only the finishing steps run. A dump-mode move freezes before the copy and holds the freeze through it.</figcaption>
+</figure>
+
+<h3 id="ha--logical">The copy</h3>
+<p><x-ref path="internal/dedicated/move.go" symbol="func (s *Service) runMove("><code>runMove</code></x-ref> first checks where the project is: already on the target means the cutover committed and only <code>finishMove</code> is left. Otherwise it creates a new target instance, and <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) prepareTarget("><code>prepareTarget</code></x-ref> creates the database and every login with the same SCRAM verifiers (owner, members, integrator roles, roles the owner made, NOLOGIN stand-ins for roles grants name); a second attempt first clears the first's replication objects and recreates the database. <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) copyForMove("><code>copyForMove</code></x-ref> then:</p>
+<ol>
+  <li><strong>Preflight</strong> (<x-ref path="internal/logical/logical.go" symbol="func Preflight("><code>Preflight</code></x-ref>): <code>wal_level=logical</code>, a free slot and WAL sender, a target major no older, no large objects or unlogged tables, the extensions available on the target. Any blocker falls back to dump and restore inside the freeze, recorded as <code>fallback_reason</code>.</li>
+  <li><strong>Schema:</strong> <code>pg_dump --schema-only | pg_restore</code> through the target node's agent, owners kept.</li>
+  <li><strong>Replication</strong> (<x-ref path="internal/logical/logical.go" symbol="func Setup(ctx context.Context, m Move"><code>Setup</code></x-ref>): <code>REPLICA IDENTITY FULL</code> on tables without a primary key, a marker table on both sides, an event trigger refusing tenants' DDL, a <code>REPLICATION</code> login <code>xenibase_move_&lt;op&gt;</code> (agents admit it only from <code>XENIBASE_AGENT_MOVE_ALLOW</code>), a publication <code>FOR ALL TABLES</code>, and a subscription with <code>disable_on_error</code> and, at the same major, <code>binary</code>.</li>
+  <li><strong>Catch up</strong> (<code>WaitCaughtUp</code>): every table copied, then under 1 MB behind for 30 seconds.</li>
+  <li><strong>Freeze</strong> (<x-ref path="internal/dedicated/promote.go" symbol="func (s *Service) freeze("><code>freeze</code></x-ref>): owner and member logins <code>NOLOGIN</code>, the poolers frozen, those roles' and the console's sessions ended.</li>
+  <li><strong>Cutover</strong>, within 30 seconds: the marker below, then each used sequence set to the source's value plus 1,000 steps, then exact row counts on up to 20 tables of at most 16 MB.</li>
+</ol>
+<x-code path="internal/logical/logical.go" start="func Cutover(ctx context.Context" end="res.SyncWait = time.Since(start)" caption="changes apply in commit order, so the marker's arrival proves every earlier commit arrived"/>
+<p>A dump-mode move copies with <code>pg_dump | pg_restore</code> inside the freeze and compares every table and sequence, so its pause grows with size. A logical move's does not: 115 ms at 1 GB and 135 ms at 3 GB under continuous commits, none lost (<code>TestMoveUnderLoad</code>).</p>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p><x-ref path="docs/decisions.md" symbol="| 5 | Fallback |">Decision M18 #5</x-ref> says missing extensions on the target block the move. In the code they are one more preflight blocker and every caller allows the dump fallback, so the move freezes writes, fails at <code>CREATE EXTENSION</code> and rolls back: a pause and a failed move instead of a refusal.</p>
+</div>
+
+<h3 id="ha--cutover">The switch, and how the URL stays the same</h3>
+<x-code path="internal/dedicated/move.go" start="err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {"/>
+<p><x-ref path="internal/store/queries/moves.sql" symbol="-- name: MoveCutOver :exec"><code>MoveCutOver</code></x-ref> points the project at the target. Nothing in a connection string names an instance (the pooler host, database name, role and password all stay), so once <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) finishMove("><code>finishMove</code></x-ref> re-renders the route and resumes, the held clients carry on against the target. A region move changes the hostname to the new region's, and keeps the old region in <code>forward_region</code> with <code>forward_until</code> 30 days ahead; while that is in the future the pooler sync also renders the project into the old region's configuration (<x-ref path="internal/pooler/manager.go" symbol="served := func(region string"><code>served</code></x-ref>), so the old hostname reaches the new instance until the first sync after it.</p>
+<p><code>finishMove</code> is idempotent and is also the rollback after the commit. It sets the project <code>active</code>, keeps the source for 48 hours (a shared copy read-only, a dedicated instance stopped) for <x-ref path="internal/dedicated/promote.go" symbol="func (s *Service) DropRetired("><code>DropRetired</code></x-ref> to remove, removes the replication objects on both sides in a deferred <code>cleanupMove</code>, and takes the target's first base backup, where its point-in-time window starts. Before the commit, <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) failMove("><code>failMove</code></x-ref> removes the replication objects, unfreezes the source, sets the project <code>active</code>, and destroys the new instance or drops the partial copy.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A retry after the freeze copies everything again with the source still frozen.</strong> Only the rollback, after the last attempt, unfreezes. A transient error between <code>freeze</code> and the cutover commit, or a crash, lost lease or deploy in that window, starts attempt two with the logins <code>NOLOGIN</code> and the poolers paused; it rebuilds the target and repeats the initial copy and catch-up before freezing again, and the project is unreachable throughout. In logical mode the window is seconds; in dump mode it is the whole copy, so a transient <code>pgverify.Compare</code> error or a deploy during a long promotion doubles the outage. Unfreeze at the start of an attempt that finds the project not yet cut over.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A rollback that cannot reach the source leaves the project frozen and stuck.</strong> <x-ref path="internal/dedicated/promote.go" symbol="func (s *Service) unfreeze("><code>unfreeze</code></x-ref> opens a connection to the source first; if that fails (often why the move failed) it returns before resuming the poolers, and <code>failMove</code> before setting the project <code>active</code>. <x-ref path="internal/jobs/runner.go" symbol="func (r *Runner) fail(parent context.Context"><code>Runner.fail</code></x-ref> logs "rollback incomplete", marks the operation failed and never retries. When the source returns the project is still <code>moving</code> (no operation can be queued), its logins <code>NOLOGIN</code> and PgBouncer still paused: down until someone repairs it by hand. Promotion and demotion share this. Resume the poolers regardless of the source connection, and retry incomplete rollbacks from a sweep.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Replication objects a rollback could not remove stay for ever.</strong> <code>cleanupMove</code> is best effort, <x-ref path="internal/logical/logical.go" symbol="func Cleanup(ctx context.Context"><code>logical.Cleanup</code></x-ref> skips the source when it cannot open it, and nothing else looks for <code>xenibase_move_</code> objects. The orphaned slot has no consumer and no instance sets <code>max_slot_wal_keep_size</code>, so it keeps WAL until the disk fills, which on a shared cluster stops every tenant there; the event trigger keeps refusing the tenant's DDL. Sweep inactive <code>xenibase_move_*</code> slots, publications, triggers and logins with no running operation, and cap slot WAL.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A region move leaves the WAL archive in the old region.</strong> The target's archive is placed once, when it first runs, from the project as it is before the cutover, so <x-ref path="internal/backup/targets.go" symbol="func (s *Service) regionTarget("><code>regionTarget</code></x-ref> picks the old region's bucket, and the moved project's WAL and base backups stay there for the instance's life. Residency is not breached (residency projects cannot leave, and turning residency on is refused while the archive is elsewhere), but the archive outlives the move in a region the project left. Place the target's archive by its node's region, or queue a storage switch after a region move.</p>
+</div>
+
+<h2 id="ha--promote">Promotion and demotion</h2>
+<p><strong>Promotion</strong> (<x-ref path="internal/dedicated/promote.go" symbol="func (s *Service) runPromote("><code>runPromote</code></x-ref>) moves a shared project, not a branch, onto a new dedicated instance in its region. The wizard's estimate is 5 seconds for a logical copy, or 5 seconds plus the size at 40 MiB/s for dump and restore. The target is the project as it will be: the same role, verifier and database name, dedicated limits, timeouts kept, the console read-only. <code>CutOverProject</code> switches instance, tier and settings in one statement, the shared copy is kept read-only for 48 hours, and the instance takes its first base backup.</p>
+<p><strong>Demotion</strong> refuses HA and replicas, and <x-ref path="internal/dedicated/demote.go" symbol="func (s *Service) preflight("><code>preflight</code></x-ref> runs seven checks: size against the shared storage limits, extensions outside the shared allow-list, roles beyond the project's own (integrator roles block), the allowance released, last week's peak connections (a warning), settings the copy drops (a warning), and a shared cluster of the same major in the region with room for the size plus 20%. They run at preflight, at queue time and again in <x-ref path="internal/dedicated/demote.go" symbol="func (s *Service) runDemote("><code>runDemote</code></x-ref>. After the cutover <x-ref path="internal/dedicated/demote.go" symbol="func (s *Service) finishDemotion("><code>finishDemotion</code></x-ref> takes a logical backup (point-in-time recovery ends) and stops the dedicated instance, destroyed 48 hours later; its WAL-G archive stays for the base backups still under it.</p>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p><x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 6.6 Promote shared → dedicated">V1 §6.6</x-ref> freezes with <code>ALLOW_CONNECTIONS false</code> and verifies every table's rows. The code uses <code>NOLOGIN</code>, which leaves <code>pg_dump</code> working (<x-ref path="docs/decisions.md" symbol="| 2 | Freezing writes |">decision M5 #2</x-ref>), and a logical copy counts only small tables, trusting the marker (<x-ref path="docs/decisions.md" symbol="| 3 | Consistency at the switch |">M18 #3</x-ref>). <x-ref path="Xenibase — V3 Specification &amp; Build Plan.md" symbol="### 2.3 Zero-downtime moves with logical replication">V3 §2.3</x-ref> keeps every source read-only for 48 hours; a dedicated source is stopped instead.</p>
+</div>
+
+<h2 id="ha--failures">Failure handling</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>What fails</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td>The HA primary's node</td><td>Poolers paused after two missed polls; Patroni promotes the standby when the lease expires (if under 1 MB behind); the route moves and the poolers resume. The old primary rejoins with <code>pg_rewind</code>.</td></tr>
+    <tr><td>The standby's node</td><td>Nothing for clients; synchronous mode drops to asynchronous rather than block commits.</td></tr>
+    <tr><td>One etcd member, or the quorum</td><td>One: no effect; replace it. The quorum: failsafe mode keeps primaries serving, and no failover until it returns.</td></tr>
+    <tr><td><code>xenibase-server</code></td><td>Patroni fails over without it, but the route waits for a server; on its first poll the watcher resumes every HA project's poolers.</td></tr>
+    <tr><td>A replica that lags or stops</td><td>Out of <code>_ro</code> past 10 s, back under 5 s; with none in rotation the route reads from the primary.</td></tr>
+    <tr><td>A move before its cutover</td><td>Two attempts, then <code>failMove</code> restores the source and destroys the target (but see the freeze and rollback risks).</td></tr>
+    <tr><td>A move after its cutover</td><td>Only <code>finishMove</code> runs again; the source is kept 48 hours.</td></tr>
+    <tr><td>Replication or the marker fails</td><td><code>disable_on_error</code> stops the subscription and the attempt fails; a marker missing after 30 s is permanent and rolls back.</td></tr>
+    <tr><td>A resize or minor upgrade</td><td>The old size goes back on the row; a failed minor upgrade is recorded and retried at a later sweep.</td></tr>
+  </tbody>
+</table></div>
