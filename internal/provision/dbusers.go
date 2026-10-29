@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -67,7 +68,7 @@ func (s *Service) IssueCredentials(ctx context.Context, p store.Project, userID 
 		return Credentials{}, fmt.Errorf("%w: the project is %s", ErrConflict, p.Status)
 	}
 	q := store.New(s.db)
-	role := ""
+	role, isNew := "", false
 	cur, err := q.GetProjectDBUser(ctx, store.GetProjectDBUserParams{ProjectID: p.ID, UserID: userID, OrgID: p.OrgID})
 	switch {
 	case err == nil:
@@ -76,6 +77,7 @@ func (s *Service) IssueCredentials(ctx context.Context, p store.Project, userID 
 		if role, err = personalRoleName(p.DbName); err != nil {
 			return Credentials{}, err
 		}
+		isNew = true
 	default:
 		return Credentials{}, err
 	}
@@ -94,6 +96,13 @@ func (s *Service) IssueCredentials(ctx context.Context, p store.Project, userID 
 	if _, err := q.UpsertProjectDBUser(ctx, store.UpsertProjectDBUserParams{
 		ProjectID: p.ID, UserID: userID, OrgID: p.OrgID, RoleName: role, ScramVerifier: verifier, Access: access,
 	}); err != nil {
+		if isNew {
+			// Nothing would know the login: take it off the instance again
+			// (teardown also drops any <db>_u_* login it finds).
+			if derr := s.dropDBUser(context.WithoutCancel(ctx), p.InstanceID, p.DbName, p.OwnerRole, role); derr != nil {
+				s.log.Warn("drop a login whose metadata could not be written", "role", role, "err", derr)
+			}
+		}
 		return Credentials{}, err
 	}
 	if err := s.pooler.Sync(ctx); err != nil {
@@ -390,16 +399,35 @@ func (s *Service) dropMemberRoles(ctx context.Context, p store.Project) error {
 	if err != nil {
 		return err
 	}
+	roles := make([]string, 0, len(users))
 	for _, u := range users {
-		if err := s.dropDBUser(ctx, p.InstanceID, p.DbName, p.OwnerRole, u.RoleName); err != nil {
-			return err
-		}
+		roles = append(roles, u.RoleName)
 	}
 	conn, err := s.connectInstance(ctx, p.InstanceID, "postgres")
 	if err != nil {
 		return err
 	}
 	defer conn.Close(context.Background())
+	// And any personal login the metadata lost (a revoke whose retry gave
+	// up, an issue whose metadata write failed).
+	rows, err := conn.Query(ctx, `SELECT rolname FROM pg_roles WHERE starts_with(rolname, $1)`, p.DbName+"_u_")
+	if err != nil {
+		return err
+	}
+	found, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, r := range found {
+		if !slices.Contains(roles, r) {
+			roles = append(roles, r)
+		}
+	}
+	for _, r := range roles {
+		if err := s.dropDBUser(ctx, p.InstanceID, p.DbName, p.OwnerRole, r); err != nil {
+			return err
+		}
+	}
 	ro := ReadOnlyRole(p.DbName)
 	var exists, dbExists bool
 	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1),
