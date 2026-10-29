@@ -218,20 +218,26 @@ func advise(ctx context.Context, conn *pgx.Conn, schemas, public []string, anon 
 			break
 		}
 	}
-	// Secret-looking columns anon may select.
-	if err := q(`SELECT n.nspname, c.relname, a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+	// Secret-looking columns anon may select. Revoking one column does
+	// nothing while anon holds SELECT on the whole table (the version 1
+	// grants), so the fix swaps that for the other columns.
+	if err := q(`SELECT n.nspname, c.relname, a.attname, has_table_privilege($3, c.oid, 'SELECT'),
+		  coalesce((SELECT array_agg(o.attname::text ORDER BY o.attnum) FROM pg_attribute o
+		    WHERE o.attrelid = c.oid AND o.attnum > 0 AND NOT o.attisdropped AND o.attname !~* $2), '{}')
+		FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = ANY($1) AND c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped
 		  AND a.attname ~* $2 AND has_column_privilege($3, c.oid, a.attnum, 'SELECT') ORDER BY 1, 2, 3`,
 		[]any{schemas, strings.Join(secretNames, "|"), anon}, func(r pgx.Rows) error {
 			var schema, table, col string
-			if err := r.Scan(&schema, &table, &col); err != nil {
+			var whole bool
+			var keep []string
+			if err := r.Scan(&schema, &table, &col, &whole, &keep); err != nil {
 				return err
 			}
 			out = append(out, Finding{"warn", "secret_column", schema + "." + table + "." + col,
 				"Looks like a secret, and the anonymous role may select it (row-level security still decides which rows).",
-				fmt.Sprintf("REVOKE SELECT (%s) ON %s FROM %s;", pgx.Identifier{col}.Sanitize(), pgx.Identifier{schema, table}.Sanitize(),
-					pgx.Identifier{anon}.Sanitize())})
+				hideColumnFix(pgx.Identifier{schema, table}, anon, col, whole, keep)})
 			return nil
 		}); err != nil {
 		return nil, err
@@ -240,6 +246,26 @@ func advise(ctx context.Context, conn *pgx.Conn, schemas, public []string, anon 
 		out = []Finding{}
 	}
 	return out, nil
+}
+
+// hideColumnFix is the SQL that stops role selecting col of table. A
+// column-level REVOKE is enough only when role has no table-level SELECT;
+// otherwise the table-level grant goes, and the columns to keep (keep, in
+// order) are granted one by one.
+func hideColumnFix(table pgx.Identifier, role, col string, tableGrant bool, keep []string) string {
+	r := pgx.Identifier{role}.Sanitize()
+	if !tableGrant {
+		return fmt.Sprintf("REVOKE SELECT (%s) ON %s FROM %s;", pgx.Identifier{col}.Sanitize(), table.Sanitize(), r)
+	}
+	fix := fmt.Sprintf("REVOKE SELECT ON %s FROM %s;", table.Sanitize(), r)
+	if len(keep) > 0 {
+		cols := make([]string, len(keep))
+		for i, k := range keep {
+			cols[i] = pgx.Identifier{k}.Sanitize()
+		}
+		fix += fmt.Sprintf(" GRANT SELECT (%s) ON %s TO %s;", strings.Join(cols, ", "), table.Sanitize(), r)
+	}
+	return fix
 }
 
 // ---- The request explorer --------------------------------------------------

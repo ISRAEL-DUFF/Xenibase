@@ -175,3 +175,74 @@ func TestRLSGateReachesViewsAndFunctions(t *testing.T) {
 		t.Errorf("no view_reads_unprotected finding: %v", codes)
 	}
 }
+
+// TestHiddenColumnStaysHidden: the advisor's fix for a secret-looking
+// column hides it from anon (a column-level REVOKE alone doesn't, under
+// the table-level grant), the data API then serves the other columns, and
+// the hiding survives the grants being synced and every schema version
+// being run again, as after a move.
+func TestHiddenColumnStaysHidden(t *testing.T) {
+	d := newDataProject(t)
+	d.apply()
+	d.owner(`CREATE TABLE profiles (id int PRIMARY KEY, name text, api_token text)`,
+		`INSERT INTO profiles VALUES (1, 'Ada', 'tok-1')`,
+		`ALTER TABLE profiles ENABLE ROW LEVEL SECURITY`,
+		`CREATE POLICY readable ON profiles FOR SELECT USING (true)`)
+	if out := d.expect(http.StatusOK, "anon", "GET", "/data/v1/profiles", ""); !strings.Contains(out, "tok-1") {
+		t.Fatalf("before: %s", out)
+	}
+	// What the docs and the advisor used to say does nothing.
+	d.owner(`REVOKE SELECT (api_token) ON profiles FROM {{anon}}`)
+	var still bool
+	if err := d.admin.QueryRow(d.ctx, `SELECT has_column_privilege($1, 'profiles', 'api_token', 'SELECT')`, d.pc.AnonRole).Scan(&still); err != nil || !still {
+		t.Fatalf("a column REVOKE under the table grant: %v %v", still, err)
+	}
+
+	found, err := advise(d.ctx, d.admin, []string{"public"}, nil, d.pc.AnonRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fix string
+	for _, f := range found {
+		if f.Code == "secret_column" && f.Object == "public.profiles.api_token" {
+			fix = f.Fix
+		}
+	}
+	want := `REVOKE SELECT ON "public"."profiles" FROM "` + d.pc.AnonRole + `"; GRANT SELECT ("id", "name") ON "public"."profiles" TO "` + d.pc.AnonRole + `";`
+	if fix != want {
+		t.Fatalf("the fix:\n%s\nwant\n%s", fix, want)
+	}
+	d.owner(fix)
+	hidden := func(when string) {
+		t.Helper()
+		var token, name bool
+		if err := d.admin.QueryRow(d.ctx, `SELECT has_column_privilege($1, 'profiles', 'api_token', 'SELECT'),
+			has_column_privilege($1, 'profiles', 'name', 'SELECT')`, d.pc.AnonRole).Scan(&token, &name); err != nil {
+			t.Fatal(err)
+		}
+		if token || !name {
+			t.Fatalf("%s: anon may read api_token %v, name %v", when, token, name)
+		}
+		if out := d.expect(http.StatusOK, "anon", "GET", "/data/v1/profiles?select=id,name", ""); !strings.Contains(out, "Ada") {
+			t.Fatalf("%s: %s", when, out)
+		}
+		d.expect(http.StatusForbidden, "anon", "GET", "/data/v1/profiles?select=api_token", "")
+		d.expect(http.StatusForbidden, "anon", "GET", "/data/v1/profiles", "")
+		if out := d.expect(http.StatusOK, "user", "GET", "/data/v1/profiles", ""); !strings.Contains(out, "tok-1") {
+			t.Fatalf("%s: the user role lost the column: %s", when, out)
+		}
+	}
+	hidden("after the fix")
+	d.sync()
+	d.apply()
+	hidden("after every version ran again")
+	found, err = advise(d.ctx, d.admin, []string{"public"}, nil, d.pc.AnonRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range found {
+		if f.Code == "secret_column" {
+			t.Fatalf("the advisor still reports %s", f.Object)
+		}
+	}
+}

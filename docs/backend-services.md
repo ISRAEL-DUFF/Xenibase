@@ -146,8 +146,20 @@ CREATE POLICY readable ON posts FOR SELECT
   USING (published OR author_id = xb_auth.uid());
 ```
 
-Column privileges hold too: `REVOKE SELECT (email) ON profiles FROM "<db>_anon"`
-hides a column from anonymous callers.
+Column privileges hold too. To hide a column from anonymous callers, take
+away the table-level `SELECT` and grant the columns they may read; a
+column-level `REVOKE` alone does nothing while the table-level grant stands:
+
+```sql
+REVOKE SELECT ON profiles FROM "<db>_anon";
+GRANT SELECT (id, name, avatar_url) ON profiles TO "<db>_anon";
+```
+
+Do the same for `"<db>_user"` to hide it from signed-in users. Xenibase keeps
+these grants when it re-applies the request roles' grants after a move or
+restore. `select=*` then answers `403 permission_denied`: name the columns
+(`select=id,name`). The security advisor's `secret_column` finding gives the
+statements for the table.
 
 ### Guardrails
 

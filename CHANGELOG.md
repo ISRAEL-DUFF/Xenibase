@@ -56,6 +56,14 @@ bundle share one version (spec §11.5).
   no longer re-grants a table the owner narrowed. The advisor's
   `rls_disabled` message says what is now true, and `view_reads_unprotected`
   names an invoker view over such a table.
+- **The documented way to hide a column did nothing.** The guide and the
+  advisor's `secret_column` fix said `REVOKE SELECT (email) ON profiles FROM
+  "<db>_anon"`, which Postgres ignores while anon holds `SELECT` on the whole
+  table, as it does from the request roles' grants. Both now give
+  `REVOKE SELECT ON profiles FROM …; GRANT SELECT (id, name, …) ON profiles
+  TO …` (the advisor lists the table's other columns, or gives the column
+  `REVOKE` when anon has only column grants), and re-applying the grants
+  after a move or restore no longer undoes it.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
