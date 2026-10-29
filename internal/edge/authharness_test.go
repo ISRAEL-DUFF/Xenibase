@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -196,13 +195,6 @@ func newAuthEdge(t *testing.T, edit func(*edgeapi.AuthConfig)) *authEdge {
 	return x
 }
 
-// reconfigure changes the project's auth settings on the running edge.
-func (x *authEdge) reconfigure(edit func(*edgeapi.AuthConfig)) {
-	edit(&x.pc.Auth)
-	x.pc.Version++
-	x.e.apply([]edgeapi.Project{x.pc})
-}
-
 type authResp struct {
 	Code   int
 	Body   string
@@ -279,16 +271,6 @@ func (x *authEdge) sentTo(addr string) int {
 		}
 	}
 	return n
-}
-
-// linkToken is the token in a message's link.
-func linkToken(t *testing.T, m edgeapi.AuthMessage) string {
-	t.Helper()
-	u, err := url.Parse(m.Link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u.Query().Get("token")
 }
 
 // exec runs sql on the project's database as the platform's admin.
