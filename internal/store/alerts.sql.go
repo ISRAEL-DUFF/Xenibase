@@ -345,6 +345,9 @@ const overdueBackups = `-- name: OverdueBackups :many
 SELECT p.id, p.name, COALESCE((SELECT max(b.finished_at) FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded'), 'epoch')::timestamptz AS last_backup_at
 FROM projects p
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.created_at < now() - make_interval(secs => $1::float8)
+  AND p.lifecycle = 'active'
+  AND (p.parent_project_id IS NULL OR p.branch_backups)
+  AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = p.org_id AND o.status = 'active')
   AND NOT EXISTS (SELECT 1 FROM backups b WHERE b.project_id = p.id AND b.status = 'succeeded' AND b.finished_at > now() - make_interval(secs => $1::float8))
 `
 
@@ -356,7 +359,9 @@ type OverdueBackupsRow struct {
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
 // Active projects older than @age whose newest successful backup is older
-// than @age (or missing).
+// than @age (or missing). Only those the nightly scheduler backs up, as
+// ProjectsDueForBackup picks them: not paused or archived, not a branch
+// without backups, not in a suspended or deleting organisation.
 func (q *Queries) OverdueBackups(ctx context.Context, ageSeconds float64) ([]OverdueBackupsRow, error) {
 	rows, err := q.db.Query(ctx, overdueBackups, ageSeconds)
 	if err != nil {

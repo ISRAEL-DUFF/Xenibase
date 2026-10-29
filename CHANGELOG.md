@@ -144,6 +144,10 @@ bundle share one version (spec §11.5).
   one) expired after 7 days, so a dedicated project paying for 14 or 30
   could recover only to the switch from day 8. It now stays for the
   project's window.
+- "Backup overdue" fired for projects the nightly schedule skips on
+  purpose (paused and archived Free projects, branches without backups,
+  suspended organisations), and kept the public status page's Backups
+  component degraded. It now leaves out what the schedule leaves out.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

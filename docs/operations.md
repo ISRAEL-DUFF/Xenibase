@@ -11,7 +11,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Alert | Severity | Fires when |
   | --- | --- | --- |
   | Backup failed | critical | A project's (or the metadata database's) latest backup failed |
-  | Backup overdue | warning | A project older than 26 h has no successful backup in 26 h |
+  | Backup overdue | warning | A project older than 26 h has no successful backup in 26 h (paused and archived projects, branches without backups and suspended organisations, which the nightly schedule skips, are left out) |
   | Restore test failed | critical | The latest weekly restore test failed |
   | WAL archiving | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
   | Node disk | warning | A node's data disk is over 85% full |
