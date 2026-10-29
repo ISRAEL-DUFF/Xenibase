@@ -26,9 +26,35 @@ const consoleConnLimit = 5
 // the superuser's.
 func ConsoleRole(dbName string) string { return dbName + "_console" }
 
-// DropConsoleRole removes a console role, first revoking what it holds on
-// database (when that database still exists).
+// ConsoleReadOnlyRole names the login read-only console sessions use (a
+// read_only member, a read-scope token, the table browser's raw filter).
+// It is granted only the read-only role, WITH INHERIT FALSE, SET TRUE, so
+// a statement that switches role (set_config('role', ...)) has no owner to
+// switch to. The owner's console login could, and RLS does not apply to
+// the owner on its own tables.
+func ConsoleReadOnlyRole(dbName string) string { return ConsoleRole(dbName) + "_ro" }
+
+// ConsoleLogin is the login a console session for dbName connects as.
+func ConsoleLogin(dbName string, readOnly bool) string {
+	if readOnly {
+		return ConsoleReadOnlyRole(dbName)
+	}
+	return ConsoleRole(dbName)
+}
+
+// DropConsoleRole removes a console role and its read-only twin
+// (role+"_ro"), first revoking what they hold on database (when that
+// database still exists).
 func DropConsoleRole(ctx context.Context, conn *pgx.Conn, role, database string) error {
+	for _, r := range []string{role + "_ro", role} {
+		if err := dropConsoleLogin(ctx, conn, r, database); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func dropConsoleLogin(ctx context.Context, conn *pgx.Conn, role, database string) error {
 	var exists, dbExists bool
 	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1),
 		EXISTS (SELECT 1 FROM pg_database WHERE datname = $2)`, role, database).Scan(&exists, &dbExists); err != nil {
@@ -52,7 +78,7 @@ func (s *Service) ConsolePassword(role string) string {
 	return base64.RawURLEncoding.EncodeToString(s.keyring.Derive("xenibase console role "+role, 32))
 }
 
-// EnsureConsoleRole creates or repairs the project's console login (and
+// EnsureConsoleRole creates or repairs the project's console logins (and
 // its read-only role).
 func (s *Service) EnsureConsoleRole(ctx context.Context, p store.Project) error {
 	if err := s.EnsureReadOnlyRole(ctx, p); err != nil {
@@ -63,7 +89,31 @@ func (s *Service) EnsureConsoleRole(ctx context.Context, p store.Project) error 
 		return err
 	}
 	defer conn.Close(context.Background())
-	role := ConsoleRole(p.DbName)
+	return s.ApplyConsoleRoles(ctx, conn, p)
+}
+
+// ApplyConsoleRoles creates or repairs p's two console logins over conn,
+// a superuser connection to the instance: <db>_console, which may become
+// the owner or the read-only role, and <db>_console_ro, which may become
+// only the read-only role. The read-only role must exist.
+func (s *Service) ApplyConsoleRoles(ctx context.Context, conn *pgx.Conn, p store.Project) error {
+	ro := ReadOnlyRole(p.DbName)
+	for _, l := range []struct {
+		role  string
+		roles []string
+	}{
+		{ConsoleRole(p.DbName), []string{p.OwnerRole, ro}},
+		{ConsoleReadOnlyRole(p.DbName), []string{ro}},
+	} {
+		if err := s.applyConsoleLogin(ctx, conn, p, l.role, l.roles); err != nil {
+			return err
+		}
+		s.log.Info("console role ready", "project_id", p.ID, "role", l.role)
+	}
+	return nil
+}
+
+func (s *Service) applyConsoleLogin(ctx context.Context, conn *pgx.Conn, p store.Project, role string, roles []string) error {
 	verifier, err := crypto.SCRAMVerifier(s.ConsolePassword(role))
 	if err != nil {
 		return err
@@ -79,12 +129,15 @@ func (s *Service) EnsureConsoleRole(ctx context.Context, p store.Project) error 
 	stmts := []string{
 		fmt.Sprintf("%s ROLE %s LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT %d PASSWORD '%s'",
 			verb, ident(role), consoleConnLimit, verifier),
-		"GRANT " + ident(p.OwnerRole) + " TO " + ident(role) + " WITH INHERIT FALSE, SET TRUE",
-		"GRANT " + ident(ReadOnlyRole(p.DbName)) + " TO " + ident(role) + " WITH INHERIT FALSE, SET TRUE",
-		"GRANT CONNECT ON DATABASE " + ident(p.DbName) + " TO " + ident(role),
-		// Top queries show the app's workload, not the console's.
-		"ALTER ROLE " + ident(role) + " SET pg_stat_statements.track = 'none'",
 	}
+	for _, r := range roles {
+		stmts = append(stmts, "GRANT "+ident(r)+" TO "+ident(role)+" WITH INHERIT FALSE, SET TRUE")
+	}
+	stmts = append(stmts,
+		"GRANT CONNECT ON DATABASE "+ident(p.DbName)+" TO "+ident(role),
+		// Top queries show the app's workload, not the console's.
+		"ALTER ROLE "+ident(role)+" SET pg_stat_statements.track = 'none'",
+	)
 	if p.Tier == TierShared {
 		stmts = append(stmts, "ALTER ROLE "+ident(role)+" SET temp_file_limit = '"+TempFileLimit+"'")
 	}
@@ -101,7 +154,6 @@ func (s *Service) EnsureConsoleRole(ctx context.Context, p store.Project) error 
 			return err
 		}
 	}
-	s.log.Info("console role ready", "project_id", p.ID, "role", role)
 	return nil
 }
 

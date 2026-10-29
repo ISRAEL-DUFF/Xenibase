@@ -18,8 +18,8 @@ to report it.
 | --- | --- | --- |
 | `CONNECT` on each database revoked from `PUBLIC` | `ensureDatabase`: `REVOKE ALL … FROM PUBLIC`, `GRANT CONNECT, TEMPORARY` to the owner only; `postgres` and `template1` revoked at cluster registration | `isocheck.Roles` (every project) and `Cluster` (maintenance databases); `TestTenantIsolation` "cannot connect to B's database", "public has no access"; live probe: tenant A connects to B, `postgres`, `template1` |
 | `CREATE` on `public` revoked from `PUBLIC` | `hardenDatabase` | `isocheck.Database` on every project database; isolation suite |
-| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner and `<db>_console`); "role has no dangerous attributes" |
-| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner (`WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role); "not a member of predefined roles"; live probe |
+| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console` and `<db>_console_ro`); "role has no dangerous attributes" |
+| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
 | Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions; the extension API allows only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
 | etcd (HA, V3 §2.2) | TLS for clients and peers with client certificates required, from a separate etcd CA whose key is sealed with the master key; each HA instance's Patroni has its own client certificate. Patroni's REST API listens on the private network: reads are open, changes (switchover, configuration) need the instance's REST password. The SLA probe login can only connect and run `SELECT 1` (no grants beyond CONNECT). | `TestEtcdCluster` (no client certificate is refused) |
 | `pg_hba.conf` accepts only the pooler and control-plane addresses, `scram-sha-256`, `hostssl` where applicable | Bundle: `deploy/compose/shared-pg-hba.conf` names the fixed addresses of xenibase-server, the agent, and both poolers; agent-run clusters and instances: `xenibase-hba.sh` writes `XENIBASE_AGENT_DB_ALLOW` (default: private ranges) at initdb. V3 moves: the moves' own logins (`xenibase_move_<id>`, random password, dropped after the move) may also connect from `XENIBASE_AGENT_MOVE_ALLOW` (default: private ranges; bundle: its Docker network), added by the agent on every start; the bundle's shared cluster allows them from its Docker network | `isocheck.Cluster`: every network rule must be SCRAM (or `reject`/`cert`), name explicit addresses (no `all`, `samenet`, `0.0.0.0/0`), and use `hostssl` outside private ranges; `TestHBAFinding`; `TestClusterConfiguration` |
@@ -100,7 +100,7 @@ review found and fixed.
 | Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it | `TestSuspensionAndBreakGlass` |
 | Webhook trigger function (V2 §9.1) | `xenibase.webhook_enqueue()` is `SECURITY DEFINER` with `search_path = pg_catalog, pg_temp`, in a superuser-owned schema with all access revoked from `PUBLIC` (so tenants can't call it or attach it to triggers); a `xenibase` schema anything else owns is dropped first; the worker delivers an outbox row only for one of its own project's webhooks | `TestWebhookDelivery`, `TestWebhooksAcrossCopies` |
 | Personal roles across tier moves (V2 §3.5) | Member logins and the read-only role recreated with the same verifiers on promotion, demotion, restore and import | `TestMemberLoginsSurviveRestoreAndPromotion`, `TestDemotionLiveWriter` |
-| Running tenant SQL | The console, table editor, schema editor and SQL jobs sign in as the project's console login (`NOINHERIT`, may only `SET ROLE` to the project's roles), never an admin login | `TestSQLConsole`, `TestJobSQLCannotEscalate` |
+| Running tenant SQL | The console, table editor, schema editor and SQL jobs sign in as the project's console login (`NOINHERIT`, may only `SET ROLE` to the project's roles), never an admin login. Read-only sessions (a `read_only` member, a read-scope token, the table browser's raw filter) sign in as `<db>_console_ro`, which may become only `<db>_ro` | `TestSQLConsole`, `TestJobSQLCannotEscalate`, `TestReadOnlySessionCannotBecomeOwner`, `TestReadOnlyConsoleCannotBecomeOwner` |
 | Copying a tenant's database | A restore runs the dump's functions (CHECK constraints, generated columns). Branches, restores, imports and the restore test restore as the console login with `--role` the owner; promotion and demotion through a short-lived login that inherits the project's roles but is no superuser (extensions created first, Xenibase's webhook schema copied on its own) | `TestCopiesDoNotRunAsSuperuser` |
 
 ### Found and fixed
@@ -126,6 +126,22 @@ Have someone outside the project review tenant isolation, or pay for a short
 penetration test of it (V2 §14 M16): other people's data now depends on it,
 and this review found two critical bugs. Start with the copy paths and
 anything that runs tenant SQL.
+
+## Atlas review: isolation, the console, the network and the poolers (4.2.4)
+
+The Atlas (`docs/atlas/`) traced these through the code; each is fixed with
+a test that failed before.
+
+### Found and fixed
+
+- **A read-only member could read as the owner** (medium-high). Read-only
+  console sessions signed in as `<db>_console`, which may `SET ROLE` to the
+  owner, so `SELECT set_config('role', '<owner>', true), query_to_xml(…)`
+  read rows RLS hides from `<db>_ro`, and tables never granted to it. The
+  same went for read-scope tokens and the table browser's raw filter.
+  Read-only sessions now sign in as `<db>_console_ro`, granted only
+  `<db>_ro` (`WITH INHERIT FALSE, SET TRUE`), created on first use like the
+  console login; `isocheck.Roles` flags it if it can become the owner.
 
 ## V3 review of payments and billing (M27)
 

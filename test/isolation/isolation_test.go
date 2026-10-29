@@ -10,9 +10,11 @@ package isolation
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
@@ -405,6 +407,73 @@ func TestLiveIsolationCheck(t *testing.T) {
 	}
 	if _, err := admin.Exec(ctx, "ALTER ROLE "+tRole+" NOLOGIN"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReadOnlyConsoleCannotBecomeOwner: a read-scope token (and so a
+// read_only member) runs console SQL as the read-only role, and a
+// statement that switches role inside itself cannot reach the owner:
+// neither rows RLS hides from <db>_ro nor tables never granted to it.
+func TestReadOnlyConsoleCannotBecomeOwner(t *testing.T) {
+	e := testenv.Start(t, testenv.Options{})
+	ctx := context.Background()
+	p := e.CreateProject("read-only console")
+	conn := e.MustConnect(p.Connection.SessionUrl)
+	ro := p.Project.DbName + "_ro"
+	for _, q := range []string{
+		`CREATE TABLE t (v text, visible bool)`,
+		`INSERT INTO t VALUES ('shown', true), ('rls-hidden', false)`,
+		`ALTER TABLE t ENABLE ROW LEVEL SECURITY`,
+		`CREATE POLICY only_visible ON t FOR SELECT TO ` + pgx.Identifier{ro}.Sanitize() + ` USING (visible)`,
+		`GRANT SELECT ON t TO ` + pgx.Identifier{ro}.Sanitize(),
+		`CREATE TABLE owner_only (v text)`,
+		`INSERT INTO owner_only VALUES ('never-granted')`,
+		`REVOKE SELECT ON owner_only FROM ` + pgx.Identifier{ro}.Sanitize(),
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	read := e.CreateToken(map[string]any{"name": "reader", "org_id": e.OrgID, "scopes": []string{"read"}})
+	path := "/api/v1/projects/" + p.Project.Id.String() + "/sql"
+	owner := "'" + p.Project.OwnerRole + "'"
+	for _, q := range []string{
+		`SELECT set_config('role', ` + owner + `, true), query_to_xml('SELECT * FROM t', true, false, '')`,
+		`SELECT set_config('role', ` + owner + `, true), query_to_xml('SELECT * FROM owner_only', true, false, '')`,
+		`SET ROLE ` + pgx.Identifier{p.Project.OwnerRole}.Sanitize(),
+	} {
+		var res gen.SqlResult
+		ro := true
+		code, raw := e.BearerDo(read, "POST", path, gen.SqlRequest{Query: q, QueryId: uuid.New(), ReadOnly: &ro}, &res)
+		if code != http.StatusOK {
+			t.Fatalf("%s: status %d %s", q, code, raw)
+		}
+		if res.Error == nil || deref(res.Error.Code) != "42501" {
+			t.Errorf("%s: read-only session was not refused: %s", q, raw)
+		}
+		if s := string(raw); strings.Contains(s, "rls-hidden") || strings.Contains(s, "never-granted") {
+			t.Errorf("%s: read-only session read as the owner: %s", q, raw)
+		}
+	}
+	// The table browser's raw filter runs in the same kind of session.
+	where := url.QueryEscape(`set_config('role', ` + owner + `, true) IS NOT NULL AND query_to_xml('SELECT * FROM owner_only', true, false, '')::text <> ''`)
+	code, raw := e.BearerDo(read, "GET", "/api/v1/projects/"+p.Project.Id.String()+"/tables/public/t/rows?where="+where, nil, nil)
+	if s := string(raw); code == http.StatusOK || strings.Contains(s, "rls-hidden") || strings.Contains(s, "never-granted") {
+		t.Errorf("raw filter as the owner: %d %s", code, raw)
+	}
+	// And the isolation check finds a read-only console login that could.
+	admin := e.SharedAdmin("postgres")
+	tenant := []isocheck.Tenant{{DB: p.Project.DbName, Role: p.Project.OwnerRole}}
+	if f, err := isocheck.Roles(ctx, admin, tenant); err != nil || len(f) > 0 {
+		t.Fatalf("clean roles: %v %v", f, err)
+	}
+	login := pgx.Identifier{p.Project.DbName + "_console_ro"}.Sanitize()
+	if _, err := admin.Exec(ctx, "GRANT "+pgx.Identifier{p.Project.OwnerRole}.Sanitize()+" TO "+login+" WITH INHERIT FALSE, SET TRUE"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := isocheck.Roles(ctx, admin, tenant)
+	if err != nil || len(f) == 0 || !strings.Contains(f[0].String(), "console logins") {
+		t.Errorf("owner granted to the read-only console login: findings %v %v", f, err)
 	}
 }
 

@@ -62,7 +62,7 @@ func TestOpaqueNames(t *testing.T) {
 }
 
 func TestOpaqueRoles(t *testing.T) {
-	for _, s := range []string{"_owner", "_ro", "_console", "_u_ab12cd", "_anon", "_user", "_service", "_edge", "_auth_hook"} {
+	for _, s := range []string{"_owner", "_ro", "_console", "_console_ro", "_u_ab12cd", "_anon", "_user", "_service", "_edge", "_auth_hook"} {
 		if !IsOpaqueRole("p_abcdefghij" + s) {
 			t.Errorf("IsOpaqueRole(%q) = false", "p_abcdefghij"+s)
 		}

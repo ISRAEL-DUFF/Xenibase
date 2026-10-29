@@ -243,7 +243,7 @@ func (s *Service) preflight(ctx context.Context, p store.Project, o DemoteOption
 
 	// Roles: only the owner, the read-only role, the console's, and
 	// members' personal logins.
-	known := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName)}
+	known := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName), provision.ConsoleReadOnlyRole(p.DbName)}
 	if p.LegacyOwnerRole != nil {
 		known = append(known, *p.LegacyOwnerRole)
 	}

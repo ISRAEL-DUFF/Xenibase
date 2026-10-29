@@ -188,7 +188,19 @@ func Roles(ctx context.Context, admin *pgx.Conn, tenants []Tenant) ([]Finding, e
 		for _, role := range extra {
 			logins[role] = role != provision.ReadOnlyRole(t.DB)
 		}
-		for _, role := range append([]string{t.Role, provision.ConsoleRole(t.DB)}, extra...) {
+		// The read-only console login may become the read-only role and
+		// nothing else: membership of the owner would let a read-only
+		// session switch to it and read past RLS.
+		var roOwner bool
+		if err := admin.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles c, pg_roles o
+			WHERE c.rolname = $1 AND o.rolname = $2 AND pg_has_role(c.oid, o.oid, 'MEMBER'))`,
+			provision.ConsoleReadOnlyRole(t.DB), t.Role).Scan(&roOwner); err != nil {
+			return nil, err
+		}
+		if roOwner {
+			out = append(out, Finding{"console logins", fmt.Sprintf("%s can become the owner %s", provision.ConsoleReadOnlyRole(t.DB), t.Role)})
+		}
+		for _, role := range append([]string{t.Role, provision.ConsoleRole(t.DB), provision.ConsoleReadOnlyRole(t.DB)}, extra...) {
 			var exists, super, createdb, createrole, repl, bypass, canLogin bool
 			var connLimit int
 			err := admin.QueryRow(ctx, `SELECT true, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolcanlogin, rolconnlimit

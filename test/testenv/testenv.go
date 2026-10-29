@@ -680,6 +680,7 @@ func (e *Env) dropLeftovers() {
 		_, _ = conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{n.DB}.Sanitize()+" WITH (FORCE)")
 		_, _ = conn.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{n.Role}.Sanitize())
 		_, _ = conn.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{provision.ConsoleRole(n.DB)}.Sanitize())
+		_, _ = conn.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{provision.ConsoleReadOnlyRole(n.DB)}.Sanitize())
 		// The read-only group role and members' logins (V2 §3.5).
 		if more, err := conn.Query(ctx, `SELECT rolname FROM pg_roles WHERE rolname = $1 OR starts_with(rolname, $2)`,
 			provision.ReadOnlyRole(n.DB), n.DB+"_u_"); err == nil {
