@@ -18,7 +18,12 @@ func TestExtensionFunctionsStayLocked(t *testing.T) {
 	d := newDataProject(t)
 	d.exec(`CREATE EXTENSION pg_stat_statements SCHEMA public`)
 	d.owner(`CREATE FUNCTION public.hello(name text DEFAULT 'you') RETURNS text LANGUAGE sql STABLE AS $$ SELECT 'hello ' || name $$`)
-	const reset = "public.pg_stat_statements_reset(oid, oid, bigint)"
+	// Its arguments differ between majors (16 has three, 17 and 18 four).
+	var reset string
+	if err := d.admin.QueryRow(d.ctx, `SELECT oid::regprocedure::text FROM pg_proc
+		WHERE proname = 'pg_stat_statements_reset' AND pronamespace = 'public'::regnamespace`).Scan(&reset); err != nil {
+		t.Fatal(err)
+	}
 	d.apply()
 	for _, role := range []string{"{{anon}}", "{{user}}", "{{service}}"} {
 		if d.can("has_function_privilege", role, reset, "EXECUTE") {
