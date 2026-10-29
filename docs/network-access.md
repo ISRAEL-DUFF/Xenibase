@@ -80,3 +80,12 @@ PgBouncer. Upgrade the pooler hosts (their agent and PgBouncer configuration)
 **before** xenibase-server: an older agent refuses a bundle with `hba.conf`
 in it, and an older PgBouncer configuration ignores the file, so a list would
 be stored but not enforced. See the changelog's upgrade notes for v4.2.4.
+
+The same file keeps the poolers' admin console (database `pgbouncer`) off
+the internet: it accepts logins only from loopback and the private ranges
+(10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7), where xenibase-server
+and the pooler hosts' agents reach it, and rejects them from everywhere
+else before the password is checked. If xenibase-server reaches the poolers
+from elsewhere (another private range such as 100.64.0.0/10, or a public
+address), list its networks in `XENIBASE_POOLER_ADMIN_ALLOW`
+(comma-separated CIDRs), which replaces the default.

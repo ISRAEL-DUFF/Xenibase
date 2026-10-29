@@ -54,6 +54,18 @@ type Manager struct {
 	wakerMu   sync.Mutex
 	wakerHost string
 	wakerPort int
+
+	// adminNets may reach the admin consoles (hba.conf); nil means
+	// DefaultAdminNetworks.
+	adminNets []string
+}
+
+// SetAdminNetworks sets the networks the poolers' admin consoles accept
+// (XENIBASE_POOLER_ADMIN_ALLOW). Call it before the first Sync.
+func (m *Manager) SetAdminNetworks(cidrs []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.adminNets = append([]string(nil), cidrs...)
 }
 
 // SetHome sets the home region (default eu-central).
@@ -448,6 +460,7 @@ func (m *Manager) Sync(ctx context.Context) error {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("pooler sync: %w", err)
 		}
+		cfg.AdminNetworks = m.adminNets
 		databases, userlist, hba, err := Render(*cfg)
 		if err != nil {
 			return err

@@ -834,6 +834,7 @@ func setupProvisioning(ctx context.Context, cfg config.Config, pool *pgxpool.Poo
 		return nil, nil, err
 	}
 	pm.SetHome(rs.Home())
+	pm.SetAdminNetworks(pc.AdminAllow)
 	// Bring the poolers in line with the metadata DB (e.g. after a restore
 	// or a lost reload). Failure is not fatal: every flow syncs again.
 	syncCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

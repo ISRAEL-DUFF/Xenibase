@@ -161,6 +161,11 @@ a test that failed before.
   PgBouncer checks HBA rules at login only. Saving a list now drops the
   project's clients from addresses it no longer admits (`SHOW CLIENTS`,
   `KILL_CLIENT`), except Xenibase's own logins.
+- **The PgBouncer admin console was open to the internet** (low). The
+  generated `hba.conf` ended with `host all all 0.0.0.0/0`, which admitted
+  database `pgbouncer` too, behind only its password. It now takes logins
+  only from loopback and the private ranges (`XENIBASE_POOLER_ADMIN_ALLOW`
+  to change them) and rejects them from everywhere else.
 
 ## V3 review of payments and billing (M27)
 
