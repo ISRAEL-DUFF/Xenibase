@@ -193,6 +193,18 @@ func (e *Edge) rpc(c *call, req Request, name string) {
 			failed = asAPIError(err)
 			return nil
 		}
+		// A set-returning function's rows go through the cost guard, which
+		// sees through a SQL function the planner inlines.
+		if limit := c.p.cfg.Settings.MaxQueryCost; limit > 0 && f.RetSet {
+			est, err := cost(ctx, tx, sql, b.args)
+			if err != nil {
+				return err
+			}
+			if est > limit {
+				failed = tooExpensive(est, limit)
+				return nil
+			}
+		}
 		rows, err := tx.Query(ctx, sql, b.args...)
 		if err != nil {
 			return err

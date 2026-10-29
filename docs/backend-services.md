@@ -165,10 +165,12 @@ statements for the table.
 
 - Each request has its statement timeout (8 s by default), at most 30
   filters and 3 levels of relations, and a 10 MB result.
-- Every new shape of query is planned once (`EXPLAIN`) and refused with
-  `400 query_too_expensive` when its estimated cost is over the project's
-  limit (1,000,000 by default: a scan of a few million rows). Add an index or
-  a filter, or raise the limit in the settings.
+- Every read is planned (`EXPLAIN`) as the caller, with its own values, and
+  refused with `400 query_too_expensive` when its estimated cost is over the
+  project's limit (1,000,000 by default: a scan of a few million rows). Add an
+  index or a filter, or raise the limit in the settings. A set-returning
+  function's call is checked the same way, and `count=exact` over the limit
+  is not run (`"count": null`, as when it times out).
 - Schema changes are picked up within about two seconds, with no restart.
 
 ### Errors

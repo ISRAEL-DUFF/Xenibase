@@ -364,19 +364,15 @@ func filterFromJSON(raw json.RawMessage, depth int) (Filter, error) {
 	return f, nil
 }
 
-// cost is the estimated cost of a statement shape, explained once per
-// catalog version.
-func (e *Edge) cost(ctx context.Context, tx pgx.Tx, st *catalogState, sql string, args []any) (float64, error) {
-	st.mu.Lock()
-	c, ok := st.shapes[sql]
-	st.mu.Unlock()
-	if ok {
-		return c, nil
-	}
+// cost is a statement's estimated cost (V4 §3.6), planned as the caller
+// with the request's own values: a cost kept per statement text let a
+// cheap value admit an expensive one, and a plan made for the service
+// role admit anon. Planning a typical read takes a small fraction of
+// running it.
+func cost(ctx context.Context, tx pgx.Tx, sql string, args []any) (float64, error) {
 	var plan []struct {
 		Plan struct {
 			TotalCost float64 `json:"Total Cost"`
-			Rows      float64 `json:"Plan Rows"`
 		} `json:"Plan"`
 	}
 	var raw []byte
@@ -386,14 +382,14 @@ func (e *Edge) cost(ctx context.Context, tx pgx.Tx, st *catalogState, sql string
 	if err := json.Unmarshal(raw, &plan); err != nil || len(plan) == 0 {
 		return 0, fmt.Errorf("unreadable plan")
 	}
-	c = plan[0].Plan.TotalCost
-	st.mu.Lock()
-	if len(st.shapes) > 2000 {
-		st.shapes = map[string]float64{}
-	}
-	st.shapes[sql] = c
-	st.mu.Unlock()
-	return c, nil
+	return plan[0].Plan.TotalCost, nil
+}
+
+// tooExpensive is the cost guard's answer.
+func tooExpensive(cost, limit float64) *apiError {
+	return &apiError{Status: http.StatusBadRequest, Code: "query_too_expensive",
+		Message: "the query's estimated cost is over the project's limit: add an index, a filter or a smaller limit",
+		Details: map[string]any{"estimated_cost": cost, "limit": limit}}
 }
 
 // read runs a read: a list, or one row by its key.
@@ -423,7 +419,7 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 		fp     string
 	)
 	err := e.WithRequest(ctx, c.p, req, func(tx pgx.Tx) error {
-		cat, st, err := e.catalog(ctx, c.p, tx)
+		cat, _, err := e.catalog(ctx, c.p, tx)
 		if err != nil {
 			return err
 		}
@@ -454,15 +450,14 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 			}
 			return err
 		}
-		if limit := c.p.cfg.Settings.MaxQueryCost; limit > 0 {
-			cost, err := e.cost(ctx, tx, st, stmt.SQL, stmt.Args)
+		limit := c.p.cfg.Settings.MaxQueryCost
+		if limit > 0 {
+			est, err := cost(ctx, tx, stmt.SQL, stmt.Args)
 			if err != nil {
 				return err
 			}
-			if cost > limit {
-				failed = &apiError{Status: http.StatusBadRequest, Code: "query_too_expensive",
-					Message: "the query's estimated cost is over the project's limit: add an index, a filter or a smaller limit",
-					Details: map[string]any{"estimated_cost": cost, "limit": limit}}
+			if est > limit {
+				failed = tooExpensive(est, limit)
 				return nil
 			}
 		}
@@ -499,6 +494,17 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 		}
 		switch q.Count {
 		case "exact":
+			// Over the cost limit, the count isn't run: null, as when it
+			// times out.
+			if limit > 0 {
+				est, err := cost(ctx, tx, stmt.CountSQL, stmt.CountArgs)
+				if err != nil {
+					return err
+				}
+				if est > limit {
+					break
+				}
+			}
 			n, err := countExact(ctx, tx, stmt)
 			if err != nil {
 				return err

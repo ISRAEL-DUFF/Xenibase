@@ -27,7 +27,6 @@ type catalogState struct {
 	checked time.Time
 	// public are the public tables cat.Reach was worked out with.
 	public []string
-	shapes map[string]float64 // normalised query -> estimated cost
 }
 
 // catalog returns p's catalog, re-reading it in tx when it may be stale.
@@ -75,7 +74,7 @@ func (e *Edge) catalog(ctx context.Context, p *project, tx pgx.Tx) (*Catalog, *c
 			return nil, nil, err
 		}
 	}
-	st.cat, st.public, st.shapes = cat, append([]string(nil), p.cfg.PublicTables...), map[string]float64{}
+	st.cat, st.public = cat, append([]string(nil), p.cfg.PublicTables...)
 	return cat, st, nil
 }
 

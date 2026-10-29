@@ -64,6 +64,14 @@ bundle share one version (spec §11.5).
   TO …` (the advisor lists the table's other columns, or gives the column
   `REVOKE` when anon has only column grants), and re-applying the grants
   after a move or restore no longer undoes it.
+- **The data API's cost guard could be bypassed with a cheap value
+  first.** It planned each SQL text once and kept the estimate, and filter
+  values are parameters, so a request for a common value admitted a later one
+  that scans the whole table (about 100 times the cost), and a plan made for
+  the service role admitted anon. Every read is now planned with its own
+  values as its own role (planning costs a small fraction of the read).
+  Set-returning functions now go through the guard too, and an exact count
+  over the limit is not run (`count: null`, as when it times out).
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
