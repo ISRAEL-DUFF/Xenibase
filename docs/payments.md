@@ -194,7 +194,7 @@ matter more than the API:
   answers with its last rate, however old. Xenibase checks the time the rate
   was set and refuses to issue an invoice on one older than the billing
   setting `fx_max_age_hours` (4 hours): the invoice stays a draft and is
-  tried again each hour.
+  tried again on every billing run (every 10 minutes) until it issues.
 
 Xenibase holds naira and prices in dollars, so the exchange exposure is
 Xenibase's: it is paid in naira and pays its hosts in dollars. The provider

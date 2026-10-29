@@ -670,6 +670,18 @@ bundle share one version (spec §11.5).
   deposit, **Pay from wallet** and the daily dunning on every server. The
   amount is now read again under the invoice's lock in the transaction
   that records the attempt, and only what is still owed is debited.
+- **A month's invoices that fail to issue are tried again.** The monthly
+  run marked a month done whatever happened, so a draft refused for a
+  stale exchange rate, a provider outage or a database error stayed a
+  draft until the admin issued it by hand, and nothing was collected
+  meanwhile; an organisation whose rating failed got no draft at all. A
+  month is now done only once every organisation's draft is made, and
+  every billing run (every 10 minutes) issues the drafts of past months
+  that aren't held, stopping at the first stale rate or outage rather than
+  asking the provider for each. Turning automatic issue on therefore
+  issues earlier months' unheld drafts too: hold any you mean to issue by
+  hand first. The status page's "Last month's invoices are late" now counts
+  earlier months as well. See `docs/billing.md`.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
