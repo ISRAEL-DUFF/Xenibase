@@ -93,8 +93,10 @@ storage before it can be transferred to another organisation.
 
 Every shared cluster is checked nightly against the tenant-isolation
 checklist (Settings → Tenant isolation, **Check now** to run it at once):
-cluster settings and `pg_hba.conf`, every project's role and database, and
-two throwaway tenants that try to reach each other, discover other
+cluster settings and `pg_hba.conf`, every project's roles (its backend
+services' logins too), who may connect to its database, and its database
+(including `SECURITY DEFINER` functions that run as anyone but the
+tenant), and two throwaway tenants that try to reach each other, discover other
 projects' names, get round their quotas, or log in while suspended. See
 [security review](security-review.md).
 

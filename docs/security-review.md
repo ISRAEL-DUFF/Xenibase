@@ -21,7 +21,7 @@ to report it.
 | `CREATE` on `public` revoked from `PUBLIC` | `hardenDatabase` | `isocheck.Database` on every project database; isolation suite |
 | Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console`, `<db>_console_ro`, members' logins and the five backend-service logins `<db>_edge`, `_anon`, `_user`, `_service`, `_auth_hook`, of which only `_service` may have `BYPASSRLS`); "role has no dangerous attributes"; `TestRolesServiceLoginsAndGrants` |
 | Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner; a backend-service login a member of any role); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
-| Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions; the extension API allows only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
+| Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions (they can create trusted ones themselves, which run as the role); the extension API installs only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
 | etcd (HA, V3 §2.2) | TLS for clients and peers with client certificates required, from a separate etcd CA whose key is sealed with the master key; each HA instance's Patroni has its own client certificate. Patroni's REST API listens on the private network: reads are open, changes (switchover, configuration) need the instance's REST password. The SLA probe login can only connect and run `SELECT 1` (no grants beyond CONNECT). | `TestEtcdCluster` (no client certificate is refused) |
 | `pg_hba.conf` accepts only the pooler and control-plane addresses, `scram-sha-256`, `hostssl` where applicable | Bundle: `deploy/compose/shared-pg-hba.conf` names the fixed addresses of xenibase-server, the agent, and both poolers; agent-run clusters and instances: `xenibase-hba.sh` writes `XENIBASE_AGENT_DB_ALLOW` (default: private ranges) at initdb. V3 moves: the moves' own logins (`xenibase_move_<id>`, random password, dropped after the move) may also connect from `XENIBASE_AGENT_MOVE_ALLOW` (default: private ranges; bundle: its Docker network), added by the agent on every start; the bundle's shared cluster allows them from its Docker network | `isocheck.Cluster`: every network rule must be SCRAM (or `reject`/`cert`), name explicit addresses (no `all`, `samenet`, `0.0.0.0/0`), and use `hostssl` outside private ranges; `TestHBAFinding`; `TestClusterConfiguration` |
 | `log_statement` off; only `log_min_duration_statement` set | `log_statement=none`, `log_min_duration_statement=5s` in the bundle and agent-run clusters | `isocheck.Cluster` (`log_statement`, `log_duration`, `log_min_duration_statement` not 0) |
@@ -64,9 +64,15 @@ shown once), SQL console query text (audit entries only).
 
 ## 7.4 Extension allow-list
 
-Enforced by `POST /projects/{id}/extensions` (per tier, and only extensions
-the server has); verified by `TestExtensionsAndMetrics` and, for the
-escape-prone ones, by the isolation checks above.
+`POST /projects/{id}/extensions` installs, as the superuser, only the
+tier's list and only extensions the server has; verified by
+`TestExtensionsAndMetrics`. The list binds what Xenibase installs, not what
+a tenant can: the owner role owns its database, so it can `CREATE
+EXTENSION` any extension Postgres marks trusted (`tablefunc`, `ltree`,
+`intarray`, `fuzzystrmatch` and the other trusted contrib modules) without
+the API. Trusted extensions are by definition ones a non-superuser may
+install, so none of them escapes the role; the untrusted and escape-prone
+ones stay refused, which the isolation checks above verify.
 
 ## 7.5 Audit log
 
