@@ -41,8 +41,8 @@ func TestTokenMadeByATokenGoesWithIt(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("child: %d %s", code, body)
 	}
-	secret := body[strings.Index(body, `"secret":"`)+10:]
-	secret = secret[:strings.Index(secret, `"`)]
+	_, secret, _ := strings.Cut(body, `"secret":"`)
+	secret, _, _ = strings.Cut(secret, `"`)
 	if code, body := bearer(secret, "GET", "/api/v1/me", ""); code != 200 {
 		t.Fatalf("child works: %d %s", code, body)
 	}

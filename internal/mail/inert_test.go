@@ -25,7 +25,7 @@ func TestInertTextIsNeverALink(t *testing.T) {
 	if !strings.Contains(html, `href="https://app.example.com/docs"`) {
 		t.Fatal("the message's own address is no longer a link")
 	}
-	if got := strings.ReplaceAll(Inert("a.b:c/d@e"), "​", ""); got != "a.b:c/d@e" {
+	if got := strings.ReplaceAll(Inert("a.b:c/d@e"), "\u200b", ""); got != "a.b:c/d@e" {
 		t.Fatalf("Inert changed the words: %q", got)
 	}
 }

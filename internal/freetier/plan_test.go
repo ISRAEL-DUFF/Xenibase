@@ -100,7 +100,7 @@ func TestArchiveRechecksThePlanBeforeTheDrop(t *testing.T) {
 	p := h.project(t, Paused)
 	op, log := h.operation(t, p, KindArchive)
 	var taken uuid.UUID
-	h.s.archives = &fakeArchiver{db: h.db, take: func(ctx context.Context, p store.Project, _ *uuid.UUID) (store.Backup, error) {
+	h.s.archives = &fakeArchiver{db: h.db, take: func(_ context.Context, p store.Project, _ *uuid.UUID) (store.Backup, error) {
 		b := h.archiveBackup(t, p, op, true)
 		taken = b.ID
 		h.setPlan(t, "pro", "active") // the owner upgrades during the dump

@@ -101,7 +101,7 @@ func TestInvitationNamesAreNotLinks(t *testing.T) {
 		t.Fatal("the invitation's own link is missing")
 	}
 	// The names still read the same.
-	if plain := strings.ReplaceAll(text, "​", ""); !strings.Contains(plain, "Security team https://evil.test/reset") || !strings.Contains(plain, "IT desk evil.test/login") {
+	if plain := strings.ReplaceAll(text, "\u200b", ""); !strings.Contains(plain, "Security team https://evil.test/reset") || !strings.Contains(plain, "IT desk evil.test/login") {
 		t.Fatalf("the names changed: %s", plain)
 	}
 }

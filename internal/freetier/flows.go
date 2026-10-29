@@ -80,8 +80,7 @@ func (s *Service) runPause(ctx context.Context, op store.Operation, log *jobs.St
 		}
 		return log.Info(ctx, "done", "%s; not pausing", why)
 	}
-	switch p.Lifecycle {
-	case Active:
+	if p.Lifecycle == Active {
 		if seen := lastActive(p); s.now().Sub(seen) < s.cfg.PauseAfter {
 			return log.Info(ctx, "done", "a client connected at %s; not pausing", seen.UTC().Format(time.RFC3339))
 		}
