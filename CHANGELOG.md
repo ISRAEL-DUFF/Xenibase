@@ -134,6 +134,12 @@ bundle share one version (spec §11.5).
   unknown profile. They now pass the source's CPUs and memory as the size,
   as a node move does; a node move's capacity check is now of the real size
   too.
+- **A dedicated project's major upgrade skipped the capacity check and
+  dropped the PITR add-on.** Its new instance went onto the project's node
+  whether or not there was room for a second one, and with 7 days of
+  point-in-time recovery (and billing) whatever the project paid for. The
+  preflight and the upgrade now refuse a node without room for it, and the
+  new instance keeps the project's window.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep

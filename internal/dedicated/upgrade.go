@@ -122,6 +122,10 @@ func (s *Service) UpgradePreflight(ctx context.Context, p store.Project, to int)
 			return plan, err
 		}
 		plan.TargetNode = n.Name
+		if err := s.upgradeRoom(ctx, q, src); err != nil {
+			add(CheckTarget, CheckBlocked, "%v", err)
+			return plan, nil
+		}
 		add(CheckTarget, CheckOK, "a new Postgres %d instance of the same size on node %s; the old one is kept stopped for 48 hours", to, n.Name)
 	}
 
@@ -345,21 +349,64 @@ func (s *Service) Upgrade(ctx context.Context, up UpgradeParams) (store.Operatio
 			if err != nil {
 				return nil, err
 			}
-			target := uuid.New()
-			prefix := "instances/" + target.String() + "/wal-g"
-			prof := profileOf(src)
-			mem, vol := int32(prof.MemoryMB), int32(DefaultVolumeGB)
-			if src.VolumeGb != nil {
-				vol = *src.VolumeGb
-			}
-			maxConns := max(int32(provision.MaxConnectionsFor(prof.MemoryMB)), src.MaxConnections)
-			if _, err := q.InsertInstance(ctx, store.InsertInstanceParams{
-				ID: target, NodeID: src.NodeID, Kind: provision.TierDedicated, PgVersion: int32(up.PgVersion), CpuLimit: numeric(prof.CPUs),
-				MemLimitMb: &mem, VolumeGb: &vol, Profile: &prof.Name, WalgPrefix: &prefix, MaxConnections: &maxConns,
-			}); err != nil {
+			target, err := s.insertUpgradeTarget(ctx, q, src, up.PgVersion)
+			if err != nil {
 				return nil, err
 			}
 			return moveParams{TargetInstance: target, SourceInstance: pr.InstanceID, NewInstance: true}, nil
 		})
 	return op, plan, err
+}
+
+// upgradeRoom checks that src's node can take a second instance of src's
+// size: the upgrade's target shares the node, and its one disk, with src
+// for the copy and the 48 hours src is kept.
+func (s *Service) upgradeRoom(ctx context.Context, q *store.Queries, src store.Instance) error {
+	n, err := q.GetNode(ctx, src.NodeID)
+	if err != nil {
+		return err
+	}
+	if n.Lifecycle != "active" {
+		return fmt.Errorf("%w: node %s is %s and takes no new instances; move the project to another node first", provision.ErrConflict, n.Name, n.Lifecycle)
+	}
+	nodes, err := q.CapacityNodes(ctx)
+	if err != nil {
+		return err
+	}
+	sz := SizeOf(src)
+	for _, c := range nodes {
+		if c.ID != n.ID {
+			continue
+		}
+		if ok, why := fits(c, sz.CPUs, int64(sz.MemoryMB), int64(sz.DiskGB)); !ok {
+			return fmt.Errorf("%w: the upgrade runs a second instance of the project's size beside it on node %s until the old one is removed 48 hours later, and %s; move the project to a node with room first",
+				provision.ErrConflict, n.Name, why)
+		}
+	}
+	return nil
+}
+
+// insertUpgradeTarget records the major upgrade's target: on src's node if
+// it has room, with src's size, connections and point-in-time window, and
+// its own WAL-G prefix.
+func (s *Service) insertUpgradeTarget(ctx context.Context, q *store.Queries, src store.Instance, version int) (uuid.UUID, error) {
+	if err := s.upgradeRoom(ctx, q, src); err != nil {
+		return uuid.Nil, err
+	}
+	target := uuid.New()
+	prefix := "instances/" + target.String() + "/wal-g"
+	prof := SizeProfile(src)
+	mem, vol := int32(prof.MemoryMB), int32(SizeOf(src).DiskGB)
+	maxConns := max(int32(provision.MaxConnectionsFor(prof.MemoryMB)), src.MaxConnections)
+	if _, err := q.InsertInstance(ctx, store.InsertInstanceParams{
+		ID: target, NodeID: src.NodeID, Kind: provision.TierDedicated, PgVersion: int32(version), CpuLimit: numeric(prof.CPUs),
+		MemLimitMb: &mem, VolumeGb: &vol, Profile: &prof.Name, WalgPrefix: &prefix, MaxConnections: &maxConns,
+	}); err != nil {
+		return uuid.Nil, err
+	}
+	// The PITR add-on, and its billing, follow the project.
+	if err := q.SetInstancePITRDays(ctx, store.SetInstancePITRDaysParams{ID: target, PitrDays: src.PitrDays}); err != nil {
+		return uuid.Nil, err
+	}
+	return target, nil
 }

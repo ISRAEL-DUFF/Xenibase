@@ -87,3 +87,49 @@ func TestDetachReplicaOfAResizedProject(t *testing.T) {
 		t.Fatalf("the detached project's instance is %+v (profile %v), want the source's size", sz, inst.Profile)
 	}
 }
+
+// A major upgrade's target shares the node with the source. It used to be
+// inserted without a capacity check, and with the default 7-day window
+// whatever the project paid for.
+func TestUpgradeTargetChecksRoomAndKeepsPITRDays(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	n := e.node(t, "node2", "healthy")
+	setCapacity := func(cpus, memGB int) {
+		t.Helper()
+		if _, err := e.db.Exec(ctx, `UPDATE nodes SET capacity = jsonb_build_object('cpus', $2::int, 'mem_total_bytes', $3::bigint, 'disk_total_bytes', 107374182400) WHERE id = $1`,
+			n.ID, cpus, int64(memGB)<<30); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := resized(t, e, e.instance(t, n, "dedicated", "1 day"))
+	if _, err := e.db.Exec(ctx, `UPDATE instances SET pitr_days = 30 WHERE id = $1`, src.ID); err != nil {
+		t.Fatal(err)
+	}
+	src.PitrDays = 30
+
+	setCapacity(2, 4) // the source's 1.5 CPU and 3 GB leave no room for another
+	if _, err := dedicated.InsertUpgradeTarget(e.svc, ctx, src, 18); !errors.Is(err, provision.ErrConflict) {
+		t.Fatalf("an upgrade target on a full node: %v, want a conflict", err)
+	}
+	var count int
+	if err := e.db.QueryRow(ctx, `SELECT count(*) FROM instances WHERE node_id = $1`, n.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("a refused upgrade left %d instances (err %v)", count, err)
+	}
+
+	setCapacity(4, 8)
+	id, err := dedicated.InsertUpgradeTarget(e.svc, ctx, src, 18)
+	if err != nil {
+		t.Fatalf("an upgrade target on a node with room: %v", err)
+	}
+	got, err := store.New(e.db).GetInstance(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PitrDays != 30 {
+		t.Fatalf("the target's point-in-time window is %d days, want the source's 30", got.PitrDays)
+	}
+	if sz := dedicated.SizeOf(got); sz != dedicated.SizeOf(src) || got.Profile == nil || *got.Profile != "custom" {
+		t.Fatalf("the target is %+v (profile %v), want the source's %+v", sz, got.Profile, dedicated.SizeOf(src))
+	}
+}

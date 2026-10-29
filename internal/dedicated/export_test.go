@@ -1,5 +1,13 @@
 package dedicated
 
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	"github.com/israel-duff/xenibase/internal/store"
+)
+
 // RollbackSharedCluster exposes rollbackSharedCluster to the tests.
 var RollbackSharedCluster = (*Service).rollbackSharedCluster
 
@@ -22,3 +30,8 @@ var (
 	RunPromote = (*Service).runPromote
 	RunDemote  = (*Service).runDemote
 )
+
+// InsertUpgradeTarget exposes the major upgrade's target creation.
+func InsertUpgradeTarget(s *Service, ctx context.Context, src store.Instance, version int) (uuid.UUID, error) {
+	return s.insertUpgradeTarget(ctx, store.New(s.db), src, version)
+}
