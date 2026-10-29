@@ -221,7 +221,7 @@ curl -X DELETE ".../data/v1/todos/7"
 | --- | --- |
 | `on_conflict` | Upsert: the columns of a unique constraint (`on_conflict=email`). Conflicting rows are updated with the sent columns; with `resolution=ignore` they are left alone. |
 | `select` | Which columns of the written rows come back (the read API's `select`, without relations). |
-| `return` | `representation` (default) or `minimal` (only `affected`). |
+| `return` | `representation` (default) or `minimal` (only `affected`; the rows aren't read back, so an `INSERT`-only policy is enough, as for a contact form). |
 | `where`, `or` | Which rows an update or delete changes, as for reads. **An update or delete needs a filter or a key**: `400 filter_required` otherwise. |
 | `max_affected` | Refuse (`400 too_many_rows`, nothing changed) when more rows would change; 1,000 by default, at most 100,000. |
 

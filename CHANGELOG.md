@@ -88,6 +88,13 @@ bundle share one version (spec §11.5).
   fingerprint now covers policies, grants and row-level security, a hit
   waits for the catalog check every 2 seconds, and a changed fingerprint
   drops the project's cached answers.
+- **`return=minimal` writes needed a `SELECT` policy.** Every data API
+  write asked for its rows back (`RETURNING *`) even with `return=minimal`,
+  and Postgres checks returned rows against the table's `SELECT` policies, so
+  a table anon may insert into but not read (a contact form, a waitlist)
+  refused every insert with `403 permission_denied`. Minimal inserts,
+  updates and deletes now leave `RETURNING` out and count from the command
+  tag. (An upsert still needs `SELECT`, which Postgres requires.)
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a

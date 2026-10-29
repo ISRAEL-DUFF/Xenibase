@@ -139,10 +139,12 @@ func quoteList(alias string, cols []string) string {
 }
 
 // returning wraps a data-modifying CTE: its rows as the select list's
-// JSON (or none with Minimal).
+// JSON. With Minimal the statement runs as it is, without RETURNING, so
+// the table's SELECT policies and column privileges don't apply: an
+// insert-only policy (a contact form, a waitlist) is enough.
 func (b *builder) returning(t *Table, cte string, opts writeOpts) (string, error) {
 	if opts.Minimal {
-		return "WITH w AS (" + cte + ") SELECT NULL::json FROM w", nil
+		return cte, nil
 	}
 	sel := opts.Select
 	if len(sel) == 0 {
@@ -156,22 +158,24 @@ func (b *builder) returning(t *Table, cte string, opts writeOpts) (string, error
 	return "WITH w AS (" + cte + ") SELECT (SELECT row_to_json(r) FROM (SELECT " + strings.Join(cols, ", ") + ") r) FROM w " + alias, nil
 }
 
+// runWrite runs a write; with Minimal it counts from the command tag.
 func runWrite(ctx context.Context, tx pgx.Tx, sql string, args []any, opts writeOpts) (writeResult, error) {
+	if opts.Minimal {
+		tag, err := tx.Exec(ctx, sql, args...)
+		if err != nil {
+			return writeResult{}, err
+		}
+		return writeResult{Affected: int(tag.RowsAffected())}, nil
+	}
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
 		return writeResult{}, err
 	}
 	defer rows.Close()
-	res := writeResult{}
-	if !opts.Minimal {
-		res.Rows = []json.RawMessage{}
-	}
+	res := writeResult{Rows: []json.RawMessage{}}
 	size := 0
 	for rows.Next() {
 		res.Affected++
-		if opts.Minimal {
-			continue
-		}
 		v := rows.RawValues()[0]
 		size += len(v)
 		if size > maxResultBytes {
@@ -201,7 +205,7 @@ func (b *builder) insert(ctx context.Context, tx pgx.Tx, t *Table, raw json.RawM
 		if len(rows) != 1 {
 			return writeResult{}, badRequest("invalid_body", "rows without columns insert one at a time")
 		}
-		cte = "INSERT INTO " + t.Qualified() + " DEFAULT VALUES RETURNING *"
+		cte = "INSERT INTO " + t.Qualified() + " DEFAULT VALUES"
 	} else {
 		body, _ := json.Marshal(rows)
 		cte = "INSERT INTO " + t.Qualified() + " (" + quoteList("", cols) + ") SELECT " + quoteList("", cols) +
@@ -213,7 +217,6 @@ func (b *builder) insert(ctx context.Context, tx pgx.Tx, t *Table, raw json.RawM
 				return writeResult{}, &apiError{Status: 400, Code: "unknown_column", Message: fmt.Sprintf("%s has no column %q", t.Name, c)}
 			}
 		}
-		cte = strings.TrimSuffix(cte, " RETURNING *")
 		cte += " ON CONFLICT (" + quoteList("", opts.OnConflict) + ")"
 		var set []string
 		conflict := map[string]bool{}
@@ -231,7 +234,7 @@ func (b *builder) insert(ctx context.Context, tx pgx.Tx, t *Table, raw json.RawM
 			cte += " DO UPDATE SET " + strings.Join(set, ", ")
 		}
 	}
-	if !strings.HasSuffix(cte, "RETURNING *") {
+	if !opts.Minimal {
 		cte += " RETURNING *"
 	}
 	sql, err := b.returning(t, cte, opts)
@@ -293,7 +296,10 @@ func (b *builder) update(ctx context.Context, tx pgx.Tx, t *Table, pk *string, w
 		return writeResult{}, err
 	}
 	cte := "UPDATE " + t.Qualified() + " AS " + alias + " SET (" + quoteList("", cols) + ") = (SELECT " + quoteList("", cols) +
-		" FROM json_populate_record(NULL::" + t.Qualified() + ", " + values + "::json)) WHERE " + cond + " RETURNING " + alias + ".*"
+		" FROM json_populate_record(NULL::" + t.Qualified() + ", " + values + "::json)) WHERE " + cond
+	if !opts.Minimal {
+		cte += " RETURNING " + alias + ".*"
+	}
 	sql, err := b.returning(t, cte, opts)
 	if err != nil {
 		return writeResult{}, err
@@ -314,7 +320,10 @@ func (b *builder) delete(ctx context.Context, tx pgx.Tx, t *Table, pk *string, w
 	if err != nil {
 		return writeResult{}, err
 	}
-	cte := "DELETE FROM " + t.Qualified() + " AS " + alias + " WHERE " + cond + " RETURNING " + alias + ".*"
+	cte := "DELETE FROM " + t.Qualified() + " AS " + alias + " WHERE " + cond
+	if !opts.Minimal {
+		cte += " RETURNING " + alias + ".*"
+	}
 	sql, err := b.returning(t, cte, opts)
 	if err != nil {
 		return writeResult{}, err
