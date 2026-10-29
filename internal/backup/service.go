@@ -93,13 +93,12 @@ func (c *Config) setDefaults() {
 
 // Service is the backup service.
 type Service struct {
-	db        *pgxpool.Pool
-	keyring   *crypto.Keyring
-	nodes     *nodes.Service
-	projects  *provision.Service
-	cfg       Config
-	log       *slog.Logger
-	ephemeral *Ephemeral
+	db       *pgxpool.Pool
+	keyring  *crypto.Keyring
+	nodes    *nodes.Service
+	projects *provision.Service
+	cfg      Config
+	log      *slog.Logger
 	// Dedicated runs base backups and point-in-time recovery; nil without
 	// the dedicated tier.
 	Dedicated *dedicated.Service
@@ -112,7 +111,7 @@ type Service struct {
 // NewService returns a Service and hooks final backups into deletes.
 func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps *provision.Service, cfg Config, log *slog.Logger) *Service {
 	cfg.setDefaults()
-	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log, ephemeral: NewEphemeral(),
+	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log,
 		CheckSource: outbound.New(db, outbound.Config{Blocked: cfg.SourceBlock, Internal: cfg.SourceInternal}, log).CheckSource}
 	ps.FinalBackup = s.finalBackup
 	return s

@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/jwtes"
@@ -97,13 +96,11 @@ type Service struct {
 	// downloads in flight (a minute by default; tests shorten it).
 	StorageGrace time.Duration
 	emailKick    chan struct{}
-	// secrets holds migrations' source credentials while they run.
-	secrets *backup.Ephemeral
 }
 
 // New returns the service.
 func New(db *pgxpool.Pool, projects *provision.Service, cfg Config, log *slog.Logger) *Service {
-	return &Service{db: db, keyring: projects.Keyring(), projects: projects, cfg: cfg, log: log, emailKick: make(chan struct{}, 1), secrets: backup.NewEphemeral()}
+	return &Service{db: db, keyring: projects.Keyring(), projects: projects, cfg: cfg, log: log, emailKick: make(chan struct{}, 1)}
 }
 
 // Kinds are the operations it runs.

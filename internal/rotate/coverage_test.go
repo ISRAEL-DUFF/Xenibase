@@ -16,8 +16,9 @@ import (
 // TestEveryEncryptIsRotated reads every keyring Encrypt call in the module
 // and checks that rotate re-encrypts what it seals: each call's associated
 // data (a string, a constant, or a function returning one) must start with
-// a label in columns, settingBlobs, opAADPrefix or clearedAADPrefix. A new
-// sealed value fails here until collect learns about it.
+// a label in columns, settingBlobs, opAADPrefix, opSecretAADPrefix or
+// clearedAADPrefix. A new sealed value fails here until collect learns
+// about it.
 func TestEveryEncryptIsRotated(t *testing.T) {
 	root := moduleRoot(t)
 	labels := map[string][]string{} // label -> call sites
@@ -63,7 +64,7 @@ func TestEveryEncryptIsRotated(t *testing.T) {
 }
 
 func covered(label string) bool {
-	if strings.HasPrefix(label, clearedAADPrefix) || label == opAADPrefix {
+	if strings.HasPrefix(label, clearedAADPrefix) || label == opAADPrefix || label == opSecretAADPrefix {
 		return true
 	}
 	for _, c := range columns {

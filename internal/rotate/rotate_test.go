@@ -129,6 +129,13 @@ func TestRotateEveryKind(t *testing.T) {
 	opPW := seal("operations.secrets.password:rotate:" + project.String())
 	params, _ := json.Marshal(map[string]any{"secrets": map[string]any{"password": base64.StdEncoding.EncodeToString(opPW)}})
 	opID := uuid.New()
+	// An import's source URL and a Supabase step's credentials, bound to
+	// each operation's reference.
+	importRef, supaRef, importOp, supaOp := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	importParams, _ := json.Marshal(map[string]any{"import": map[string]any{"source_ref": importRef},
+		"secrets": map[string]any{"source_url": base64.StdEncoding.EncodeToString(seal("operations.secrets.import_source:" + importRef.String()))}})
+	supaParams, _ := json.Marshal(map[string]any{"secret_ref": supaRef,
+		"secrets": map[string]any{"supabase_source": base64.StdEncoding.EncodeToString(seal("operations.secrets.supabase_source:" + supaRef.String()))}})
 	err := pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
 			return err
@@ -149,6 +156,12 @@ func TestRotateEveryKind(t *testing.T) {
 			if _, err := tx.Exec(ctx, `INSERT INTO settings (key, value) VALUES ($1, $2)`, k, b); err != nil {
 				return err
 			}
+		}
+		if err := insertRow(ctx, tx, "operations", map[string]any{"id": importOp, "kind": "import", "project_id": project, "params": importParams, "exclusive": false}); err != nil {
+			return err
+		}
+		if err := insertRow(ctx, tx, "operations", map[string]any{"id": supaOp, "kind": "migrate_supabase_users", "project_id": project, "params": supaParams, "exclusive": false}); err != nil {
+			return err
 		}
 		return insertRow(ctx, tx, "operations", map[string]any{"id": opID, "kind": "rotate", "project_id": project, "params": params})
 	})
@@ -200,6 +213,19 @@ func TestRotateEveryKind(t *testing.T) {
 	}
 	blob, _ := base64.StdEncoding.DecodeString(enc)
 	open("operation password handoff", blob, "operations.secrets.password:rotate:"+project.String())
+	for _, o := range []struct {
+		id       uuid.UUID
+		key, aad string
+	}{
+		{importOp, "source_url", "operations.secrets.import_source:" + importRef.String()},
+		{supaOp, "supabase_source", "operations.secrets.supabase_source:" + supaRef.String()},
+	} {
+		if err := db.QueryRow(ctx, `SELECT params->'secrets'->>$2 FROM operations WHERE id = $1`, o.id, o.key).Scan(&enc); err != nil {
+			t.Fatal(err)
+		}
+		blob, _ := base64.StdEncoding.DecodeString(enc)
+		open("operation "+o.key, blob, o.aad)
+	}
 }
 
 // insertRow inserts a row with vals, filling every other required column

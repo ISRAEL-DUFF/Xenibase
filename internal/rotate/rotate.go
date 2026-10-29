@@ -230,6 +230,67 @@ func collect(ctx context.Context, tx pgx.Tx) ([]secret, error) {
 			return err
 		}})
 	}
+	more, err := opSecrets(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, more...), nil
+}
+
+// opSecretAADPrefix starts the associated data of the other secrets an
+// in-flight operation carries (backup.SealOpSecret): prefix, purpose, ":"
+// and the operation's reference.
+const opSecretAADPrefix = "operations.secrets."
+
+// opSecrets are the sealed secrets in operations' params.secrets besides
+// the password: an import's source URL (bound to params.import.source_ref)
+// and a Supabase migration step's credentials (bound to params.secret_ref).
+func opSecrets(ctx context.Context, tx pgx.Tx) ([]secret, error) {
+	type kind struct{ what, key, purpose, ref string }
+	var out []secret
+	for _, k := range []kind{
+		{"import source", "source_url", "import_source", `params->'import'->>'source_ref'`},
+		{"Supabase migration credentials", "supabase_source", "supabase_source", `params->>'secret_ref'`},
+	} {
+		rows, err := tx.Query(ctx, `SELECT id, `+k.ref+`, params->'secrets'->>'`+k.key+`' FROM operations
+			WHERE coalesce(params->'secrets'->>'`+k.key+`', '') <> '' FOR UPDATE`)
+		if err != nil {
+			return nil, err
+		}
+		type row struct {
+			id       uuid.UUID
+			ref, sec string
+		}
+		var found []row
+		for rows.Next() {
+			var r row
+			var ref *string
+			if err := rows.Scan(&r.id, &ref, &r.sec); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if ref != nil {
+				r.ref = *ref
+			}
+			found = append(found, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for _, r := range found {
+			blob, err := base64.StdEncoding.DecodeString(r.sec)
+			if err != nil {
+				return nil, fmt.Errorf("operation %s: %s: %w", r.id, k.what, err)
+			}
+			id, key := r.id, k.key
+			out = append(out, secret{what: k.what, blob: blob, aad: []byte(opSecretAADPrefix + k.purpose + ":" + r.ref), save: func(tx pgx.Tx, b []byte) error {
+				_, err := tx.Exec(ctx, `UPDATE operations SET params = jsonb_set(params, ARRAY['secrets', $3::text], to_jsonb($2::text)) WHERE id = $1`,
+					id, base64.StdEncoding.EncodeToString(b), key)
+				return err
+			}})
+		}
+	}
 	return out, nil
 }
 

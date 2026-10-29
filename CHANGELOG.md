@@ -148,6 +148,12 @@ bundle share one version (spec §11.5).
   purpose (paused and archived Free projects, branches without backups,
   suspended organisations), and kept the public status page's Backups
   component degraded. It now leaves out what the schedule leaves out.
+- **With more than one server, imports and Supabase migration steps failed
+  at random.** The source's connection string (and S3 key) was kept in the
+  memory of the server that took the request, so a step another server
+  claimed failed with "xenibase-server restarted?" and the import rolled
+  back, as did any retry. They now travel with the operation, encrypted
+  with the master key, and are removed when it ends.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
