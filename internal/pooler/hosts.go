@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -297,6 +298,42 @@ func (m *Manager) pushHosts(ctx context.Context) error {
 }
 
 // event records a pooler event; failures to record are only logged.
+// PoolerAddrs are the addresses the poolers connect from, as far as
+// xenibase-server knows them: its local poolers' hosts and every pooler
+// host's private address, names resolved. The waker admits only these.
+func (m *Manager) PoolerAddrs(ctx context.Context) []netip.Addr {
+	var hosts []string
+	for _, a := range m.admins {
+		hosts = append(hosts, a.cfg.Host)
+	}
+	if hs := m.hostSet(); hs != nil {
+		if entries, err := hs.refresh(ctx); err == nil {
+			for _, e := range entries {
+				hosts = append(hosts, e.node.PrivateAddr)
+			}
+		} else {
+			m.log.Warn("pooler addresses: list the pooler hosts", "err", err)
+		}
+	}
+	var out []netip.Addr
+	for _, h := range hosts {
+		if a, err := netip.ParseAddr(h); err == nil {
+			out = append(out, a.Unmap())
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		as, err := net.DefaultResolver.LookupNetIP(rctx, "ip", h)
+		cancel()
+		for _, a := range as {
+			out = append(out, a.Unmap())
+		}
+		if err != nil {
+			m.log.Debug("pooler addresses: resolve", "host", h, "err", err)
+		}
+	}
+	return out
+}
+
 func (m *Manager) event(ctx context.Context, node *uuid.UUID, kind string, detail map[string]any) {
 	d, _ := json.Marshal(detail)
 	var id *uuid.UUID

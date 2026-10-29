@@ -130,6 +130,7 @@ keys.
 | `rate_limited`, `spend_cap_rate_limited` | 429 | rate | yes | The project's per-key or per-address rate, or the reduced rate after the spend cap. `Retry-After: 1`. |
 | `plan_limit_reached` | 429 | limit | no | The month's data API requests are used up; `Retry-After` is the seconds until the month ends. |
 | `project_resuming` | 503 | unavailable | yes | Paused or archived for inactivity, and this request woke it. `Retry-After: 10`; an archived project takes a minute or two to restore, so keep retrying. |
+| `project_paused` | 503 | unavailable | yes | Paused for inactivity, and this request carried none of the project's API keys, so it didn't wake it. Send the key (or connect to the database) to resume it. `Retry-After: 10`. |
 | `database_unavailable` | 503 | unavailable | yes | The database can't be reached for the moment. `Retry-After: 5`. |
 | `retry`, `starting` | 503 | unavailable | yes | The edge is reloading the project's configuration, or starting. `Retry-After: 1` or `2`. |
 | `idempotency_unavailable` | 503 | unavailable | yes | The project's schemas are being upgraded; keys work within minutes. `Retry-After: 60`. |

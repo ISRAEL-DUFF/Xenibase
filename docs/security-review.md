@@ -172,6 +172,11 @@ a test that failed before.
   `SHOW CONFIG` on each pooler host (every minute) and counts a host that
   isn't on `hba` as not ready; the alerts check local poolers the same way
   (`pooler_allowlist_off`).
+- **Anyone who reached the waker, or a paused project's hostname, could
+  wake it** (low). The waker doesn't authenticate; it now accepts only
+  loopback, the poolers' addresses and `XENIBASE_WAKER_ALLOW`. The edge
+  wakes a paused project only for a request with one of its live API keys
+  (`project_paused` otherwise).
 
 ## V3 review of payments and billing (M27)
 

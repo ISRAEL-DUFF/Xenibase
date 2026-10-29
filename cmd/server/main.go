@@ -359,6 +359,8 @@ func run() error {
 			}
 			pm.SetWaker(host, port)
 			ws := waker.New(freeSvc, log)
+			// It doesn't authenticate: admit only the poolers.
+			ws.Allow = waker.AllowList(func() []netip.Addr { return pm.PoolerAddrs(bgCtx) }, cfg.FreeTier.WakerAllow)
 			bg.Add(1)
 			go func() {
 				defer bg.Done()

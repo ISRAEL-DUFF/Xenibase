@@ -974,7 +974,10 @@ connection time (`realtime_connection_minutes`) are metered.
   by up to 10 seconds; see docs/read-replicas.md.
 
 A paused Free project answers `503 project_resuming` with `Retry-After` and
-is woken, as a database connection would wake it. A suspended
+is woken, as a database connection would wake it, when the request carries
+one of its live API keys. Without one (a public file, an OAuth callback, or
+anyone who only knows the hostname) it answers `503 project_paused` and
+stays asleep. A suspended
 organisation's projects answer `403 project_suspended`.
 
 ## Usage and logs
