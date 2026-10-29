@@ -1357,36 +1357,6 @@ func (q *Queries) MarkInvitationAccepted(ctx context.Context, arg MarkInvitation
 	return result.RowsAffected(), nil
 }
 
-const moveProjectDBUsers = `-- name: MoveProjectDBUsers :exec
-UPDATE project_db_users SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectDBUsersParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectDBUsers(ctx context.Context, arg MoveProjectDBUsersParams) error {
-	_, err := q.db.Exec(ctx, moveProjectDBUsers, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
-}
-
-const moveProjectMembers = `-- name: MoveProjectMembers :exec
-UPDATE project_members SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectMembersParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectMembers(ctx context.Context, arg MoveProjectMembersParams) error {
-	_, err := q.db.Exec(ctx, moveProjectMembers, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
-}
-
 const orgSlugTaken = `-- name: OrgSlugTaken :one
 SELECT EXISTS (SELECT 1 FROM organizations WHERE slug = $1 AND id <> $2)
 `
@@ -1584,7 +1554,8 @@ type SetProjectOrgParams struct {
 	OrgID    uuid.UUID
 }
 
-// Moves a project to another organisation (project transfer).
+// Moves a project to another organisation (project transfer); the child
+// tables that carry org_id follow by their keys (ON UPDATE CASCADE).
 func (q *Queries) SetProjectOrg(ctx context.Context, arg SetProjectOrgParams) error {
 	_, err := q.db.Exec(ctx, setProjectOrg, arg.NewOrgID, arg.ID, arg.OrgID)
 	return err

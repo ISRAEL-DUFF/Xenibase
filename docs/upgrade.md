@@ -332,6 +332,19 @@ below say what each version changed.
 - Upgrade xenibase-edge with xenibase-server: the cache, render workers and
   heartbeats need this release on both.
 
+## Upgrading from 4.2.4
+
+- **Projects' children keep their organisation** (migrations 00068 and
+  00069): the tables that carry a project's `org_id` (members, their
+  logins, saved queries, reaped sessions, editor preferences, dedicated
+  requests) get a foreign key to `projects (id, org_id)` that follows a
+  transfer. Rows an earlier transfer left under the old organisation are
+  moved to the project's first. 00068 adds the keys without scanning;
+  00069 checks the existing rows without blocking writes. Both are quick at
+  the sizes these tables have. A 4.2.4 server still running during the
+  upgrade can't transfer a project (the transfer fails and changes nothing)
+  until it is replaced.
+
 ## Rolling back
 
 Take the metadata self-backup before every upgrade; it is the way back.

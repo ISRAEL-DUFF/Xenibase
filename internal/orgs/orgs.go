@@ -588,17 +588,15 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 				return err
 			}
 		}
-		if err := q.MoveProjectMembers(ctx, store.MoveProjectMembersParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
+		// Every table that carries the project's org_id (members, their
+		// logins, saved queries, reaped sessions, editor preferences,
+		// dedicated requests) follows it by its foreign key to
+		// projects (id, org_id), ON UPDATE CASCADE (migration 00068).
+		if err := q.SetProjectOrg(ctx, store.SetProjectOrgParams{ID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
 			return err
 		}
-		if err := q.MoveProjectDBUsers(ctx, store.MoveProjectDBUsersParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
-			return err
-		}
-		// Saved queries go with the project, favourites included.
+		// Favourites of the project's saved queries go too.
 		if err := q.MoveProjectSavedQueryFavorites(ctx, store.MoveProjectSavedQueryFavoritesParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
-			return err
-		}
-		if err := q.MoveProjectSavedQueries(ctx, store.MoveProjectSavedQueriesParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
 			return err
 		}
 		// Tokens of the old organisation lose the project; those left
@@ -606,10 +604,8 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 		if err := q.DropProjectFromTokens(ctx, store.DropProjectFromTokensParams{OrgID: p.OrgID, ProjectID: p.ID}); err != nil {
 			return err
 		}
-		if _, err := q.RevokeEmptiedTokens(ctx, p.OrgID); err != nil {
-			return err
-		}
-		return q.SetProjectOrg(ctx, store.SetProjectOrgParams{ID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg})
+		_, err = q.RevokeEmptiedTokens(ctx, p.OrgID)
+		return err
 	})
 }
 

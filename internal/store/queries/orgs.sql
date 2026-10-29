@@ -107,7 +107,8 @@ ORDER BY p.created_at DESC, p.id DESC
 LIMIT @max_rows;
 
 -- name: SetProjectOrg :exec
--- Moves a project to another organisation (project transfer).
+-- Moves a project to another organisation (project transfer); the child
+-- tables that carry org_id follow by their keys (ON UPDATE CASCADE).
 UPDATE projects SET org_id = @new_org_id WHERE id = @id AND org_id = @org_id;
 
 -- ---- Project members -------------------------------------------------------
@@ -134,9 +135,6 @@ JOIN users u ON u.id = pm.user_id
 LEFT JOIN org_members m ON m.org_id = pm.org_id AND m.user_id = pm.user_id
 WHERE pm.project_id = @project_id AND pm.org_id = @org_id
 ORDER BY u.email;
-
--- name: MoveProjectMembers :exec
-UPDATE project_members SET org_id = @new_org_id WHERE project_id = @project_id AND org_id = @org_id;
 
 -- ---- Invitations -----------------------------------------------------------
 
@@ -219,9 +217,6 @@ SELECT * FROM project_db_users WHERE project_id = @project_id ORDER BY role_name
 
 -- name: ListUserDBUsersInOrg :many
 SELECT * FROM project_db_users WHERE org_id = @org_id AND user_id = @user_id;
-
--- name: MoveProjectDBUsers :exec
-UPDATE project_db_users SET org_id = @new_org_id WHERE project_id = @project_id AND org_id = @org_id;
 
 -- name: PoolerDBUsers :many
 -- tenant: system - every personal login the poolers must accept.
