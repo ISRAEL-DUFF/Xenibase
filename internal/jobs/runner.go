@@ -194,12 +194,20 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 		return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	}
 
-	if int(op.Attempts) > maxAttempts {
-		// Reclaimed after a crash on its last attempt.
+	if int(op.Attempts) > maxAttempts+1 {
+		// Its worker crashed on the last attempt and again on the extra
+		// run below: a crash loop.
 		fctx, cancel := finishCtx()
 		defer cancel()
 		r.fail(fctx, kind, op, steps, fmt.Errorf("gave up after %d attempts", maxAttempts))
 		return
+	}
+	if int(op.Attempts) > maxAttempts {
+		// Reclaimed after a crash on its last attempt, which may have come
+		// after the handler finished but before success was recorded.
+		// Handlers are idempotent, so run once more to finish or find the
+		// work done, rather than roll back what may have succeeded.
+		_ = steps.Warn(ctx, "queue", "the last attempt was cut short; running once more before giving up")
 	}
 
 	runCtx, cancelRun := context.WithTimeout(ctx, timeout)

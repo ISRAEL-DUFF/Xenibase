@@ -66,7 +66,9 @@ type Handler func(ctx context.Context, op store.Operation, log *StepLogger) erro
 type Kind struct {
 	Handler Handler
 	// MaxAttempts is the number of attempts before the operation fails.
-	// Zero means DefaultMaxAttempts.
+	// Zero means DefaultMaxAttempts. An operation whose worker crashed on
+	// the last attempt gets one more run, since the handler may have
+	// finished before the crash; a second crash fails it unrun.
 	MaxAttempts int
 	// Timeout bounds a single attempt. Zero means DefaultTimeout.
 	Timeout time.Duration
