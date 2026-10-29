@@ -3,7 +3,8 @@
 -- name: SetProjectBranch :exec
 -- tenant: system - set in the transaction that creates the branch project.
 UPDATE projects SET parent_project_id = @parent_project_id, branch_source = @branch_source,
-  branch_schema_only = @branch_schema_only, expires_at = sqlc.narg(expires_at), sensitive_data = @sensitive_data
+  branch_schema_only = @branch_schema_only, expires_at = sqlc.narg(expires_at), sensitive_data = @sensitive_data,
+  branch_copy_files = @branch_copy_files
 WHERE id = @id;
 
 -- name: SetProjectSensitive :exec

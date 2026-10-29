@@ -126,7 +126,9 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   `xenibase branch create --env` give `XENIBASE_API_URL`,
   `XENIBASE_PUBLISHABLE_KEY` and `XENIBASE_SECRET_KEY`. Stored files are not
   copied unless you ask (**Copy its stored files too**, or `--copy-files`):
-  they are then copied in the background and count toward file storage.
+  they are then copied in the background, again after every reset, and
+  count toward file storage. A reset removes the files the branch stored
+  that its refilled data no longer names, its own uploads included.
 - A branch can't have branches, and stays in its parent's organisation:
   a branch, or a project with branches, can't be transferred (detach or
   delete the branches first). Its parent's webhooks and jobs are not

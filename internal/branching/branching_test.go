@@ -194,3 +194,34 @@ func TestBranchInAnotherOrganisationIsNotFilled(t *testing.T) {
 		t.Fatalf("fill across organisations: %v", err)
 	}
 }
+
+// TestResetCopiesFilesAgain: a branch made with copy_files remembers it,
+// and its resets copy the parent's files again.
+func TestResetCopiesFilesAgain(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	owner := h.user(t, authz.OrgOwner)
+	parent := h.project(t, "Shop", nil)
+	for _, copyFiles := range []bool{true, false} {
+		c, _, err := h.s.Create(ctx, CreateParams{ParentID: parent.ID, Name: "pr", CopyFiles: copyFiles, CreatedBy: &owner},
+			Resolved{Parent: parent, Source: SourceLive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := h.get(t, c.Project.ID).BranchCopyFiles; got != copyFiles {
+			t.Fatalf("copy_files %v: the branch remembers %v", copyFiles, got)
+		}
+		h.idle(t, c.Project)
+		op, err := h.s.Reset(ctx, ResetParams{BranchID: c.Project.ID, Source: SourceLive, Actor: session(owner)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := opFill(op)
+		if err != nil || params.CopyFiles != copyFiles {
+			t.Fatalf("copy_files %v: the reset's params %+v %v", copyFiles, params, err)
+		}
+		if _, err := h.db.Exec(ctx, `UPDATE projects SET deleted_at = now(), status = 'deleted' WHERE id = $1`, c.Project.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

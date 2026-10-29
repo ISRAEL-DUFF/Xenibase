@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/israel-duff/xenibase/internal/storage"
+	"github.com/israel-duff/xenibase/internal/store/storetest"
 )
 
 func fakeFiles(t *testing.T) (*storage.Fake, *storage.Client) {
@@ -67,5 +69,73 @@ func TestCopyBranchFilesRetriesFailures(t *testing.T) {
 	keys, err := f.Objects("files")
 	if err != nil || len(keys) != 4 {
 		t.Fatalf("objects: %v %v", keys, err)
+	}
+}
+
+// TestResetBranchFilesAreRemoved: after a reset, the files stored under the
+// branch's prefix that no refilled row names (its own uploads, copies the
+// parent has since replaced) go to the garbage list and the sweep removes
+// them; those still named, uploading, or stored since stay.
+func TestResetBranchFilesAreRemoved(t *testing.T) {
+	ctx := context.Background()
+	pool := storetest.NewEmpty(t)
+	c, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Release()
+	conn := c.Conn()
+	for _, sql := range []string{
+		`CREATE SCHEMA xb_storage`,
+		`CREATE TABLE xb_storage.objects (version uuid NOT NULL UNIQUE)`,
+		`CREATE TABLE xb_storage.uploads (version uuid NOT NULL UNIQUE)`,
+		`CREATE TABLE xb_storage.garbage (version uuid PRIMARY KEY, at timestamptz NOT NULL DEFAULT now())`,
+	} {
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, cl := fakeFiles(t)
+	put := func(v uuid.UUID) {
+		t.Helper()
+		if _, err := cl.Put(ctx, objectsKey("branch", v), bytes.NewReader([]byte("data")), 4, "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	named, own, uploading, since := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, v := range []uuid.UUID{named, own, uploading} {
+		put(v)
+	}
+	time.Sleep(1100 * time.Millisecond) // the store's times are to the second
+	resetAt := time.Now()
+	time.Sleep(1100 * time.Millisecond)
+	put(since)
+	// The refilled rows: the parent's still names one of the copies.
+	if _, err := conn.Exec(ctx, `INSERT INTO xb_storage.objects VALUES ($1)`, named); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO xb_storage.uploads VALUES ($1)`, uploading); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := strandedFiles(ctx, conn, cl, "branch", resetAt)
+	if err != nil || n != 1 {
+		t.Fatalf("stranded files: %d %v", n, err)
+	}
+	if _, err := collectGarbage(ctx, conn, cl, "branch", 0); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := f.Objects("files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{objectsKey("branch", named): true, objectsKey("branch", uploading): true, objectsKey("branch", since): true}
+	if len(keys) != len(want) {
+		t.Fatalf("after the sweep: %v", keys)
+	}
+	for _, k := range keys {
+		if !want[k] {
+			t.Fatalf("after the sweep: %v (the branch's own upload should be gone)", keys)
+		}
 	}
 }

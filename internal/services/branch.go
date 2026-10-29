@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/israel-duff/xenibase/internal/files"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/storage"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -79,10 +81,38 @@ func (s *Service) PrepareBranch(ctx context.Context, parentID, branchID uuid.UUI
 // EnableBranch turns on the API PrepareBranch made, once the branch holds
 // its copy of the parent: the roles, xb_* schemas and a signing key of its
 // own. The parent's sessions came with the copy and are dropped, so a
-// parent's refresh token can't be used here. With copyFiles, the parent's
-// stored files are copied in the background. A branch without a prepared
+// parent's refresh token can't be used here. A branch without a prepared
 // API (its parent had none) is left alone; after a reset it runs again.
-func (s *Service) EnableBranch(ctx context.Context, branch store.Project, parentID uuid.UUID, copyFiles bool, log *jobs.StepLogger) error {
+func (s *Service) EnableBranch(ctx context.Context, branch store.Project, log *jobs.StepLogger) error {
+	if _, err := store.New(s.db).GetProjectServices(ctx, branch.ID); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := s.purgeSessions(ctx, branch, log); err != nil {
+		return err
+	}
+	return s.enableOn(ctx, branch, log)
+}
+
+// BranchFiles is what happens to a branch's stored files once its data is
+// in.
+type BranchFiles struct {
+	// Copy copies the parent's files the branch's rows name (copy_files).
+	Copy bool
+	// ResetAt is when a reset dropped the branch's database, and its
+	// garbage list with it: the files stored under the branch's prefix
+	// before then that no row names any more go to the new list, so the
+	// storage sweep removes them.
+	ResetAt time.Time
+}
+
+// BranchFiles queues f for branch in the background (KindCopyBranchFiles).
+// A branch without an API, or a server without file storage, has no files.
+func (s *Service) BranchFiles(ctx context.Context, branch store.Project, parentID uuid.UUID, f BranchFiles, log *jobs.StepLogger) error {
+	if s.Files == nil || (!f.Copy && f.ResetAt.IsZero()) {
+		return nil
+	}
 	svc, err := store.New(s.db).GetProjectServices(ctx, branch.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -90,21 +120,27 @@ func (s *Service) EnableBranch(ctx context.Context, branch store.Project, parent
 	if err != nil {
 		return err
 	}
-	if err := s.purgeSessions(ctx, branch, log); err != nil {
-		return err
+	params := copyFilesParams{Parent: parentID, Copy: &f.Copy}
+	if !f.ResetAt.IsZero() {
+		at := f.ResetAt.UTC()
+		params.ResetAt = &at
 	}
-	if err := s.enableOn(ctx, branch, log); err != nil {
-		return err
-	}
-	if !copyFiles {
-		return nil
-	}
-	op, err := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindCopyBranchFiles, ProjectID: &branch.ID, Background: true,
-		Params: map[string]any{"parent": parentID}})
+	op, err := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindCopyBranchFiles, ProjectID: &branch.ID, Background: true, Params: params})
 	if err != nil {
 		return err
 	}
+	if !f.Copy {
+		return log.Info(ctx, "files", "removing %s's files no row names any more, in the background (operation %s)", svc.Ref, op.ID)
+	}
 	return log.Info(ctx, "files", "copying %s's files to %s in the background (operation %s)", parentID, svc.Ref, op.ID)
+}
+
+// copyFilesParams are a KindCopyBranchFiles operation's.
+type copyFilesParams struct {
+	Parent uuid.UUID `json:"parent"`
+	// Copy is nil in operations queued before resets tidied files: a copy.
+	Copy    *bool      `json:"copy,omitempty"`
+	ResetAt *time.Time `json:"reset_at,omitempty"`
 }
 
 // purgeSessions drops the sessions and refresh tokens a copy brought.
@@ -130,10 +166,10 @@ func (s *Service) purgeSessions(ctx context.Context, p store.Project, log *jobs.
 	return log.Info(ctx, "sessions", "the parent's %d sessions were dropped from the copy; its users sign in again here", tag.RowsAffected())
 }
 
+// runCopyBranchFiles tidies a reset branch's files (ResetAt), then copies
+// the parent's files its rows name (Copy).
 func (s *Service) runCopyBranchFiles(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
-	var params struct {
-		Parent uuid.UUID `json:"parent"`
-	}
+	var params copyFilesParams
 	if err := json.Unmarshal(op.Params, &params); err != nil || params.Parent == uuid.Nil {
 		return jobs.Permanent(fmt.Errorf("copy branch files: no parent in the params (%w)", err))
 	}
@@ -142,10 +178,6 @@ func (s *Service) runCopyBranchFiles(ctx context.Context, op store.Operation, lo
 	if err != nil {
 		return jobs.Permanent(err)
 	}
-	from, err := q.GetProjectServices(ctx, params.Parent)
-	if err != nil {
-		return jobs.Permanent(fmt.Errorf("the parent's services: %w", err))
-	}
 	to, err := q.GetProjectServices(ctx, branch.ID)
 	if err != nil {
 		return jobs.Permanent(err)
@@ -153,6 +185,27 @@ func (s *Service) runCopyBranchFiles(ctx context.Context, op store.Operation, lo
 	cl, err := s.filesClient(ctx, branch.Region, branch.DataResidency)
 	if err != nil {
 		return err
+	}
+	if params.ResetAt != nil {
+		conn, err := s.projects.AdminConn(ctx, branch.InstanceID, branch.DbName)
+		if err != nil {
+			return err
+		}
+		n, err := strandedFiles(ctx, conn, cl, to.Ref, *params.ResetAt)
+		conn.Close(context.Background())
+		if err != nil {
+			return fmt.Errorf("the files the reset left: %w", err)
+		}
+		if err := log.Info(ctx, "files", "%d files stored before the reset that no row names any more will be removed", n); err != nil {
+			return err
+		}
+	}
+	if params.Copy != nil && !*params.Copy {
+		return nil
+	}
+	from, err := q.GetProjectServices(ctx, params.Parent)
+	if err != nil {
+		return jobs.Permanent(fmt.Errorf("the parent's services: %w", err))
 	}
 	conn, err := s.projects.AdminConn(ctx, branch.InstanceID, branch.DbName)
 	if err != nil {
@@ -183,6 +236,42 @@ func (s *Service) runCopyBranchFiles(ctx context.Context, op store.Operation, lo
 		return err
 	}
 	return log.Info(ctx, "files", "copied %d files in %s (%d already there, %d not found in the parent)", n.copied, time.Since(start).Round(time.Millisecond), n.present, n.missing)
+}
+
+// strandedFiles puts on the branch's garbage list the versions stored under
+// ref's prefix before a reset (at) that no row, upload or queued removal
+// names: copies from before, and the branch's own uploads, whose rows went
+// with the old database. The storage sweep removes them (collectGarbage,
+// which checks again that no row names them).
+func strandedFiles(ctx context.Context, conn *pgx.Conn, cl *storage.Client, ref string, at time.Time) (int, error) {
+	// Listed before the rows are read, as reconcileProject does.
+	prefix := files.Prefix(ref) + "objects/"
+	var stored []uuid.UUID
+	if err := cl.List(ctx, prefix, func(es []storage.Entry) error {
+		for _, e := range es {
+			if !e.Modified.Before(at) {
+				continue // stored since: the refilled rows' own
+			}
+			if v, err := uuid.Parse(strings.TrimPrefix(e.Key, prefix)); err == nil {
+				stored = append(stored, v)
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	if len(stored) == 0 {
+		return 0, nil
+	}
+	tag, err := conn.Exec(ctx, `INSERT INTO xb_storage.garbage (version)
+		SELECT v FROM unnest($1::uuid[]) AS v
+		WHERE NOT EXISTS (SELECT 1 FROM xb_storage.objects o WHERE o.version = v)
+		  AND NOT EXISTS (SELECT 1 FROM xb_storage.uploads u WHERE u.version = v)
+		ON CONFLICT DO NOTHING`, stored)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // copyCount counts what copyObjects did.

@@ -68,7 +68,8 @@ type Config struct {
 // (the services service, V4.1 §9.5).
 type API interface {
 	PrepareBranch(ctx context.Context, parentID, branchID uuid.UUID, by *uuid.UUID) (*services.BranchAPI, error)
-	EnableBranch(ctx context.Context, branch store.Project, parentID uuid.UUID, copyFiles bool, log *jobs.StepLogger) error
+	EnableBranch(ctx context.Context, branch store.Project, log *jobs.StepLogger) error
+	BranchFiles(ctx context.Context, branch store.Project, parentID uuid.UUID, f services.BranchFiles, log *jobs.StepLogger) error
 }
 
 // Service manages branches.
@@ -203,7 +204,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams, r Resolved) (provi
 		OrgID:     r.Parent.OrgID, CreatorRole: p.CreatorRole, Name: p.Name, CreatedBy: p.CreatedBy,
 		Kind: KindCreate, Tier: provision.TierShared, Sensitive: r.Parent.SensitiveData,
 		Params: map[string]any{"branch": fillParams{Parent: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, CopyFiles: p.CopyFiles}},
-		Branch: &provision.BranchSpec{ParentID: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, ExpiresAt: r.ExpiresAt},
+		Branch: &provision.BranchSpec{ParentID: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, ExpiresAt: r.ExpiresAt, CopyFiles: p.CopyFiles},
 	})
 	if err != nil || s.API == nil {
 		return c, nil, err
@@ -254,8 +255,11 @@ func (s *Service) runCreate(ctx context.Context, op store.Operation, log *jobs.S
 		return err
 	}
 	if s.API != nil {
-		if err := s.API.EnableBranch(ctx, p, params.Parent, params.CopyFiles, log); err != nil {
+		if err := s.API.EnableBranch(ctx, p, log); err != nil {
 			return fmt.Errorf("backend services: %w", err)
+		}
+		if err := s.API.BranchFiles(ctx, p, params.Parent, services.BranchFiles{Copy: params.CopyFiles}, log); err != nil {
+			return fmt.Errorf("files: %w", err)
 		}
 	}
 	return log.Info(ctx, "done", "branch %s ready", p.Name)
@@ -447,7 +451,7 @@ func (s *Service) Reset(ctx context.Context, p ResetParams) (store.Operation, er
 					return nil, err
 				}
 			}
-			return map[string]any{"branch": fillParams{Parent: *b.ParentProjectID, Source: src, SchemaOnly: schemaOnly}}, nil
+			return map[string]any{"branch": fillParams{Parent: *b.ParentProjectID, Source: src, SchemaOnly: schemaOnly, CopyFiles: b.BranchCopyFiles}}, nil
 		})
 }
 
@@ -468,6 +472,9 @@ func (s *Service) runReset(ctx context.Context, op store.Operation, log *jobs.St
 	if err := log.Info(ctx, "pooler", "clients disconnected; new connections wait"); err != nil {
 		return err
 	}
+	// The files stored until now that the refilled rows don't name are the
+	// branch's to tidy (the garbage list went with the old database).
+	droppedAt := time.Now()
 	if err := s.projects.RecreateDatabase(ctx, p, log); err != nil {
 		return err
 	}
@@ -480,10 +487,15 @@ func (s *Service) runReset(ctx context.Context, op store.Operation, log *jobs.St
 		return err
 	}
 	// The branch's API, if it has one, keeps its ref and keys; the copy's
-	// sessions go and its roles and schemas are checked again.
+	// sessions go and its roles and schemas are checked again. A branch
+	// made with copy_files gets the parent's files again, and the files no
+	// row names any more are removed.
 	if s.API != nil {
-		if err := s.API.EnableBranch(ctx, p, params.Parent, false, log); err != nil {
+		if err := s.API.EnableBranch(ctx, p, log); err != nil {
 			return fmt.Errorf("backend services: %w", err)
+		}
+		if err := s.API.BranchFiles(ctx, p, params.Parent, services.BranchFiles{Copy: params.CopyFiles, ResetAt: droppedAt}, log); err != nil {
+			return fmt.Errorf("files: %w", err)
 		}
 	}
 	if err := s.reopen(ctx, p, provision.StatusActive); err != nil {

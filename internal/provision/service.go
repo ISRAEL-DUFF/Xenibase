@@ -280,6 +280,9 @@ type BranchSpec struct {
 	SchemaOnly bool
 	// ExpiresAt is when the hourly sweep deletes it; nil keeps it.
 	ExpiresAt *time.Time
+	// CopyFiles: the parent's stored files are copied in, after every reset
+	// too.
+	CopyFiles bool
 }
 
 // Tiers (spec §4).
@@ -490,6 +493,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 				if err := q.SetProjectBranch(ctx, store.SetProjectBranchParams{
 					ID: proj.ID, ParentProjectID: &p.Branch.ParentID, BranchSource: &p.Branch.Source,
 					BranchSchemaOnly: &p.Branch.SchemaOnly, ExpiresAt: p.Branch.ExpiresAt, SensitiveData: p.Sensitive,
+					BranchCopyFiles: p.Branch.CopyFiles,
 				}); err != nil {
 					return err
 				}
