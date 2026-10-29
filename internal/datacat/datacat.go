@@ -163,9 +163,10 @@ func (c *Catalog) Tables() []*Table { return c.Ordered }
 const userSchemas = `n.nspname NOT LIKE 'pg\_%' AND n.nspname NOT LIKE 'xb\_%' AND n.nspname NOT IN ('information_schema', 'xenibase')`
 
 // FingerprintSQL changes when the relations, columns, constraints or
-// functions of the schemas in $1 change, or the privileges and
-// row-level security of any relation of the project's (a view or a
-// function in $1 may read it).
+// functions of the schemas in $1 change, or the privileges, row-level
+// security or policies of any relation of the project's (a view or a
+// function in $1 may read it): the anonymous-read cache is dropped when
+// it does.
 const FingerprintSQL = `SELECT
   (SELECT coalesce(sum(c.xmin::text::bigint), 0) + count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = ANY($1) OR (` + userSchemas + `))::text || ':' ||
@@ -174,7 +175,9 @@ const FingerprintSQL = `SELECT
   (SELECT coalesce(sum(k.xmin::text::bigint), 0) + count(*) FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace
     WHERE n.nspname = ANY($1))::text || ':' ||
   (SELECT coalesce(sum(f.xmin::text::bigint), 0) + count(*) FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
-    WHERE n.nspname = ANY($1))::text`
+    WHERE n.nspname = ANY($1))::text || ':' ||
+  (SELECT coalesce(sum(p.xmin::text::bigint), 0) + count(*) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ANY($1) OR (` + userSchemas + `))::text`
 
 // unprotected is true for a relation c (with n its pg_namespace) that
 // nothing protects: a table or foreign table without row-level security,

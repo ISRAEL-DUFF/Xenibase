@@ -27,6 +27,8 @@ type catalogState struct {
 	checked time.Time
 	// public are the public tables cat.Reach was worked out with.
 	public []string
+	// fp is the last fingerprint read, kept when cat is dropped.
+	fp string
 }
 
 // catalog returns p's catalog, re-reading it in tx when it may be stale.
@@ -54,6 +56,11 @@ func (e *Edge) catalog(ctx context.Context, p *project, tx pgx.Tx) (*Catalog, *c
 	if same && st.cat.Fingerprint == fp {
 		return st.cat, st, nil
 	}
+	if st.fp != "" && st.fp != fp {
+		// A policy, a grant or the schema changed: no cached answer may
+		// outlive it.
+		e.cache.dropTables(p.cfg.Ref, nil)
+	}
 	if e.syncGrants(ctx, p) {
 		// The grants changed, and with them the fingerprint.
 		if err := tx.QueryRow(ctx, datacat.FingerprintSQL, schemas).Scan(&fp); err != nil {
@@ -64,7 +71,7 @@ func (e *Edge) catalog(ctx context.Context, p *project, tx pgx.Tx) (*Catalog, *c
 	if err != nil {
 		return nil, nil, err
 	}
-	cat.Fingerprint = fp
+	cat.Fingerprint, st.fp = fp, fp
 	cat.Reach = map[string][]string{}
 	for role, name := range map[string]string{"anon": p.cfg.AnonRole, "user": p.cfg.UserRole} {
 		if name == "" {

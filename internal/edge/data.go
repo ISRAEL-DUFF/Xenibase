@@ -399,7 +399,7 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 	var gen uint64
 	if caching {
 		gen = e.cache.generation(c.p.cfg.Ref)
-		if fp := c.p.catalog.fingerprint(); fp != "" {
+		if fp := c.p.catalog.fingerprint(e.cfg.CatalogEvery); fp != "" {
 			if t := c.p.catalog.table(name); t != nil && c.cacheable(req, cacheName(t.Schema, t.Name, false)) > 0 &&
 				e.serveCached(c, cacheKey(c.p.cfg.Ref, c.p.cfg.Version, fp, c.r.URL.Path, c.r.URL.Query())) {
 				return

@@ -137,7 +137,7 @@ func (e *Edge) rpc(c *call, req Request, name string) {
 	var gen uint64
 	if caching {
 		gen = e.cache.generation(c.p.cfg.Ref)
-		if fp := c.p.catalog.fingerprint(); fp != "" {
+		if fp := c.p.catalog.fingerprint(e.cfg.CatalogEvery); fp != "" {
 			if f := c.p.catalog.function(name); f != nil && c.cacheable(req, cacheName(f.Schema, f.Name, true)) > 0 &&
 				e.serveCached(c, cacheKey(c.p.cfg.Ref, c.p.cfg.Version, fp, c.r.URL.Path, q)) {
 				return

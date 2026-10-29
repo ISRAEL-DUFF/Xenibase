@@ -206,12 +206,18 @@ func cacheName(schema, name string, function bool) string {
 	return n
 }
 
-// fingerprint is the cached catalog's fingerprint, "" before the catalog
-// is read (no lookup then).
-func (st *catalogState) fingerprint() string {
+// fingerprint is the cached catalog's fingerprint while it was checked
+// less than every ago, else "" (no lookup then): a hit never opens a
+// transaction, so without this a popular URL would never see a dropped
+// policy. The request then goes to the database, whose catalog check drops
+// the project's entries if anything changed.
+func (st *catalogState) fingerprint(every time.Duration) string {
+	if every <= 0 {
+		every = fingerprintEvery
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.cat == nil {
+	if st.cat == nil || time.Since(st.checked) >= every {
 		return ""
 	}
 	return st.cat.Fingerprint

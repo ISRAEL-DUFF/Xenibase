@@ -293,7 +293,10 @@ At most 3,600 seconds and 100 entries.
 - **The key** is the project, the path and its query with the parameters
   sorted (the `apikey` parameter left out), the project's configuration
   version and its schema's fingerprint, so changing the settings or the
-  schema starts afresh.
+  schema starts afresh. The fingerprint includes policies, grants and
+  row-level security: closing a policy, revoking a grant or turning
+  row-level security off empties the project's cache within about two
+  seconds, whatever the TTL.
 - **Headers:** `X-Cache: HIT` or `MISS`, `Age`, and
   `Cache-Control: public, max-age=<seconds left>` with
   `Vary: Authorization, Read-Replica`, so a CDN in front may cache too

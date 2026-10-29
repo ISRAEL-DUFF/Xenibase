@@ -81,6 +81,13 @@ bundle share one version (spec §11.5).
   letters and digits (numbered when two clash, kept off reserved words), and
   Go generation refuses, with a `400` naming it, a column its JSON tags can't
   carry.
+- **Closing a policy didn't empty the anonymous-read cache.** The schema
+  fingerprint behind the cache key left out policies, and a cache hit never
+  checked it, so after `DROP POLICY`, `ALTER POLICY` or a `REVOKE` a popular
+  cached URL kept serving the rows for up to its TTL (an hour). The
+  fingerprint now covers policies, grants and row-level security, a hit
+  waits for the catalog check every 2 seconds, and a changed fingerprint
+  drops the project's cached answers.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
