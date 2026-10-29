@@ -85,6 +85,7 @@ func (s *Service) Readiness(ctx context.Context, id string) ([]Check, error) {
 	if !r.Residency {
 		add("copy target", r.CopyTargetID != nil, false, "backups copied to a second target (V3 §2.5)")
 	}
+	add("files target", r.FilesTargetID != nil, false, "backend services' files kept apart from the backups, whose credentials the edges would otherwise hold (V4 §5.1)")
 
 	// HA: the region's etcd cluster.
 	var etcd []store.Node

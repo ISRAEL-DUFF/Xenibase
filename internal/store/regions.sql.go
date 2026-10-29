@@ -75,7 +75,7 @@ func (q *Queries) EnsureRegion(ctx context.Context, arg EnsureRegionParams) erro
 }
 
 const getRegion = `-- name: GetRegion :one
-SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain FROM regions WHERE id = $1
+SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain, files_target_id FROM regions WHERE id = $1
 `
 
 func (q *Queries) GetRegion(ctx context.Context, id string) (Region, error) {
@@ -95,13 +95,14 @@ func (q *Queries) GetRegion(ctx context.Context, id string) (Region, error) {
 		&i.Status,
 		&i.CreatedAt,
 		&i.ApiDomain,
+		&i.FilesTargetID,
 	)
 	return i, err
 }
 
 const listRegions = `-- name: ListRegions :many
 
-SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain FROM regions ORDER BY created_at, id
+SELECT id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain, files_target_id FROM regions ORDER BY created_at, id
 `
 
 // Regions (V3 §6).
@@ -128,6 +129,7 @@ func (q *Queries) ListRegions(ctx context.Context) ([]Region, error) {
 			&i.Status,
 			&i.CreatedAt,
 			&i.ApiDomain,
+			&i.FilesTargetID,
 		); err != nil {
 			return nil, err
 		}
@@ -233,6 +235,41 @@ func (q *Queries) RegionUsage(ctx context.Context) ([]RegionUsageRow, error) {
 	return items, nil
 }
 
+const regionsFilesOnBackupTarget = `-- name: RegionsFilesOnBackupTarget :many
+SELECT r.id, r.name, count(*)::int AS projects
+FROM regions r JOIN projects p ON p.region = r.id AND p.deleted_at IS NULL
+JOIN project_services s ON s.project_id = p.id AND s.schema_version >= 4
+WHERE r.files_target_id IS NULL
+GROUP BY r.id, r.name ORDER BY r.id
+`
+
+type RegionsFilesOnBackupTargetRow struct {
+	ID       string
+	Name     string
+	Projects int32
+}
+
+// tenant: system - the files_share_backups alert: regions whose projects' files share the backup target, with how many projects have storage.
+func (q *Queries) RegionsFilesOnBackupTarget(ctx context.Context) ([]RegionsFilesOnBackupTargetRow, error) {
+	rows, err := q.db.Query(ctx, regionsFilesOnBackupTarget)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegionsFilesOnBackupTargetRow
+	for rows.Next() {
+		var i RegionsFilesOnBackupTargetRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.Projects); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setProjectRegion = `-- name: SetProjectRegion :exec
 UPDATE projects SET forward_region = CASE WHEN region <> $1 THEN region ELSE forward_region END,
   forward_until = CASE WHEN region <> $1 THEN $2 ELSE forward_until END,
@@ -318,7 +355,7 @@ func (q *Queries) SetProjectResidency(ctx context.Context, arg SetProjectResiden
 }
 
 const setRegionStatus = `-- name: SetRegionStatus :one
-UPDATE regions SET status = $1 WHERE id = $2 RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain
+UPDATE regions SET status = $1 WHERE id = $2 RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain, files_target_id
 `
 
 type SetRegionStatusParams struct {
@@ -343,6 +380,7 @@ func (q *Queries) SetRegionStatus(ctx context.Context, arg SetRegionStatusParams
 		&i.Status,
 		&i.CreatedAt,
 		&i.ApiDomain,
+		&i.FilesTargetID,
 	)
 	return i, err
 }
@@ -363,12 +401,13 @@ func (q *Queries) SetStorageTargetRegion(ctx context.Context, arg SetStorageTarg
 }
 
 const upsertRegion = `-- name: UpsertRegion :one
-INSERT INTO regions (id, name, country, pooler_host, api_domain, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+INSERT INTO regions (id, name, country, pooler_host, api_domain, provider, location, storage_target_id, copy_target_id, files_target_id, floating_ip_id, residency, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, country = EXCLUDED.country, pooler_host = EXCLUDED.pooler_host,
   api_domain = EXCLUDED.api_domain, provider = EXCLUDED.provider, location = EXCLUDED.location, storage_target_id = EXCLUDED.storage_target_id,
-  copy_target_id = EXCLUDED.copy_target_id, floating_ip_id = EXCLUDED.floating_ip_id, residency = EXCLUDED.residency, status = EXCLUDED.status
-RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain
+  copy_target_id = EXCLUDED.copy_target_id, files_target_id = EXCLUDED.files_target_id, floating_ip_id = EXCLUDED.floating_ip_id,
+  residency = EXCLUDED.residency, status = EXCLUDED.status
+RETURNING id, name, country, pooler_host, provider, location, storage_target_id, copy_target_id, floating_ip_id, residency, status, created_at, api_domain, files_target_id
 `
 
 type UpsertRegionParams struct {
@@ -381,6 +420,7 @@ type UpsertRegionParams struct {
 	Location        string
 	StorageTargetID *uuid.UUID
 	CopyTargetID    *uuid.UUID
+	FilesTargetID   *uuid.UUID
 	FloatingIpID    *string
 	Residency       bool
 	Status          string
@@ -397,6 +437,7 @@ func (q *Queries) UpsertRegion(ctx context.Context, arg UpsertRegionParams) (Reg
 		arg.Location,
 		arg.StorageTargetID,
 		arg.CopyTargetID,
+		arg.FilesTargetID,
 		arg.FloatingIpID,
 		arg.Residency,
 		arg.Status,
@@ -416,6 +457,7 @@ func (q *Queries) UpsertRegion(ctx context.Context, arg UpsertRegionParams) (Reg
 		&i.Status,
 		&i.CreatedAt,
 		&i.ApiDomain,
+		&i.FilesTargetID,
 	)
 	return i, err
 }

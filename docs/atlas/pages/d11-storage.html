@@ -29,6 +29,7 @@
     "internal/services/service.go",
     "internal/api/files.go",
     "internal/backup/targets.go",
+    "internal/regions/regions.go",
     "internal/store/queries/services.sql",
     "internal/store/queries/moves.sql",
     "internal/store/queries/cdn_purges.sql",
@@ -163,18 +164,18 @@
 </div>
 
 <h2 id="storage--bytes">Where the bytes live</h2>
-<p>File storage has no target of its own. <code>cmd/server</code> sets <code>services.Files</code> to <x-ref path="internal/backup/targets.go" symbol="func (s *Service) FilesTarget("><code>backup.FilesTarget</code></x-ref>, the region's backup target, or its in-country target for a data-residency project (decisions V4-M33 #1, <x-page id="backups">Backups</x-page>). Under it:</p>
+<p><code>cmd/server</code> sets <code>services.Files</code> to <x-ref path="internal/backup/targets.go" symbol="func (s *Service) FilesTarget("><code>backup.FilesTarget</code></x-ref>: the region's files target (<code>regions.files_target_id</code>, a platform target, marked as in the region for a data-residency region), or, for a region without one, its backup target, the region's storage target or the platform default (decisions V4-M33 #1, <x-page id="backups">Backups</x-page>). Under it:</p>
 <div class="table-wrap"><table>
   <thead><tr><th>Key</th><th>What</th></tr></thead>
   <tbody>
     <tr><td><code>files/&lt;ref&gt;/objects/&lt;version&gt;</code></td><td>An object version's bytes, typed with its MIME type</td></tr>
     <tr><td><code>files/&lt;ref&gt;/transforms/&lt;version&gt;/&lt;hash&gt;.&lt;format&gt;</code></td><td>Cached renders of that version</td></tr>
-    <tr><td><code>projects/…</code>, <code>instances/…</code>, <code>metadata/…</code></td><td>The same bucket's backups, WAL-G archives and metadata backups</td></tr>
+    <tr><td><code>projects/…</code>, <code>instances/…</code>, <code>metadata/…</code></td><td>Backups, WAL-G archives and metadata backups, only in a region without a files target, where files share the backup target</td></tr>
   </tbody>
 </table></div>
 <p>The target's own <code>Prefix</code>, if any, comes first (<x-ref path="internal/storage/storage.go" symbol="func (t Target) Key("><code>Target.Key</code></x-ref>). The edge gets the target, the project's prefix, the signing secret and its limits in <x-ref path="internal/services/feed.go" symbol="func (s *Service) storageConfig("><code>storageConfig</code></x-ref>, and keeps one client per project while the target is unchanged. The <code>ref</code> is the services ref (8 characters, unique), not the project ID, and a branch has its own.</p>
-<div class="callout risk"><span class="callout-label">Risk</span>
-  <p><strong>Every edge holds the keys to the region's backups.</strong> The feed hands each edge the full <code>storage.Target</code>, access key and secret, of the bucket that also holds the region's encrypted backups, WAL-G archives and metadata backups; files and backups are kept apart only by the edge computing keys under <code>files/&lt;ref&gt;/</code>. The edge is the internet-facing process that parses uploads, forms and images, so code running in it, or a read of its memory, can delete every backup in the region, the copy meant to survive such an incident. A bucket of its own for files, or credentials scoped to <code>files/</code>, would keep a compromised edge away from the backups.</p>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>Every edge used to hold the keys to the region's backups: the feed handed each edge the full <code>storage.Target</code> of the bucket that also holds the region's encrypted backups, WAL-G archives and metadata backups, kept apart only by the edge computing keys under <code>files/&lt;ref&gt;/</code>, so code running in the internet-facing edge, or a read of its memory, could delete every backup in the region. A region now takes a files target of its own (migration 00082, <code>regions.files_target_id</code>, Platform → Regions): a bucket for files, or the backup bucket with credentials scoped to <code>files/</code> where the provider allows it. <code>FilesTarget</code> returns it to the feed and the sweep, so once it is set the feed never carries the backup target's secret; a deleted one fails rather than falling back. <x-ref path="internal/regions/regions.go" symbol="func filesApart("><code>regions.Save</code></x-ref> refuses a files target that is any region's backup or copy target or the platform default, and <code>DeleteTarget</code> one a region's files are in. A region without one keeps its files in its backup target as before, so existing installs keep working: <code>FilesTarget</code> logs a warning (hourly per region) and the <code>files_share_backups</code> alert fires for each such region with storage (<code>TestFilesTargetKeepsTheEdgesAwayFromBackups</code>). Setting it doesn't move stored files: the operator copies <code>files/</code> across first (<code>docs/regions.md</code>, "Files target").</p>
 </div>
 <div class="callout"><span class="callout-label">Resolved</span>
   <p>A region move used to leave every file behind: platform admins could move a non-residency project to another region's node, the move rewrote <code>projects.region</code> (<code>moves.sql</code>), the next feed pointed the edge at the new region's store, and nothing copied <code>files/&lt;ref&gt;/</code>, so every object answered "the object's data is missing" while the old bytes stayed unbilled. Copying the prefix as a move step would have to copy every version and render across stores and keep up with uploads during the move, so the move refuses instead: <x-ref path="internal/dedicated/move.go" symbol="func (s *Service) filesStay("><code>filesStay</code></x-ref>, called from <code>checkMoveRegion</code> when the move is asked for and again in <code>runMove</code> once writes are frozen for the cutover, answers <code>409</code> while <code>xb_storage.objects</code> or <code>xb_storage.uploads</code> has rows, naming the regions (<code>TestRegionMoveRefusesAProjectWithFiles</code>). A project with files must delete them, or be emptied and filled again after the move (<code>docs/regions.md</code>).</p>

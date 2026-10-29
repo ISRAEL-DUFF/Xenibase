@@ -380,6 +380,17 @@ bundle share one version (spec §11.5).
   has files or an upload in progress, when it is asked for and again once
   writes are frozen for the cutover; delete the files first, or move within
   the region (`docs/regions.md`).
+- **Every edge held credentials that could delete its region's backups.**
+  Files were kept in the region's backup target, so the edge, the process
+  that faces the internet and parses uploads and images, was handed the
+  access key and secret of the bucket holding the region's backups, WAL-G
+  archives and metadata backups. A region can now have a **files target**
+  of its own (Platform → Regions; a bucket for files, or credentials
+  limited to `files/`), which the edges and the storage sweep use instead;
+  it can't be any region's backup or copy target or the default, and can't
+  be deleted while it holds files. A region without one keeps working as
+  before, with a warning in the server's log, a launch-check warning and
+  the new `files_share_backups` alert.
 
 ### Upgrading
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
@@ -403,6 +414,11 @@ bundle share one version (spec §11.5).
   `storage_reconciler`, the reconciler's last run. The first server to
   start runs the reconciler straight away. Projects whose backend services
   are off have their files metered from the next sweep.
+- Migration 00082 adds `regions.files_target_id`. Existing regions have
+  none, so their files stay in the backup target and the
+  `files_share_backups` alert fires for each region with backend services:
+  give each a files target, copying `files/` across around the switch
+  (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
 
 ## v4.2.4
 

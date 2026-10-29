@@ -405,6 +405,21 @@ below say what each version changed.
   ignores them) and revoke that token in Hetzner if nothing else uses it. To
   keep agent-side assignment, which also fails over while xenibase-server is
   down, set `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true` instead.
+- **Give each region with backend services a files target** (migration
+  00082). Until now every edge held the credentials of its region's backup
+  target, which can delete the region's backups. Nothing changes at the
+  upgrade: files stay in the backup target, the server logs a warning and
+  the `files_share_backups` alert fires. Then, per region: create a bucket
+  for files (or credentials limited to `files/`), add it as a platform
+  storage target, copy `files/` into it, set it as the region's **Files
+  target**, and copy again ([regions](regions.md#files-target) has the
+  steps). After that the feed carries only the files target's credentials.
+- **Signed upload URLs made before the upgrade stop working**: a signed
+  upload is now written as its signer and used once, which needs the
+  token's row in the project's `xb_storage.upload_tokens` (project schema
+  version 8, applied within minutes of the upgrade). Apps sign a new URL.
+- **A project with stored files can't be moved to another region**; delete
+  its files first ([regions](regions.md#projects-and-regions)).
 
 ## Rolling back
 

@@ -683,9 +683,10 @@ month) are recorded as usage (`auth_mau`) and shown on the Users tab.
 
 Files live in **buckets**. A file's metadata is a row in the project's own
 database (`xb_storage.objects`: bucket, path, size, MIME type, checksum,
-owner, your metadata), and its bytes are in the region's object store (the
-same store as the region's backups; for data-residency projects, the
-in-country one). Who may read, upload, overwrite and delete files is decided
+owner, your metadata), and its bytes are in the region's object store (its
+files target, kept apart from the backups, or without one the region's
+backup store; for data-residency projects, in the country; see
+[regions](regions.md#files-target)). Who may read, upload, overwrite and delete files is decided
 by **row-level security on `xb_storage.objects`**, the same policies as
 your tables. The project's owner role owns the table, so you write the
 policies:

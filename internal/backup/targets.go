@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -308,9 +309,34 @@ func shortHash(parts ...string) string {
 }
 
 // FilesTarget is where backend services keep the files of a project in
-// region (V4 §5.1): the region's storage target, or the platform default
-// outside a data-residency region.
+// region (V4 §5.1). Every edge holds its credentials, so it is the region's
+// files target, which can't reach the backups. A region without one keeps
+// its files in its backup target (the region's storage target, or the
+// platform default outside a data-residency region), as before, with a
+// warning here and the files_share_backups alert.
 func (s *Service) FilesTarget(ctx context.Context, region string, residency bool) (storage.Target, error) {
-	_, t, err := s.regionTarget(ctx, store.Project{Region: region, DataResidency: residency})
+	p := store.Project{Region: region, DataResidency: residency}
+	q := store.New(s.db)
+	r, err := q.GetRegion(ctx, region)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return storage.Target{}, err
+	}
+	if err == nil && r.FilesTargetID != nil {
+		row, err := q.GetStorageTarget(ctx, *r.FilesTargetID)
+		if err != nil {
+			return storage.Target{}, fmt.Errorf("region %s files target: %w", region, err)
+		}
+		// Never the backups' instead: the files are in this target.
+		if err := residencyAllows(p, row); err != nil {
+			return storage.Target{}, err
+		}
+		return s.openTarget(row)
+	}
+	if last, ok := s.filesWarned.Load(region); !ok || time.Since(last.(time.Time)) > time.Hour {
+		s.filesWarned.Store(region, time.Now())
+		s.log.Warn("file storage uses the region's backup target: every edge holds credentials that can delete its backups; give the region a files target (docs/regions.md)",
+			"region", region)
+	}
+	_, t, err := s.regionTarget(ctx, p)
 	return t, err
 }

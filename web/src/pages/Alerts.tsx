@@ -27,6 +27,7 @@ const kindLabel: Record<string, string> = {
   capacity_failed: "Provisioning failed",
   agent_client_cert: "Agent client certificate",
   minor_upgrade_failed: "Minor upgrade failed",
+  files_share_backups: "Files share the backup target",
 };
 
 function TargetLink({ a }: { a: AlertItem }) {

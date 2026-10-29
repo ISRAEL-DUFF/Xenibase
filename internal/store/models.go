@@ -1224,6 +1224,7 @@ type Region struct {
 	Status          string
 	CreatedAt       time.Time
 	ApiDomain       string
+	FilesTargetID   *uuid.UUID
 }
 
 type RegionEarlyAccess struct {

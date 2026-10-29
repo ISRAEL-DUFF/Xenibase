@@ -164,9 +164,13 @@ type Input struct {
 	Location        string
 	StorageTargetID *uuid.UUID
 	CopyTargetID    *uuid.UUID
-	FloatingIPID    *string
-	Residency       bool
-	Hidden          bool
+	// FilesTargetID is where the region's projects' files are (V4 §5.1),
+	// with credentials that can't reach the backups; nil keeps them in the
+	// backup target.
+	FilesTargetID *uuid.UUID
+	FloatingIPID  *string
+	Residency     bool
+	Hidden        bool
 	// EarlyAccess, when not nil, replaces the organisations that may create
 	// projects while the region is hidden.
 	EarlyAccess []uuid.UUID
@@ -176,6 +180,29 @@ var (
 	idRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
 	hostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
 )
+
+// filesApart keeps files targets and backup targets apart across regions:
+// in's files target may not be another region's backup or copy target, nor
+// in's backup or copy target another region's files target.
+func filesApart(ctx context.Context, q *store.Queries, in Input) error {
+	rs, err := q.ListRegions(ctx)
+	if err != nil {
+		return err
+	}
+	same := func(a, b *uuid.UUID) bool { return a != nil && b != nil && *a == *b }
+	for _, o := range rs {
+		if o.ID == in.ID {
+			continue
+		}
+		if same(in.FilesTargetID, o.StorageTargetID) || same(in.FilesTargetID, o.CopyTargetID) {
+			return invalid("the files target is %s's backup or copy target; files need a target of their own", o.Name)
+		}
+		if same(in.StorageTargetID, o.FilesTargetID) || same(in.CopyTargetID, o.FilesTargetID) {
+			return invalid("that target holds %s's files; backups need a target of their own", o.Name)
+		}
+	}
+	return nil
+}
 
 // Save creates or updates a region.
 func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
@@ -200,6 +227,9 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 		return store.Region{}, invalid("data residency needs an in-country storage target for the region's backups")
 	case in.StorageTargetID != nil && in.CopyTargetID != nil && *in.StorageTargetID == *in.CopyTargetID:
 		return store.Region{}, invalid("the copy target must differ from the storage target")
+	case in.FilesTargetID != nil && ((in.StorageTargetID != nil && *in.FilesTargetID == *in.StorageTargetID) ||
+		(in.CopyTargetID != nil && *in.FilesTargetID == *in.CopyTargetID)):
+		return store.Region{}, invalid("the files target must differ from the backup and copy targets: the edges hold its credentials")
 	}
 	if in.Provider == "" {
 		in.Provider = "manual"
@@ -226,7 +256,7 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 			return store.Region{}, err
 		}
 	}
-	for _, id := range []*uuid.UUID{in.StorageTargetID, in.CopyTargetID} {
+	for _, id := range []*uuid.UUID{in.StorageTargetID, in.CopyTargetID, in.FilesTargetID} {
 		if id == nil {
 			continue
 		}
@@ -240,6 +270,17 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 		if t.OrgID != nil {
 			return store.Region{}, invalid("%s is an organisation's target; a region uses platform targets", t.Name)
 		}
+		if id == in.FilesTargetID {
+			if t.IsDefault {
+				return store.Region{}, invalid("%s is the platform's default backup target; files need a target of their own", t.Name)
+			}
+			if in.Residency && (t.XenibaseRegion == nil || *t.XenibaseRegion != in.ID) {
+				return store.Region{}, invalid("data residency needs a files target marked as in the region; %s isn't", t.Name)
+			}
+		}
+	}
+	if err := filesApart(ctx, q, in); err != nil {
+		return store.Region{}, err
 	}
 	status := "active"
 	if in.Hidden {
@@ -255,7 +296,8 @@ func (s *Service) Save(ctx context.Context, in Input) (store.Region, error) {
 	}
 	r, err := q.UpsertRegion(ctx, store.UpsertRegionParams{
 		ID: in.ID, Name: in.Name, Country: in.Country, PoolerHost: in.PoolerHost, ApiDomain: in.APIDomain, Provider: in.Provider, Location: in.Location,
-		StorageTargetID: in.StorageTargetID, CopyTargetID: in.CopyTargetID, FloatingIpID: in.FloatingIPID, Residency: in.Residency, Status: status,
+		StorageTargetID: in.StorageTargetID, CopyTargetID: in.CopyTargetID, FilesTargetID: in.FilesTargetID, FloatingIpID: in.FloatingIPID,
+		Residency: in.Residency, Status: status,
 	})
 	if err != nil {
 		return r, err

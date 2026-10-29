@@ -77,7 +77,7 @@ func (s *Server) toAPIAdminRegion(g store.Region, home string, u store.RegionUsa
 	}
 	return gen.AdminRegion{
 		Id: g.ID, Name: g.Name, Country: g.Country, PoolerHost: g.PoolerHost, ApiDomain: g.ApiDomain, EarlyAccessOrgIds: early, Provider: g.Provider,
-		Location: g.Location, StorageTargetId: g.StorageTargetID, CopyTargetId: g.CopyTargetID, FloatingIpId: g.FloatingIpID,
+		Location: g.Location, StorageTargetId: g.StorageTargetID, CopyTargetId: g.CopyTargetID, FilesTargetId: g.FilesTargetID, FloatingIpId: g.FloatingIpID,
 		Residency: g.Residency, Status: gen.AdminRegionStatus(g.Status), Home: g.ID == home, CreatedAt: g.CreatedAt,
 		Nodes: int(u.Nodes), PoolerHosts: int(u.PoolerHosts), Projects: int(u.Projects), ResidencyProjects: int(u.ResidencyProjects),
 	}
@@ -146,12 +146,13 @@ func (s *Server) PutAdminRegion(w http.ResponseWriter, r *http.Request, regionID
 	in := regions.Input{
 		ID: regionID, Name: req.Name, Country: valueOr(req.Country, ""), PoolerHost: valueOr(req.PoolerHost, ""), APIDomain: valueOr(req.ApiDomain, ""),
 		Provider: valueOr(req.Provider, ""), Location: valueOr(req.Location, ""),
-		StorageTargetID: req.StorageTargetId, CopyTargetID: req.CopyTargetId, FloatingIPID: req.FloatingIpId,
+		StorageTargetID: req.StorageTargetId, CopyTargetID: req.CopyTargetId, FilesTargetID: req.FilesTargetId, FloatingIPID: req.FloatingIpId,
 		Residency: valueOr(req.Residency, false), Hidden: valueOr(req.Hidden, false),
 	}
 	a.set("residency", in.Residency)
 	a.set("pooler_host", in.PoolerHost)
 	a.set("api_domain", in.APIDomain)
+	a.set("files_target_id", in.FilesTargetID)
 	if req.EarlyAccessOrgIds != nil {
 		in.EarlyAccess = *req.EarlyAccessOrgIds
 		a.set("early_access_org_ids", in.EarlyAccess)

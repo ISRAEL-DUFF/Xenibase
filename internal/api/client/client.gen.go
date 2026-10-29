@@ -4149,6 +4149,9 @@ type AdminRegion struct {
 	// EarlyAccessOrgIds Organisations that may create projects while the region is hidden.
 	EarlyAccessOrgIds []openapi_types.UUID `json:"early_access_org_ids"`
 
+	// FilesTargetId Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
+	FilesTargetId *openapi_types.UUID `json:"files_target_id,omitempty"`
+
 	// FloatingIpId The region's pooler floating IP at the provider.
 	FloatingIpId *string `json:"floating_ip_id,omitempty"`
 	Home         bool    `json:"home"`
@@ -4201,7 +4204,10 @@ type AdminRegionRequest struct {
 
 	// EarlyAccessOrgIds Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
 	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
-	FloatingIpId      *string               `json:"floating_ip_id,omitempty"`
+
+	// FilesTargetId A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
+	FilesTargetId *openapi_types.UUID `json:"files_target_id,omitempty"`
+	FloatingIpId  *string             `json:"floating_ip_id,omitempty"`
 
 	// Hidden Hidden regions take new projects only from their early-access organisations.
 	Hidden     *bool   `json:"hidden,omitempty"`
