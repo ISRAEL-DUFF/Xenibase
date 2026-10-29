@@ -13,6 +13,53 @@ import (
 	"github.com/google/uuid"
 )
 
+const countInviterInvitationsSince = `-- name: CountInviterInvitationsSince :one
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE invited_by = $1 AND kind = 'org' AND created_at >= $2::timestamptz
+`
+
+type CountInviterInvitationsSinceParams struct {
+	InvitedBy uuid.UUID
+	Since     time.Time
+}
+
+type CountInviterInvitationsSinceRow struct {
+	Sent   int32
+	Oldest time.Time
+}
+
+// tenant: system - one inviter's organisation invitations in every organisation, for the daily cap.
+func (q *Queries) CountInviterInvitationsSince(ctx context.Context, arg CountInviterInvitationsSinceParams) (CountInviterInvitationsSinceRow, error) {
+	row := q.db.QueryRow(ctx, countInviterInvitationsSince, arg.InvitedBy, arg.Since)
+	var i CountInviterInvitationsSinceRow
+	err := row.Scan(&i.Sent, &i.Oldest)
+	return i, err
+}
+
+const countOrgInvitationsSince = `-- name: CountOrgInvitationsSince :one
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE org_id = $1 AND created_at >= $2::timestamptz
+`
+
+type CountOrgInvitationsSinceParams struct {
+	OrgID *uuid.UUID
+	Since time.Time
+}
+
+type CountOrgInvitationsSinceRow struct {
+	Sent   int32
+	Oldest time.Time
+}
+
+// Invitations an organisation sent since a time, and the oldest of them
+// (the daily cap).
+func (q *Queries) CountOrgInvitationsSince(ctx context.Context, arg CountOrgInvitationsSinceParams) (CountOrgInvitationsSinceRow, error) {
+	row := q.db.QueryRow(ctx, countOrgInvitationsSince, arg.OrgID, arg.Since)
+	var i CountOrgInvitationsSinceRow
+	err := row.Scan(&i.Sent, &i.Oldest)
+	return i, err
+}
+
 const countOrgOwners = `-- name: CountOrgOwners :one
 SELECT count(*) FROM org_members WHERE org_id = $1 AND role = 'owner'
 `

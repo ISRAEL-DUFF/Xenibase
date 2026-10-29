@@ -39,10 +39,30 @@ var (
 	ErrConflict     = errors.New("conflict")
 	ErrSignInFirst  = errors.New("this invitation is for an existing account: sign in to accept it")
 	ErrWrongAccount = errors.New("this invitation was sent to a different email address")
+	// ErrTooManyInvitations: a daily invitation cap is reached; LimitError
+	// says when the next one may go.
+	ErrTooManyInvitations = errors.New("too many invitations today")
 )
+
+// LimitError is ErrTooManyInvitations with the wait.
+type LimitError struct {
+	Msg        string
+	RetryAfter time.Duration
+}
+
+func (e LimitError) Error() string { return e.Msg }
+func (LimitError) Unwrap() error   { return ErrTooManyInvitations }
 
 // InvitationTTL is how long an invitation stays valid (V2 §3.2).
 const InvitationTTL = 7 * 24 * time.Hour
+
+// Default daily invitation caps (XENIBASE_INVITES_PER_ORG_DAY,
+// XENIBASE_INVITES_PER_USER_DAY): every user owns an organisation, so
+// without them an invitation is a way to send any address email.
+const (
+	DefaultInvitesPerOrgDay  = 100
+	DefaultInvitesPerUserDay = 50
+)
 
 // Service runs organisations.
 type Service struct {
@@ -53,12 +73,48 @@ type Service struct {
 	publicURL string
 	log       *slog.Logger
 	now       func() time.Time
+	// perOrg and perUser cap organisation invitations in any 24 hours, per
+	// organisation and per inviter (0: no cap).
+	perOrg, perUser int
 }
 
 // New returns a Service. projects may be nil in tests that never touch
 // database credentials.
 func New(db *pgxpool.Pool, a *auth.Service, projects *provision.Service, mailer auth.Mailer, publicURL string, log *slog.Logger) *Service {
-	return &Service{db: db, auth: a, projects: projects, mailer: mailer, publicURL: strings.TrimRight(publicURL, "/"), log: log, now: time.Now}
+	return &Service{db: db, auth: a, projects: projects, mailer: mailer, publicURL: strings.TrimRight(publicURL, "/"), log: log, now: time.Now,
+		perOrg: DefaultInvitesPerOrgDay, perUser: DefaultInvitesPerUserDay}
+}
+
+// SetInvitationLimits sets how many organisation invitations one
+// organisation, and one inviter, may send in any 24 hours (0: no cap).
+func (s *Service) SetInvitationLimits(perOrg, perUser int) { s.perOrg, s.perUser = perOrg, perUser }
+
+// checkInvitationLimits refuses an organisation invitation past the daily
+// caps, saying when the oldest one counted leaves the window.
+func (s *Service) checkInvitationLimits(ctx context.Context, q *store.Queries, orgID, inviter uuid.UUID) error {
+	since := s.now().Add(-24 * time.Hour)
+	wait := func(oldest time.Time) time.Duration {
+		return max(time.Second, oldest.Add(24*time.Hour).Sub(s.now()).Round(time.Second))
+	}
+	if s.perOrg > 0 {
+		c, err := q.CountOrgInvitationsSince(ctx, store.CountOrgInvitationsSinceParams{OrgID: &orgID, Since: since})
+		if err != nil {
+			return err
+		}
+		if int(c.Sent) >= s.perOrg {
+			return LimitError{Msg: fmt.Sprintf("this organisation has sent %d invitations in the last 24 hours, the most it may; try again later", c.Sent), RetryAfter: wait(c.Oldest)}
+		}
+	}
+	if s.perUser > 0 {
+		c, err := q.CountInviterInvitationsSince(ctx, store.CountInviterInvitationsSinceParams{InvitedBy: inviter, Since: since})
+		if err != nil {
+			return err
+		}
+		if int(c.Sent) >= s.perUser {
+			return LimitError{Msg: fmt.Sprintf("you have sent %d invitations in the last 24 hours, the most you may; try again later", c.Sent), RetryAfter: wait(c.Oldest)}
+		}
+	}
+	return nil
 }
 
 // Hooks are the account hooks auth runs.
@@ -719,6 +775,9 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 				return Invited{}, fmt.Errorf("%w: %s is already a member", ErrConflict, email)
 			}
 		}
+		if err := s.checkInvitationLimits(ctx, q, *p.OrgID, p.InvitedBy); err != nil {
+			return Invited{}, err
+		}
 	} else if len(p.Projects) > 0 {
 		return Invited{}, fmt.Errorf("%w: platform invitations carry no project roles", ErrInvalid)
 	} else if _, err := q.GetUserByEmail(ctx, email); err == nil {
@@ -741,12 +800,14 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 		return Invited{}, err
 	}
 	out := Invited{Invitation: inv, URL: s.publicURL + "/invite?token=" + token}
+	// The names are the inviter's choice, sent to any address: mail.Inert
+	// keeps a web address in one from becoming a link.
 	what := "Xenibase"
 	if orgName != "" {
-		what = "the " + orgName + " organisation on Xenibase"
+		what = "the " + mail.Inert(orgName) + " organisation on Xenibase"
 	}
-	who := p.InviterName
-	if strings.TrimSpace(who) == "" {
+	who := mail.Inert(strings.TrimSpace(p.InviterName))
+	if who == "" {
 		who = "Someone"
 	}
 	invite := mail.Content{

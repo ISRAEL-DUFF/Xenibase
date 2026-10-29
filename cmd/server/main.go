@@ -292,6 +292,7 @@ func run() error {
 	// Email carries the logo from, and links to, the web app.
 	mail.SetPublicURL(cfg.Insight.PublicURL)
 	orgSvc := orgs.New(pool, authSvc, projects, mailSvc, cfg.Insight.PublicURL, log)
+	orgSvc.SetInvitationLimits(cfg.Invitations.PerOrgDay, cfg.Invitations.PerUserDay)
 	authSvc.SetHooks(orgSvc.Hooks())
 
 	// Billing (V3 §3): price books, accounts, plan changes.

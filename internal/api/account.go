@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/google/uuid"
 
@@ -339,6 +340,12 @@ func (s *Server) orgError(w http.ResponseWriter, what string, err error) {
 		writeError(w, http.StatusForbidden, "wrong_account", err.Error())
 	case errors.Is(err, orgs.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	case errors.Is(err, orgs.ErrTooManyInvitations):
+		var l orgs.LimitError
+		if errors.As(err, &l) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(l.RetryAfter.Seconds())))
+		}
+		writeError(w, http.StatusTooManyRequests, "rate_limited", err.Error())
 	default:
 		s.authError(w, what, err)
 	}

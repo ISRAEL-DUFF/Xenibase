@@ -316,12 +316,34 @@ func Compose(to []string, subject string, c Content) Message {
 	return Message{To: to, Subject: subject, Body: c.Text(), Content: &c}
 }
 
-// Hi is a greeting by first name, or "Hello," when there is no name.
+// Hi is a greeting by first name, or "Hello," when there is no name. The
+// name is the account's own choice, so it is made Inert.
 func Hi(name string) string {
 	if f := strings.Fields(name); len(f) > 0 {
-		return "Hi " + f[0] + ","
+		return "Hi " + Inert(f[0]) + ","
 	}
 	return "Hello,"
+}
+
+// inertBreak follows each character that joins the parts of a web address
+// or domain in Inert's output: a zero-width space, which shows as nothing.
+const inertBreak = "\u200b"
+
+// Inert makes text someone else chose (an organisation's or a person's
+// name) safe to put in a message: a web address or domain in it is not
+// made a link by the HTML part, and isn't one a mail client recognises,
+// since an invisible zero-width space follows every ".", ":", "/" and "@"
+// in it. The words look the same.
+func Inert(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		b.WriteRune(r)
+		switch r {
+		case '.', ':', '/', '@':
+			b.WriteString(inertBreak)
+		}
+	}
+	return b.String()
 }
 
 // SignOff closes a message that Xenibase writes in its own voice.

@@ -216,6 +216,33 @@ a test that failed before.
   its project's routes, so nothing opens up) and raises
   `pooler_config_skipped`, instead of failing every region.
 
+## Atlas review: identity and access (Part E)
+
+The Atlas's identity page traced Xenibase's own accounts, organisations,
+tokens and email through the code; each is fixed with a test that failed
+before.
+
+### Found and fixed
+
+- **Break-glass could become permanent membership** (high). Under
+  break-glass a platform admin could invite their own address as admin and
+  accept it, keeping the access after the session, unflagged. Invitations,
+  role changes and ownership transfers now answer 403 `break_glass`; nobody
+  invites their own address or accepts an invitation they sent
+  (`TestBreakGlassCannotGrantMembership`).
+- **The lockout revealed accounts and never grew** (medium). Five wrong
+  passwords locked a registered address but never an unknown one, the lock
+  stayed at 15 minutes, nobody was told, and signup answered an existing
+  address 100 times faster. Unknown addresses are now locked the same way,
+  the lock doubles to a day, the owner is emailed, and signup hashes either
+  way (`TestLockoutDoublesAndSaysNothing`,
+  `TestSignupTakesAsLongForAnExistingAddress`).
+- **Invitations were an unlimited mail relay with linked names** (medium).
+  Organisation invitations are capped a day per organisation and per
+  inviter, and user-chosen names in email are never links
+  (`TestInvitationsAreCapped`, `TestInvitationNamesAreNotLinks`,
+  `TestInertTextIsNeverALink`).
+
 ## V3 review of payments and billing (M27)
 
 > Reviewed when cards and the Flutterwave and iSpend providers existed. They

@@ -112,6 +112,13 @@ Signup can be open (Admin → Settings → Signup), protected by:
 - **A per-IP cap** of `XENIBASE_SIGNUPS_PER_IP` new accounts a day from one
   address (default 3; 0 turns it off). Behind a proxy, set
   `XENIBASE_TRUSTED_PROXIES` so the client's address is the one counted.
+- **Invitation caps.** Every account owns an organisation, and an
+  invitation emails any address, so an organisation may send
+  `XENIBASE_INVITES_PER_ORG_DAY` invitations in any 24 hours (default 100)
+  and an inviter `XENIBASE_INVITES_PER_USER_DAY` across their organisations
+  (default 50); past either, inviting answers `429 rate_limited` with
+  `Retry-After`. 0 turns a cap off. Organisation and inviter names in the
+  email are never links.
 - What V2 already required: a verified email address, TOTP for every
   account, and one personal (Free) organisation per user.
 

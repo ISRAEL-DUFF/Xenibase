@@ -108,6 +108,9 @@ services:
       XENIBASE_TURNSTILE_SITE_KEY: ${XENIBASE_TURNSTILE_SITE_KEY:-}
       XENIBASE_TURNSTILE_SECRET: ${XENIBASE_TURNSTILE_SECRET:-}
       XENIBASE_SIGNUPS_PER_IP: ${XENIBASE_SIGNUPS_PER_IP:-3}
+      # Organisation invitations a day, per organisation and per inviter.
+      XENIBASE_INVITES_PER_ORG_DAY: ${XENIBASE_INVITES_PER_ORG_DAY:-100}
+      XENIBASE_INVITES_PER_USER_DAY: ${XENIBASE_INVITES_PER_USER_DAY:-50}
       # Support (V3 §7.1, docs/support.md): the inbox, the email
       # provider's inbound webhook secret, and WhatsApp's Cloud API.
       XENIBASE_SUPPORT_EMAIL: ${XENIBASE_SUPPORT_EMAIL:-}

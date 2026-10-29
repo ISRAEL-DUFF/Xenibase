@@ -39,6 +39,18 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Invitations are no longer an unlimited mail relay with linked names.**
+  Nothing counted invitations, every account owns an organisation, and the
+  organisation's and inviter's names were linkified in the email, so anyone
+  with an account could send Xenibase-branded email to any address with a
+  link of their choosing beside the real button. An organisation may now
+  send 100 invitations in any 24 hours and an inviter 50 across their
+  organisations (`XENIBASE_INVITES_PER_ORG_DAY`,
+  `XENIBASE_INVITES_PER_USER_DAY`; 0 turns a cap off); past either,
+  inviting answers `429 rate_limited` with `Retry-After`. Names someone
+  chose (the organisation's, the inviter's, a token's, the first name in a
+  greeting) go into email through the new `mail.Inert`, which keeps a web
+  address in them from becoming a link, here or in most mail clients.
 - **The sign-in lockout no longer reveals accounts, grows, and tells the
   owner.** Five wrong passwords for a registered address answered
   `429 locked` while an unknown address only ever answered `401`, so five
@@ -671,6 +683,10 @@ bundle share one version (spec §11.5).
   the new `files_share_backups` alert.
 
 ### Upgrading
+- Organisation invitations are capped at 100 per organisation and 50 per
+  inviter in any 24 hours. An installation that onboards more people a
+  day raises `XENIBASE_INVITES_PER_ORG_DAY` and
+  `XENIBASE_INVITES_PER_USER_DAY` (0 turns a cap off).
 - Migration 00087 adds `users.lockout_notified_at` and the
   `login_address_failures` table. Sign-in locks now double with each
   further failure up to a day instead of staying at 15 minutes, and their

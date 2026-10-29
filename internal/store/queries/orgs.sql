@@ -262,3 +262,14 @@ LIMIT @max_rows;
 -- name: RenameProjectDBUser :exec
 -- tenant: system - the rename_opaque operation renames a project's own logins.
 UPDATE project_db_users SET role_name = @new_name WHERE project_id = @project_id AND role_name = @old_name;
+
+-- name: CountOrgInvitationsSince :one
+-- Invitations an organisation sent since a time, and the oldest of them
+-- (the daily cap).
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE org_id = @org_id AND created_at >= @since::timestamptz;
+
+-- name: CountInviterInvitationsSince :one
+-- tenant: system - one inviter's organisation invitations in every organisation, for the daily cap.
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE invited_by = @invited_by AND kind = 'org' AND created_at >= @since::timestamptz;
