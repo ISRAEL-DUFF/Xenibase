@@ -124,6 +124,12 @@ func (s *Service) Indexes(ctx context.Context, p store.Project) (IndexReport, er
 			examples[t.Queryid] = qt
 		}
 	}
+	// pg_stat_database is the admin's alone on a shared cluster.
+	if since, err := s.statsSince(ctx, p); err == nil {
+		out.StatsSince = since
+	} else {
+		s.log.Warn("insights: index statistics reset time", "project_id", p.ID, "err", err)
+	}
 	err = s.console.ReadOnly(ctx, p.ID, func(conn *pgx.Conn) error {
 		idx, err := listIndexes(ctx, conn)
 		if err != nil {
@@ -132,15 +138,6 @@ func (s *Service) Indexes(ctx context.Context, p store.Project) (IndexReport, er
 		tables, err := tableScans(ctx, conn)
 		if err != nil {
 			return err
-		}
-		if err := conn.QueryRow(ctx, `SELECT stats_reset FROM pg_stat_database WHERE datname = current_database()`).Scan(&out.StatsSince); err != nil {
-			return err
-		}
-		if out.StatsSince == nil {
-			var start time.Time
-			if err := conn.QueryRow(ctx, `SELECT pg_postmaster_start_time()`).Scan(&start); err == nil {
-				out.StatsSince = &start
-			}
 		}
 		out.Hypopg, err = hypopgState(ctx, conn)
 		if err != nil {
@@ -488,4 +485,18 @@ func indexName(table string, cols []string) string {
 		n = n[:59] + "_idx"
 	}
 	return n
+}
+
+// statsSince is when p's database's statistics counters started: their
+// last reset, else the server's start. It reads pg_stat_database as the
+// instance admin, since tenants on a shared cluster may not.
+func (s *Service) statsSince(ctx context.Context, p store.Project) (*time.Time, error) {
+	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close(context.Background())
+	var since *time.Time
+	err = conn.QueryRow(ctx, `SELECT coalesce(stats_reset, pg_postmaster_start_time()) FROM pg_stat_database WHERE datname = current_database()`).Scan(&since)
+	return since, err
 }

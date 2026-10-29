@@ -183,6 +183,19 @@ func (s *Service) applySettings(ctx context.Context, p store.Project, set store.
 	if err := s.ensureRole(ctx, p, set, log); err != nil {
 		return err
 	}
+	if p.Tier == TierShared {
+		// Brings databases created by older releases up to the current
+		// catalog restrictions (migration 00066 queues this for each).
+		conn, err := s.connectInstance(ctx, p.InstanceID, p.DbName)
+		if err != nil {
+			return err
+		}
+		err = RestrictActivity(ctx, conn)
+		conn.Close(context.Background())
+		if err != nil {
+			return err
+		}
+	}
 	if err := s.syncPooler(ctx, log, "pooler", fmt.Sprintf("pool size %d, max %d connections", set.PoolSize, set.ConnectionLimit)); err != nil {
 		return err
 	}

@@ -24,7 +24,7 @@ to report it.
 | etcd (HA, V3 §2.2) | TLS for clients and peers with client certificates required, from a separate etcd CA whose key is sealed with the master key; each HA instance's Patroni has its own client certificate. Patroni's REST API listens on the private network: reads are open, changes (switchover, configuration) need the instance's REST password. The SLA probe login can only connect and run `SELECT 1` (no grants beyond CONNECT). | `TestEtcdCluster` (no client certificate is refused) |
 | `pg_hba.conf` accepts only the pooler and control-plane addresses, `scram-sha-256`, `hostssl` where applicable | Bundle: `deploy/compose/shared-pg-hba.conf` names the fixed addresses of xenibase-server, the agent, and both poolers; agent-run clusters and instances: `xenibase-hba.sh` writes `XENIBASE_AGENT_DB_ALLOW` (default: private ranges) at initdb. V3 moves: the moves' own logins (`xenibase_move_<id>`, random password, dropped after the move) may also connect from `XENIBASE_AGENT_MOVE_ALLOW` (default: private ranges; bundle: its Docker network), added by the agent on every start; the bundle's shared cluster allows them from its Docker network | `isocheck.Cluster`: every network rule must be SCRAM (or `reject`/`cert`), name explicit addresses (no `all`, `samenet`, `0.0.0.0/0`), and use `hostssl` outside private ranges; `TestHBAFinding`; `TestClusterConfiguration` |
 | `log_statement` off; only `log_min_duration_statement` set | `log_statement=none`, `log_min_duration_statement=5s` in the bundle and agent-run clusters | `isocheck.Cluster` (`log_statement`, `log_duration`, `log_min_duration_statement` not 0) |
-| Isolation suite: A cannot connect to B, list B's tables, read B's data through any predefined role, create objects in B, or read server files | — | `test/isolation` (CI) and `isocheck.Probes` (live, two throwaway tenants created with the real create steps): connections, `SET ROLE`, `GRANT`, `ALTER ROLE`, `DROP DATABASE`, `pg_terminate_backend`, `pg_read_file`, `pg_ls_dir`, `COPY … PROGRAM`, `COPY FROM` file, `lo_import`, C functions, superuser-only settings, `pg_stat_activity` query text |
+| Isolation suite: A cannot connect to B, list B's tables, read B's data through any predefined role, create objects in B, or read server files | — | `test/isolation` (CI) and `isocheck.Probes` (live, two throwaway tenants created with the real create steps): connections, `SET ROLE`, `GRANT`, `ALTER ROLE`, `DROP DATABASE`, `pg_terminate_backend`, `pg_read_file`, `pg_ls_dir`, `COPY … PROGRAM`, `COPY FROM` file, `lo_import`, C functions, superuser-only settings, `pg_stat_activity` query text, `pg_stat_database`, `pg_stat_get_db_*` and `pg_stat_get_backend_*`; `isocheck.Database` flags any of them readable by `PUBLIC` |
 
 The SQL console adds an escape route the spec did not list (`RESET ROLE`
 on an admin session). It signs in as a per-project login that inherits
@@ -150,6 +150,13 @@ a test that failed before.
   `outbound.CheckSource` (public only unless allow-listed; loopback, the
   nodes' and instances' addresses and the platform's networks never), and
   the server and agent connect to the checked address (`hostaddr`).
+- **Shared-cluster tenants could watch each other's activity** (low-medium).
+  Only `pg_stat_activity` and `pg_stat_get_activity` were hidden;
+  `pg_stat_database(_conflicts)` and the `pg_stat_get_db_*` and
+  `pg_stat_get_backend_*` functions (every database's commits and backends,
+  every backend's database and role) stayed readable. They are revoked from
+  `PUBLIC` in each shared project database; migration 00066 queues
+  `apply_settings`, which now applies it, for existing projects.
 
 ## V3 review of payments and billing (M27)
 
