@@ -41,6 +41,21 @@ bundle share one version (spec §11.5).
   still get `EXECUTE` from the default privileges), schema version 7 takes
   back the grants already made, and the data API, type generation and the
   advisor leave extensions' functions out (`404 unknown_function`).
+- **A table without row-level security could be read through a view or a
+  function.** The edge refused such a table only when a URL named it, while
+  anon and user held every privilege on it, so a `security_invoker` view over
+  it, or any function running as the caller, returned every row to the
+  publishable key. Now anon and user lose their privileges on a relation
+  nothing protects (a table without row-level security, a materialized view,
+  a view running as its owner; a public table keeps `SELECT`) as soon as an
+  edge sees it, through the new `xb_auth.sync_grants`, and get back exactly
+  what was taken once it has row-level security (`xb_auth.withheld` records
+  it). The edge also refuses an invoker view that reads such a relation, and
+  any invoker function while the caller's role still reaches one (`403
+  rls_required`, naming it). Running version 1 again after a move or restore
+  no longer re-grants a table the owner narrowed. The advisor's
+  `rls_disabled` message says what is now true, and `view_reads_unprotected`
+  names an invoker view over such a table.
 - **A branch reset no longer copies a parent the caller has lost.** Reset
   checked only the branch, so someone removed from the parent could keep
   refilling a branch with its current data, and a full-data branch of a
@@ -348,6 +363,15 @@ bundle share one version (spec §11.5).
   roles' `EXECUTE` on functions an extension installed; the data API no
   longer serves them, so wrap one in a function of your own if an app calls
   it.
+  The same version adds `xb_auth.sync_grants`, which the control plane
+  runs straight after: anon and user lose their privileges on tables without
+  row-level security (except `SELECT` on public tables), materialized views
+  and views that run as their owner, in every schema of the project's,
+  exposed or not, including grants made by hand. A view or function that
+  read such a table with the publishable key now answers `403 rls_required`
+  (or `403 permission_denied`): enable row-level security on the table, or
+  list it as public if anyone may read it. See `docs/upgrade.md`
+  ("Upgrading from 4.2.4").
 - Migration 00060 adds `instances.max_connections`. Existing instances keep
   100 until they are resized.
 - Migrations 00068 and 00069 move children an earlier transfer left behind to

@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/israel-duff/xenibase/internal/datacat"
 )
 
 // The data API (V4 §3): reads in this milestone.
@@ -27,8 +29,8 @@ const (
 
 // gateFor is the RLS gate for the request's role (V4 §3.6): anon and user
 // may read a table only with row-level security on (or marked public), and
-// a view only when it runs as the invoker.
-func (p *project) gateFor(role string) gate {
+// a view only when it runs as the invoker and what it reads passes too.
+func (p *project) gateFor(cat *Catalog, role string) gate {
 	if role == "service" {
 		return nil
 	}
@@ -39,7 +41,7 @@ func (p *project) gateFor(role string) gate {
 		switch t.Kind {
 		case kindView:
 			if t.Invoker {
-				return nil
+				return p.viewGate(cat, role, t, false)
 			}
 			return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: map[string]any{"table": t.Name},
 				Message: fmt.Sprintf("view %s doesn't run as the caller (security_invoker), so row-level security can't apply: set it, or mark it public", t.Name)}
@@ -51,6 +53,47 @@ func (p *project) gateFor(role string) gate {
 		return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: map[string]any{"table": t.Name},
 			Message: fmt.Sprintf("%s has no row-level security, so it can't be read with the publishable key: enable it and add policies, or mark the table public", t.Name)}
 	}
+}
+
+// viewGate checks what a security_invoker view reads (datacat's
+// Unprotected and CallsFunctions): every relation without row-level
+// security must be a public table (for a read), and a view that calls the
+// project's functions passes only when functionGate would.
+func (p *project) viewGate(cat *Catalog, role string, t *Table, write bool) *apiError {
+	for _, u := range t.Unprotected {
+		if write || !p.publicName(u) {
+			return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: map[string]any{"table": t.Name, "reads": u},
+				Message: fmt.Sprintf("view %s reads %s, which row-level security doesn't protect, so it can't be used with the publishable key: enable row-level security on %s and add policies, or mark it public", t.Name, u, u)}
+		}
+	}
+	if t.CallsFunctions {
+		if reach := cat.Reach[role]; len(reach) > 0 {
+			return reachError("view "+t.Name+" calls a function, which", reach, map[string]any{"table": t.Name})
+		}
+	}
+	return nil
+}
+
+// functionGate is the RLS gate for a function: one that runs as the
+// caller reaches whatever the caller's role may, so anon and user may call
+// it only while their role holds no privilege on a relation nothing
+// protects (Catalog.Reach; the project's database takes those back when
+// the catalog changes, so this is a backstop). A SECURITY DEFINER
+// function runs as its owner, which the advisor flags.
+func (p *project) functionGate(cat *Catalog, role string, f *datacat.Function) *apiError {
+	if role == "service" || f.Definer {
+		return nil
+	}
+	if reach := cat.Reach[role]; len(reach) > 0 {
+		return reachError(f.Name+" runs as the caller, who", reach, map[string]any{"function": f.Name})
+	}
+	return nil
+}
+
+func reachError(who string, reach []string, details map[string]any) *apiError {
+	details["reaches"] = reach
+	return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: details,
+		Message: fmt.Sprintf("%s can reach %s, which row-level security doesn't protect, so it can't be called with the publishable key: enable row-level security on %s, or revoke the request roles' privileges on it", who, reach[0], reach[0])}
 }
 
 func (c *call) apiFail(e *apiError) {
@@ -392,7 +435,7 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 				Message: fmt.Sprintf("no table or view %q in the exposed schemas (%s)", name, strings.Join(cat.Schemas, ", "))}
 			return nil
 		}
-		g := c.p.gateFor(req.Role)
+		g := c.p.gateFor(cat, req.Role)
 		if g != nil {
 			if ge := g(t); ge != nil {
 				failed = ge

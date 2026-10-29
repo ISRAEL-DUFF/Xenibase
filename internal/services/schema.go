@@ -48,7 +48,8 @@ var schemaVersions = []schemaVersion{
 		// creates, and row-level security decides which rows (the edge
 		// refuses anon and user on a table without it, V4 §3.6).
 		`GRANT USAGE ON SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {{service}}`,
+		grantTablesStmt("public"),
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {{anon}}, {{user}}, {{service}}`,
 		grantFunctionsStmt("public"),
 		`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{anon}}, {{user}}, {{service}}`,
@@ -546,7 +547,108 @@ BEGIN
     EXECUTE format('REVOKE EXECUTE ON %s %s FROM %s', r.kind, r.fn, r.grantee);
   END LOOP;
 END $$`,
+		// anon and user may hold privileges only on what protects itself: a
+		// table (or foreign table) with row-level security, or a view that
+		// runs as the caller; and SELECT on what the project lists as public.
+		// Anything else, a function or a view of theirs could read or change
+		// in full (the edge's gate only sees the relation a URL names).
+		// sync_grants takes the rest back and records it in withheld, and
+		// gives back what it took once the relation is protected or listed,
+		// so the default privileges keep working for a table made and then
+		// given policies, and an owner's own REVOKE (a hidden column) stays.
+		// The edge calls it when the catalog changes, and the control plane
+		// after every schema run and settings change.
+		`CREATE TABLE IF NOT EXISTS xb_auth.withheld (
+		  rel       regclass NOT NULL,
+		  grantee   regrole NOT NULL,
+		  col       name NOT NULL DEFAULT '',
+		  privilege text NOT NULL,
+		  at        timestamptz NOT NULL DEFAULT now(),
+		  PRIMARY KEY (rel, grantee, col, privilege)
+		)`,
+		`REVOKE ALL ON xb_auth.withheld FROM PUBLIC`,
+		`GRANT SELECT ON xb_auth.withheld TO {{owner}}, {{service}}`,
+		// The relations sync_grants looks after (the project's, not the
+		// platform's or an extension's own reference data): whether each
+		// protects itself, and whether it is listed public.
+		`CREATE OR REPLACE FUNCTION xb_auth.grant_targets(public_tables text[], OUT rel oid, OUT protected boolean, OUT listed boolean)
+RETURNS SETOF record LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+  SELECT c.oid,
+    CASE c.relkind WHEN 'v' THEN coalesce(c.reloptions::text[] && ARRAY['security_invoker=true', 'security_invoker=on', 'security_invoker=1'], false)
+      WHEN 'm' THEN false ELSE c.relrowsecurity END,
+    (n.nspname || '.' || c.relname) = ANY (public_tables) OR (n.nspname = 'public' AND c.relname = ANY (public_tables))
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'p', 'f', 'v', 'm') AND n.nspname NOT LIKE 'pg\_%' AND n.nspname NOT LIKE 'xb\_%'
+    AND n.nspname NOT IN ('information_schema', 'xenibase') $$`,
+		`REVOKE ALL ON FUNCTION xb_auth.grant_targets(text[]) FROM PUBLIC, {{owner}}, {{anon}}, {{user}}, {{service}}, {{hook}}`,
+		`CREATE OR REPLACE FUNCTION xb_auth.sync_grants(public_tables text[]) RETURNS int
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  r record;
+  n int := 0;
+  roles oid[] := ARRAY['{{anon}}'::regrole, '{{user}}'::regrole]::oid[];
+BEGIN
+  -- One at a time: concurrent GRANTs on one relation fail.
+  PERFORM pg_advisory_xact_lock(hashtext('xb_auth.sync_grants'));
+  DELETE FROM xb_auth.withheld w WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = w.rel)
+    OR NOT EXISTS (SELECT 1 FROM pg_roles a WHERE a.oid = w.grantee);
+  -- Give back what is protected now (or, SELECT, listed).
+  FOR r IN SELECT w.rel, w.grantee, w.col, w.privilege FROM xb_auth.withheld w JOIN xb_auth.grant_targets(public_tables) s ON s.rel = w.rel
+    WHERE s.protected OR (s.listed AND w.privilege = 'SELECT') LOOP
+    IF r.col = '' THEN
+      EXECUTE format('GRANT %s ON %s TO %s', r.privilege, r.rel, r.grantee);
+    ELSIF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = r.rel AND a.attname = r.col AND NOT a.attisdropped) THEN
+      EXECUTE format('GRANT %s (%I) ON %s TO %s', r.privilege, r.col, r.rel, r.grantee);
+    END IF;
+    DELETE FROM xb_auth.withheld w WHERE w.rel = r.rel AND w.grantee = r.grantee AND w.col = r.col AND w.privilege = r.privilege;
+    n := n + 1;
+  END LOOP;
+  -- Take back the rest: table and column privileges of anon and user.
+  FOR r IN SELECT s.rel::regclass AS rel, a.grantee::regrole AS grantee, ''::name AS col, a.privilege_type AS privilege
+      FROM xb_auth.grant_targets(public_tables) s JOIN pg_class c ON c.oid = s.rel CROSS JOIN LATERAL aclexplode(c.relacl) a
+      WHERE NOT s.protected AND a.grantee = ANY (roles) AND NOT (s.listed AND a.privilege_type = 'SELECT')
+    UNION ALL
+    SELECT s.rel::regclass, a.grantee::regrole, att.attname, a.privilege_type
+      FROM xb_auth.grant_targets(public_tables) s JOIN pg_attribute att ON att.attrelid = s.rel AND att.attnum > 0 AND NOT att.attisdropped
+        AND att.attacl IS NOT NULL CROSS JOIN LATERAL aclexplode(att.attacl) a
+      WHERE NOT s.protected AND a.grantee = ANY (roles) AND NOT (s.listed AND a.privilege_type = 'SELECT') LOOP
+    IF r.col = '' THEN
+      EXECUTE format('REVOKE %s ON %s FROM %s', r.privilege, r.rel, r.grantee);
+    ELSE
+      EXECUTE format('REVOKE %s (%I) ON %s FROM %s', r.privilege, r.col, r.rel, r.grantee);
+    END IF;
+    INSERT INTO xb_auth.withheld (rel, grantee, col, privilege) VALUES (r.rel, r.grantee, r.col, r.privilege) ON CONFLICT DO NOTHING;
+    n := n + 1;
+  END LOOP;
+  RETURN n;
+END $$`,
+		`REVOKE ALL ON FUNCTION xb_auth.sync_grants(text[]) FROM PUBLIC, {{owner}}, {{anon}}, {{user}}, {{service}}, {{hook}}`,
+		`GRANT EXECUTE ON FUNCTION xb_auth.sync_grants(text[]) TO {{edge}}`,
 	}},
+}
+
+// grantTablesStmt gives anon and user the default privileges on schema's
+// relations (a literal: public, or {{schema}}) that they hold nothing on
+// yet, leaving out extensions' tables. Run again after a move or restore,
+// it restores lost grants without undoing the owner's own REVOKEs (a
+// column hidden with column grants); sync_grants then takes back what
+// nothing protects.
+func grantTablesStmt(schema string) string {
+	return `DO $$
+DECLARE
+  rel text;
+  grantee regrole;
+BEGIN
+  FOR rel, grantee IN SELECT format('%I.%I', n.nspname, c.relname), x.r
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN unnest(ARRAY['{{anon}}'::regrole, '{{user}}'::regrole]) AS x(r)
+    WHERE n.oid = '` + schema + `'::regnamespace AND c.relkind IN ('r', 'p', 'f', 'v', 'm')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+      AND NOT has_any_column_privilege(x.r, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+      AND NOT has_table_privilege(x.r, c.oid, 'DELETE, TRUNCATE, TRIGGER') LOOP
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO %s', rel, grantee);
+  END LOOP;
+END $$`
 }
 
 // grantFunctionsStmt gives the request roles EXECUTE on schema's functions
@@ -571,7 +673,8 @@ END $$`
 // exposed schema other than public (public's are in version 1).
 var exposureStmts = []string{
 	`GRANT USAGE ON SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
-	`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
+	`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {{schema}} TO {{service}}`,
+	grantTablesStmt("{{schema}}"),
 	`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {{schema}} TO {{anon}}, {{user}}, {{service}}`,
 	grantFunctionsStmt("{{schema}}"),
 	`ALTER DEFAULT PRIVILEGES FOR ROLE {{owner}} IN SCHEMA {{schema}} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{anon}}, {{user}}, {{service}}`,

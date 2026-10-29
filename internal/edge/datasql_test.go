@@ -134,7 +134,7 @@ func TestReadSQL(t *testing.T) {
 	// The gate applies to embedded tables.
 	p := &project{}
 	sel, _ = ParseSelect("id,comments(body)", 0)
-	if _, err := (&builder{cat: cat, gate: p.gateFor("anon")}).read(posts, Query{Select: sel}); err == nil || asAPIError(err).Code != "rls_required" {
+	if _, err := (&builder{cat: cat, gate: p.gateFor(cat, "anon")}).read(posts, Query{Select: sel}); err == nil || asAPIError(err).Code != "rls_required" {
 		t.Fatalf("gate on an embed: %v", err)
 	}
 }

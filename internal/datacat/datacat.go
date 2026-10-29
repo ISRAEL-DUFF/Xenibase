@@ -62,6 +62,13 @@ type Table struct {
 	Out      []*ForeignKey // this table's foreign keys
 	In       []*ForeignKey // foreign keys that reference this table
 	Estimate float64       // reltuples
+	// Unprotected are the relations a security_invoker view reads that
+	// nothing protects ("schema.name": tables without row-level security,
+	// materialized views, views that run as their owner), through the
+	// invoker views it reads too; CallsFunctions says it, or one of those
+	// views, calls a function of the project's.
+	Unprotected    []string
+	CallsFunctions bool
 }
 
 // Col is the named column, or nil.
@@ -116,6 +123,9 @@ type Catalog struct {
 	Fingerprint string
 	ByName      map[string]*Table // "schema.name"
 	Ordered     []*Table
+	// Reach is, by request role, the relations it holds privileges on that
+	// nothing protects (ReachSQL); the edge fills it in.
+	Reach map[string][]string
 }
 
 // Find resolves a table name in a URL: "schema.table", or "table" in the
@@ -148,17 +158,56 @@ func (c *Catalog) FindFunction(name string) []*Function {
 // Tables lists the relations in catalog order.
 func (c *Catalog) Tables() []*Table { return c.Ordered }
 
-// FingerprintSQL changes when the relations, columns or constraints of
-// the schemas in $1 change.
+// userSchemas matches the project's own schemas, in a query with n as
+// pg_namespace: not the system's or the platform's.
+const userSchemas = `n.nspname NOT LIKE 'pg\_%' AND n.nspname NOT LIKE 'xb\_%' AND n.nspname NOT IN ('information_schema', 'xenibase')`
+
+// FingerprintSQL changes when the relations, columns, constraints or
+// functions of the schemas in $1 change, or the privileges and
+// row-level security of any relation of the project's (a view or a
+// function in $1 may read it).
 const FingerprintSQL = `SELECT
   (SELECT coalesce(sum(c.xmin::text::bigint), 0) + count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = ANY($1))::text || ':' ||
+    WHERE n.nspname = ANY($1) OR (` + userSchemas + `))::text || ':' ||
   (SELECT coalesce(sum(a.xmin::text::bigint), 0) + count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ANY($1) AND a.attnum > 0)::text || ':' ||
+    JOIN pg_namespace n ON n.oid = c.relnamespace WHERE (n.nspname = ANY($1) OR (` + userSchemas + `)) AND a.attnum > 0)::text || ':' ||
   (SELECT coalesce(sum(k.xmin::text::bigint), 0) + count(*) FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace
     WHERE n.nspname = ANY($1))::text || ':' ||
   (SELECT coalesce(sum(f.xmin::text::bigint), 0) + count(*) FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
     WHERE n.nspname = ANY($1))::text`
+
+// unprotected is true for a relation c (with n its pg_namespace) that
+// nothing protects: a table or foreign table without row-level security,
+// a materialized view, or a view that runs as its owner. The project's own
+// relations only, not an extension's.
+const unprotected = `c.relkind IN ('r', 'p', 'f', 'v', 'm') AND ` + userSchemas + `
+  AND NOT CASE c.relkind WHEN 'v' THEN coalesce(c.reloptions::text[] && ARRAY['security_invoker=true', 'security_invoker=on', 'security_invoker=1'], false)
+    WHEN 'm' THEN false ELSE c.relrowsecurity END
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')`
+
+// ReachSQL lists the relations role $1 holds privileges on that nothing
+// protects, where it may read or change every row, as "schema.name"; the
+// public tables in $2 ("schema.table", or "table" in public) may be read.
+// A function that runs as the caller reaches whatever the caller may, so
+// the data API calls none for a role this lists.
+const ReachSQL = `SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE ` + unprotected + `
+    AND (has_table_privilege($1, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_any_column_privilege($1, c.oid, 'INSERT, UPDATE')
+      OR (has_any_column_privilege($1, c.oid, 'SELECT')
+        AND NOT ((n.nspname || '.' || c.relname) = ANY ($2) OR (n.nspname = 'public' AND c.relname = ANY ($2)))))
+  ORDER BY 1 LIMIT 20`
+
+// Reach runs ReachSQL for role.
+func Reach(ctx context.Context, tx Querier, role string, public []string) ([]string, error) {
+	if public == nil {
+		public = []string{}
+	}
+	rows, err := tx.Query(ctx, ReachSQL, role, public)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
 
 // Introspect reads the relations of schemas (and their functions).
 func Introspect(ctx context.Context, tx Querier, schemas []string) (*Catalog, error) {
@@ -264,7 +313,64 @@ func Introspect(ctx context.Context, tx Querier, schemas []string) (*Catalog, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := introspectViews(ctx, tx, byOID); err != nil {
+		return nil, err
+	}
 	return cat, introspectFunctions(ctx, tx, cat, byOID)
+}
+
+// introspectViews finds what each security_invoker view reads, following
+// its rule's dependencies through the invoker views it reads: the
+// relations nothing protects, and whether it calls a function of the
+// project's (which reads as the caller).
+func introspectViews(ctx context.Context, tx Querier, byOID map[uint32]*Table) error {
+	var views []uint32
+	for oid, t := range byOID {
+		if t.Kind == KindView && t.Invoker {
+			views = append(views, oid)
+		}
+	}
+	if len(views) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `WITH RECURSIVE dep(view, cls, obj) AS (
+		  SELECT r.ev_class, d.refclassid, d.refobjid FROM pg_rewrite r
+		    JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid
+		  WHERE r.ev_class = ANY($1) AND d.refclassid IN ('pg_class'::regclass, 'pg_proc'::regclass) AND d.refobjid <> r.ev_class
+		  UNION
+		  SELECT dep.view, d.refclassid, d.refobjid FROM dep
+		    JOIN pg_class c ON dep.cls = 'pg_class'::regclass AND c.oid = dep.obj AND c.relkind = 'v'
+		      AND coalesce(c.reloptions::text[] && ARRAY['security_invoker=true', 'security_invoker=on', 'security_invoker=1'], false)
+		    JOIN pg_rewrite r ON r.ev_class = c.oid
+		    JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid
+		  WHERE d.refclassid IN ('pg_class'::regclass, 'pg_proc'::regclass) AND d.refobjid <> r.ev_class
+		)
+		SELECT dep.view, n.nspname || '.' || c.relname, false FROM dep JOIN pg_class c ON dep.cls = 'pg_class'::regclass AND c.oid = dep.obj
+		  JOIN pg_namespace n ON n.oid = c.relnamespace WHERE `+unprotected+`
+		UNION
+		SELECT dep.view, '', true FROM dep JOIN pg_proc p ON dep.cls = 'pg_proc'::regclass AND p.oid = dep.obj
+		  JOIN pg_namespace n ON n.oid = p.pronamespace WHERE `+userSchemas+`
+		    AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+		ORDER BY 1, 2`, views)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var oid uint32
+		var rel string
+		var fn bool
+		if err := rows.Scan(&oid, &rel, &fn); err != nil {
+			return err
+		}
+		t := byOID[oid]
+		if fn {
+			t.CallsFunctions = true
+		} else {
+			t.Unprotected = append(t.Unprotected, rel)
+		}
+	}
+	return rows.Err()
 }
 
 func introspectFunctions(ctx context.Context, tx Querier, cat *Catalog, byOID map[uint32]*Table) error {

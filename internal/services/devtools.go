@@ -84,6 +84,16 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 	if err != nil {
 		return nil, err
 	}
+	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close(context.Background())
+	return advise(ctx, conn, schemas, public, store.AnonRole(p.DbName))
+}
+
+// advise is Advisor on a connection to the project's database.
+func advise(ctx context.Context, conn *pgx.Conn, schemas, public []string, anon string) ([]Finding, error) {
 	isPublic := map[string]bool{}
 	for _, t := range public {
 		if !strings.Contains(t, ".") {
@@ -91,12 +101,6 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 		}
 		isPublic[t] = true
 	}
-	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close(context.Background())
-	anon := store.AnonRole(p.DbName)
 	var out []Finding
 	q := func(sql string, args []any, scan func(pgx.Rows) error) error {
 		rows, err := conn.Query(ctx, sql, args...)
@@ -126,7 +130,7 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 		case !rls && isPublic[obj]:
 			out = append(out, Finding{"info", "public_table", obj, "Marked public: anyone with your app's publishable key can read every row.", ""})
 		case !rls:
-			out = append(out, Finding{"danger", "rls_disabled", obj, "Row-level security is off: the publishable key can't reach this table, and nothing protects it if it is marked public.",
+			out = append(out, Finding{"danger", "rls_disabled", obj, "Row-level security is off: anon and user hold no privileges on it while it stays off, so the publishable key can't reach it, directly or through a view or function; mark it public and anyone can read every row.",
 				fmt.Sprintf("ALTER TABLE %s ENABLE ROW LEVEL SECURITY; -- then add policies", pgx.Identifier{schema, name}.Sanitize())})
 		case policies == 0:
 			out = append(out, Finding{"info", "rls_no_policies", obj, "Row-level security is on with no policies: only the secret key can read or write it.", ""})
@@ -191,11 +195,28 @@ func (s *Service) Advisor(ctx context.Context, p store.Project) ([]Finding, erro
 			return nil
 		}
 		out = append(out, Finding{"warn", "view_not_invoker", schema + "." + name,
-			"The view runs as its owner, so the tables' row-level security doesn't apply to callers; the publishable key can't read it.",
+			"The view runs as its owner, so the tables' row-level security doesn't apply to callers; the publishable key can't read it, directly or through a function.",
 			fmt.Sprintf("ALTER VIEW %s SET (security_invoker = true);", pgx.Identifier{schema, name}.Sanitize())})
 		return nil
 	}); err != nil {
 		return nil, err
+	}
+	// Views that run as the caller but read a table nothing protects: the
+	// edge refuses them to the publishable key.
+	cat, err := datacat.Introspect(ctx, conn, schemas)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range cat.Tables() {
+		for _, u := range t.Unprotected {
+			if isPublic[u] || isPublic[t.Schema+"."+t.Name] {
+				continue
+			}
+			out = append(out, Finding{"warn", "view_reads_unprotected", t.Schema + "." + t.Name,
+				fmt.Sprintf("The view reads %s, which has no row-level security, so the publishable key can't read the view.", u),
+				fmt.Sprintf("Enable row-level security on %s and add policies (a materialized view or a view that runs as its owner can't have it: read the tables instead), or list it as a public table.", u)})
+			break
+		}
 	}
 	// Secret-looking columns anon may select.
 	if err := q(`SELECT n.nspname, c.relname, a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid

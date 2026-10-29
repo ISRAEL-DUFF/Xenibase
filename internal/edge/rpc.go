@@ -171,12 +171,16 @@ func (e *Edge) rpc(c *call, req Request, name string) {
 			return nil
 		}
 		fn = f
+		if ge := c.p.functionGate(cat, req.Role, f); ge != nil {
+			failed = ge
+			return nil
+		}
 		if c.r.Method == http.MethodGet && f.Volatile == 'v' {
 			failed = &apiError{Status: http.StatusMethodNotAllowed, Code: "volatile_function",
 				Message: fmt.Sprintf("%s may change data (it isn't STABLE or IMMUTABLE): call it with POST", f.Name)}
 			return nil
 		}
-		b := &builder{cat: cat}
+		b := &builder{cat: cat, gate: c.p.gateFor(cat, req.Role)}
 		var named []string
 		for _, a := range f.Args {
 			if raw, ok := args[a.Name]; ok {

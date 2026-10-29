@@ -57,7 +57,8 @@ Project → Settings → **API** → **Enable backend services**, or
    the platform, with `xb_auth.uid()`, `role()`, `claims()` and
    `claim(text)` for your row-level security policies;
 3. grants the three request roles use of what the owner creates in
-   `public` (row-level security decides which rows);
+   `public` (row-level security decides which rows; anon and user keep
+   privileges only on what row-level security protects, below);
 4. makes the first publishable and secret keys and the project's signing
    key.
 
@@ -126,6 +127,18 @@ or, for data anyone may read, list the table under **Public tables**.
 Views must run as the caller (`CREATE VIEW … WITH (security_invoker = true)`)
 so the underlying tables' policies apply; embedded tables are checked the
 same way. The secret key bypasses row-level security entirely.
+
+A table without row-level security is out of reach through views and
+functions too. While it stays that way, `<db>_anon` and `<db>_user` hold no
+privileges on it (on a public table, `SELECT` only): Xenibase takes them back
+within a couple of seconds of the table appearing or losing row-level
+security, and gives exactly those back once it has it, so the usual order
+(create the table, then enable row-level security and add policies) works.
+`xb_auth.withheld` lists what is held back. The same goes for materialized
+views and views that run as their owner. A view that runs as the caller but
+reads such a table answers `403 rls_required` naming it, and so does a
+function that runs as the caller while anon or user can still reach one
+(after a grant made by hand, say).
 
 ```sql
 ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
@@ -334,7 +347,7 @@ Project → Settings → API → Security advisor (or
 | Level | Finding |
 | --- | --- |
 | danger | A table without row-level security (`rls_disabled`); a write policy open to anon (or `PUBLIC`) with no condition (`policy_allows_everything`). |
-| warn | `SECURITY DEFINER` functions (`security_definer_function`); views that don't run as the caller (`view_not_invoker`); columns named like secrets (password, token, secret…) readable by anon or user (`secret_column`). |
+| warn | `SECURITY DEFINER` functions (`security_definer_function`); views that don't run as the caller (`view_not_invoker`); views that run as the caller but read a table without row-level security (`view_reads_unprotected`); columns named like secrets (password, token, secret…) readable by anon or user (`secret_column`). |
 | info | Public tables; row-level security with no policies (only the secret key gets in); read policies open to everyone. |
 
 Each finding says what to do and, where one statement fixes it, gives it.

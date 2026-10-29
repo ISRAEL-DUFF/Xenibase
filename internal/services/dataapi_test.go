@@ -99,7 +99,7 @@ func newDataProject(t *testing.T) *dataProject {
 	}
 	d := &dataProject{t: t, ctx: ctx, p: p, admin: admin,
 		edge: edge.New(edge.Config{Name: "test", Domain: "data.invalid", PoolerAddr: net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port))),
-			PoolerSSLMode: "disable", Log: slog.New(slog.NewTextHandler(io.Discard, nil))}),
+			PoolerSSLMode: "disable", CatalogEvery: time.Nanosecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}),
 		pc: edgeapi.Project{Ref: "d" + hex.EncodeToString(b)[:7], ProjectID: p.ID, State: edgeapi.StateActive, Version: 1, Database: db,
 			EdgeUser: store.EdgeRole(db), Password: dataTestPassword, AnonRole: store.AnonRole(db), UserRole: store.UserRole(db),
 			ServiceRole: store.ServiceRole(db), HookRole: store.AuthHookRole(db), Logins: logins, ExposedSchemas: []string{"public"},
@@ -120,6 +120,16 @@ func (d *dataProject) apply() {
 		d.t.Fatal(err)
 	}
 	if err := exposeOn(d.ctx, d.admin, d.p, d.pc.ExposedSchemas); err != nil {
+		d.t.Fatal(err)
+	}
+	d.sync()
+}
+
+// sync runs xb_auth.sync_grants with the project's public tables, as the
+// control plane does after a schema run or a settings change.
+func (d *dataProject) sync() {
+	d.t.Helper()
+	if err := syncGrantsOn(d.ctx, d.admin, d.pc.PublicTables); err != nil {
 		d.t.Fatal(err)
 	}
 }

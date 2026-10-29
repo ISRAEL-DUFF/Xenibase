@@ -30,7 +30,7 @@ const (
 
 // writeGate is stricter than the read gate: public tables are readable
 // without row-level security, never writable without it.
-func (p *project) writeGate(role string) gate {
+func (p *project) writeGate(cat *Catalog, role string) gate {
 	if role == "service" {
 		return nil
 	}
@@ -38,7 +38,7 @@ func (p *project) writeGate(role string) gate {
 		switch t.Kind {
 		case kindView:
 			if t.Invoker {
-				return nil
+				return p.viewGate(cat, role, t, true)
 			}
 		case kindTable, kindPart, kindForeign:
 			if t.RLS {
@@ -454,7 +454,7 @@ func (e *Edge) findWritable(cat *Catalog, p *project, role, name string) (*Table
 		return nil, &apiError{Status: http.StatusNotFound, Code: "unknown_table",
 			Message: fmt.Sprintf("no table or view %q in the exposed schemas (%s)", name, strings.Join(cat.Schemas, ", "))}
 	}
-	if g := p.writeGate(role); g != nil {
+	if g := p.writeGate(cat, role); g != nil {
 		if ge := g(t); ge != nil {
 			return nil, ge
 		}
@@ -492,7 +492,7 @@ func (e *Edge) write(c *call, req Request, name string, pk *string) {
 			return nil, 0, err
 		}
 		c.wrote = append(c.wrote, t.Schema+"."+t.Name)
-		b := &builder{cat: cat, gate: c.p.gateFor(req.Role)}
+		b := &builder{cat: cat, gate: c.p.gateFor(cat, req.Role)}
 		var res writeResult
 		status := http.StatusOK
 		switch m {
@@ -606,7 +606,7 @@ func (e *Edge) batchOne(ctx context.Context, tx pgx.Tx, cat *Catalog, p *project
 		}
 		pk = &s
 	}
-	b := &builder{cat: cat, gate: p.gateFor(req.Role)}
+	b := &builder{cat: cat, gate: p.gateFor(cat, req.Role)}
 	var res writeResult
 	switch op.Op {
 	case "insert":

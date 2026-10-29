@@ -459,8 +459,29 @@ func (s *Service) UpdateExposure(ctx context.Context, projectID uuid.UUID, origi
 			return svc, err
 		}
 	}
-	return q.UpdateServicesSettings(ctx, store.UpdateServicesSettingsParams{ProjectID: projectID, CorsOrigins: clean, Settings: raw,
+	out, err := q.UpdateServicesSettings(ctx, store.UpdateServicesSettingsParams{ProjectID: projectID, CorsOrigins: clean, Settings: raw,
 		ExposedSchemas: schemas, PublicTables: public})
+	if err != nil {
+		return out, err
+	}
+	// A table listed or no longer listed as public: anon and user get its
+	// SELECT back, or lose it (the edges also sync when their catalog
+	// changes, which this alone doesn't).
+	if svc.Enabled && svc.SchemaVersion >= syncGrantsVersion && !sameSet(svc.PublicTables, public) {
+		p, err := q.GetProject(ctx, projectID)
+		if err != nil {
+			return out, err
+		}
+		conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+		if err != nil {
+			return out, err
+		}
+		defer conn.Close(context.Background())
+		if err := syncGrantsOn(ctx, conn, public); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 func sameSet(a, b []string) bool {
@@ -757,8 +778,27 @@ func (s *Service) applySchema(ctx context.Context, p store.Project, all bool) er
 			return err
 		}
 	}
+	if err := syncGrantsOn(ctx, conn, svc.PublicTables); err != nil {
+		return err
+	}
 	return q.SetServicesRoles(ctx, store.SetServicesRolesParams{ProjectID: p.ID, EdgeVerifier: svc.EdgeVerifier, LoginVerifiers: svc.LoginVerifiers,
 		SchemaVersion: int32(SchemaVersion), RolesInstance: svc.RolesInstance})
+}
+
+// syncGrantsVersion is the schema version that brings xb_auth.sync_grants.
+const syncGrantsVersion = 7
+
+// syncGrantsOn lets anon and user hold privileges only on what protects
+// itself, and SELECT on the public tables (xb_auth.sync_grants), on an
+// admin connection to the project's database.
+func syncGrantsOn(ctx context.Context, conn *pgx.Conn, public []string) error {
+	if public == nil {
+		public = []string{}
+	}
+	if _, err := conn.Exec(ctx, `SELECT xb_auth.sync_grants($1)`, public); err != nil {
+		return fmt.Errorf("sync the request roles' grants: %w", err)
+	}
+	return nil
 }
 
 // applyVersionsOn runs the schema versions after from on an admin
