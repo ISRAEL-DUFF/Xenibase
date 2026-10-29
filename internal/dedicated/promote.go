@@ -82,6 +82,11 @@ type PromoteParams struct {
 	Profile   string
 	VolumeGB  int
 	CreatedBy *uuid.UUID
+	// WithinAllowance: the caller found the target within the
+	// organisation's dedicated allowance; it is checked again under the
+	// organisation's lock as the target is recorded. A request the platform
+	// admin approved goes beyond the allowance and leaves it false.
+	WithinAllowance bool
 }
 
 type promoteParams struct {
@@ -116,6 +121,11 @@ func (s *Service) Promote(ctx context.Context, p PromoteParams) (store.Operation
 			}
 			if pr.ParentProjectID != nil {
 				return nil, fmt.Errorf("%w: branches can't be promoted; detach the branch first (V2 §8.4)", provision.ErrInvalid)
+			}
+			if p.WithinAllowance {
+				if err := s.projects.Claim(ctx, tx, provision.Claim{OrgID: pr.OrgID, Instance: &prof, VolumeGB: cp.VolumeGB}); err != nil {
+					return nil, err
+				}
 			}
 			src, err := store.New(tx).GetInstance(ctx, pr.InstanceID)
 			if err != nil {

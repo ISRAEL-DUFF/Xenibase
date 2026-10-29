@@ -96,6 +96,7 @@ func New(db *pgxpool.Pool, projects *provision.Service, m *mail.Service, cfg Con
 	s := &Service{db: db, projects: projects, mail: m, cfg: cfg, log: log, console: map[uuid.UUID]int{}, softBase: map[uuid.UUID]float64{}}
 	if projects != nil {
 		projects.LoginGate = s.LoginAllowed
+		projects.QuotaGate = s.claim
 	}
 	return s
 }

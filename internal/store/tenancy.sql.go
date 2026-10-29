@@ -924,6 +924,18 @@ func (q *Queries) ListSharedClusters(ctx context.Context) ([]ListSharedClustersR
 	return items, nil
 }
 
+const lockOrgForQuota = `-- name: LockOrgForQuota :exec
+SELECT id FROM organizations WHERE id = $1 FOR UPDATE
+`
+
+// Takes the organisation's row lock for the rest of the transaction, so
+// quota checks and the inserts they guard run one at a time per
+// organisation (tenancy.claim).
+func (q *Queries) LockOrgForQuota(ctx context.Context, orgID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockOrgForQuota, orgID)
+	return err
+}
+
 const markOrgDeleted = `-- name: MarkOrgDeleted :exec
 UPDATE organizations SET status = 'deleted' WHERE id = $1
 `
@@ -1058,13 +1070,30 @@ func (q *Queries) OrgDedicatedRequests(ctx context.Context, orgID uuid.UUID) ([]
 }
 
 const orgDedicatedUse = `-- name: OrgDedicatedUse :one
-SELECT count(*)::int AS instances, COALESCE(sum(i.cpu_limit), 0)::float8 AS cpus,
-       COALESCE(sum(i.mem_limit_mb), 0)::int AS mem_mb, COALESCE(sum(i.volume_gb), 0)::int AS disk_gb
-FROM instances i
-WHERE i.kind = 'dedicated' AND i.deleted_at IS NULL AND (
-  EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.org_id = $1 AND p.deleted_at IS NULL AND p.tier = 'dedicated')
-  OR EXISTS (SELECT 1 FROM retired_databases r JOIN projects p ON p.id = r.project_id
-             WHERE r.instance_id = i.id AND r.dropped_at IS NULL AND r.reason = 'demotion' AND p.org_id = $1))
+WITH sized AS (
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM instances i
+  WHERE i.kind = 'dedicated' AND i.deleted_at IS NULL AND (
+    EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.org_id = $1 AND p.deleted_at IS NULL AND p.tier = 'dedicated')
+    OR EXISTS (SELECT 1 FROM retired_databases r JOIN projects p ON p.id = r.project_id
+               WHERE r.instance_id = i.id AND r.dropped_at IS NULL AND r.reason = 'demotion' AND p.org_id = $1)
+    OR EXISTS (SELECT 1 FROM operations o JOIN projects p ON p.id = o.project_id
+               WHERE o.kind = 'promote' AND o.status IN ('queued', 'running') AND o.params->>'target_instance' = i.id::text
+                 AND p.org_id = $1 AND p.deleted_at IS NULL AND p.tier = 'shared'))
+  UNION ALL
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM read_replicas r JOIN projects p ON p.id = r.project_id JOIN instances i ON i.id = p.instance_id
+  WHERE p.org_id = $1 AND p.deleted_at IS NULL AND r.status NOT IN ('detached', 'failed', 'deleted')
+    AND NOT EXISTS (SELECT 1 FROM instances x WHERE x.id = r.id)
+  UNION ALL
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM operations o JOIN projects p ON p.id = o.project_id JOIN instances i ON i.id = p.instance_id
+  WHERE p.org_id = $1 AND p.deleted_at IS NULL AND o.kind = 'create_replica' AND o.status IN ('queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM read_replicas r WHERE r.id::text = o.params->>'replica')
+)
+SELECT count(*)::int AS instances, COALESCE(sum(cpu_limit), 0)::float8 AS cpus,
+       COALESCE(sum(mem_limit_mb), 0)::int AS mem_mb, COALESCE(sum(volume_gb), 0)::int AS disk_gb
+FROM sized
 `
 
 type OrgDedicatedUseRow struct {
@@ -1075,8 +1104,12 @@ type OrgDedicatedUseRow struct {
 }
 
 // The org's live dedicated instances and their total size: its dedicated
-// projects' instances, and those a demotion keeps stopped for 48 hours (the
-// allowance is released once they are destroyed, V2 s5.2).
+// projects' instances, those a demotion keeps stopped for 48 hours (the
+// allowance is released once they are destroyed, V2 s5.2), the target of
+// a promotion queued or running (its project is still shared), and its read
+// replicas, each the size of its primary (V4 s7), from the operation that
+// creates one until it is deleted, failed or detached (a detached
+// replica's instance is its new project's, counted above).
 func (q *Queries) OrgDedicatedUse(ctx context.Context, orgID uuid.UUID) (OrgDedicatedUseRow, error) {
 	row := q.db.QueryRow(ctx, orgDedicatedUse, orgID)
 	var i OrgDedicatedUseRow

@@ -569,6 +569,11 @@ func (s *Service) Detach(ctx context.Context, p DetachParams) (store.Project, er
 				return err
 			}
 		}
+		// The projects quota again, under the organisation's lock, so
+		// branches detached in parallel cannot all pass.
+		if err := s.projects.Claim(ctx, tx, provision.Claim{OrgID: b.OrgID, Project: true}); err != nil {
+			return err
+		}
 		out, err = q.DetachBranch(ctx, b.ID)
 		return err
 	})

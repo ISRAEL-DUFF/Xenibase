@@ -85,7 +85,7 @@ func newCluster(t *testing.T, cfg tenancy.Config) (*cluster, *tenancy.Service) {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ps := provision.NewService(db, kr, nil, provision.Config{HomeRegion: "eu-central", AdminSSLMode: "disable"}, log)
+	ps := provision.NewService(db, kr, nil, provision.Config{HomeRegion: "eu-central", AdminSSLMode: "disable", PGVersions: []int{int(major)}}, log)
 	return &cluster{db: db, admin: admin, cfg: pcfg, projects: ps, inst: inst.ID, org: org}, tenancy.New(db, ps, nil, cfg, log)
 }
 

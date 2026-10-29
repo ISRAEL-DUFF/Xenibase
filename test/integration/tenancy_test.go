@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -718,10 +719,42 @@ func TestQuotasAndDedicatedRequests(t *testing.T) {
 		!strings.Contains(string(body), `"limit":"projects"`) || !strings.Contains(string(body), `"max":1`) {
 		t.Fatalf("a project beyond the quota: %d %s", code, body)
 	}
+	// Creates sent at once each count under the organisation's lock: with
+	// room for two more, two of six succeed.
+	setOverride(t, e, bob.OrgID, "projects", 3)
+	var wg sync.WaitGroup
+	codes := make([]int, 6)
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i], _ = bob.DoRaw("POST", "/api/v1/projects", map[string]any{"name": fmt.Sprintf("Parallel %d", i), "org_id": bob.OrgID})
+		}()
+	}
+	wg.Wait()
+	created := 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusAccepted, http.StatusCreated:
+			created++
+		case http.StatusConflict:
+		default:
+			t.Fatalf("parallel creates: %v", codes)
+		}
+	}
+	if created != 2 {
+		t.Fatalf("%d of 6 parallel creates succeeded with room for 2: %v", created, codes)
+	}
+	setOverride(t, e, bob.OrgID, "projects", 1)
 	setOverride(t, e, bob.OrgID, "project_connections", 20)
 	var first gen.ProjectList
 	bob.Do("GET", "/api/v1/projects?org="+bob.OrgID.String(), nil, &first)
 	pid := first.Items[0].Id
+	for _, p := range first.Items {
+		if p.Name == "First" {
+			pid = p.Id
+		}
+	}
 	if code := bob.Do("PATCH", "/api/v1/projects/"+pid.String()+"/settings", map[string]any{"settings": map[string]int{"connection_limit": 50}}, nil); code != http.StatusConflict {
 		t.Fatalf("connections beyond the plan: %d", code)
 	}

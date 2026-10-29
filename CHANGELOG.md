@@ -705,6 +705,18 @@ bundle share one version (spec §11.5).
   revoked from `PUBLIC` in every shared project database, and the
   isolation check reports any of them readable. Query insights' locks view
   is unchanged.
+- **Creates sent at once no longer go past the projects and branches
+  quotas or the dedicated allowance.** The quota was counted before the
+  create, outside the transaction that recorded it, so N requests sent
+  together each saw the same count and all succeeded: a Personal
+  organisation limited to 10 projects could hold 10 + N, and the same went
+  for branches, detached branches, dedicated projects, promotions and read
+  replicas. Each of these now counts again in the transaction that records
+  it, holding the organisation's row (`SELECT … FOR UPDATE`), and a create
+  past the limit answers `409 quota_exceeded`. Read replicas, and a queued
+  promotion's target instance, now count towards the dedicated allowance
+  (a replica as an instance the size of its primary); they were not
+  counted, so replicas could be added whatever the allowance.
 
 ### Upgrading
 - Backend services' schema version 7 runs on every enabled project with its
@@ -771,6 +783,11 @@ bundle share one version (spec §11.5).
   reads `pg_locks` or calls `pg_blocking_pids` on the shared tier now
   answers "permission denied"; the project's Query insights → Locks view
   shows its blocking chains instead.
+- Read replicas now count towards an organisation's dedicated allowance,
+  so the Usage & quotas page shows more in use where there are replicas,
+  and an organisation already at its allowance gets new replicas and
+  dedicated projects refused (or a promotion turned into a request) until
+  the allowance is raised.
 
 ## v4.2.4
 

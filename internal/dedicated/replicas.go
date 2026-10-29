@@ -147,6 +147,17 @@ func (s *Service) CreateReplica(ctx context.Context, p ReplicaParams) (store.Ope
 			if inst.Status != "running" {
 				return nil, fmt.Errorf("%w: the instance is %s", provision.ErrConflict, inst.Status)
 			}
+			// A replica is an instance the size of its primary (V4 §7),
+			// within the dedicated allowance, counted under the
+			// organisation's lock with the replicas queued before it.
+			size := SizeProfile(inst)
+			claim := provision.Claim{OrgID: pr.OrgID, Instance: size}
+			if inst.VolumeGb != nil {
+				claim.VolumeGB = int(*inst.VolumeGb)
+			}
+			if err := s.projects.Claim(ctx, tx, claim); err != nil {
+				return nil, err
+			}
 			n, err := q.CountProjectReplicas(ctx, pr.ID)
 			if err != nil {
 				return nil, err
