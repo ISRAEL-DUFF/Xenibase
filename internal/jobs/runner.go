@@ -161,7 +161,7 @@ func (r *Runner) reclaimLoop(ctx context.Context) {
 	t := time.NewTicker(r.cfg.LeaseTTL / 2)
 	defer t.Stop()
 	for {
-		ids, err := r.q.ReclaimStaleOperations(ctx, time.Now().Add(-r.cfg.LeaseTTL))
+		ids, err := r.q.ReclaimStaleOperations(ctx, r.cfg.LeaseTTL.Seconds())
 		if err != nil && ctx.Err() == nil {
 			r.log.Error("reclaim stale operations", "err", err)
 		}

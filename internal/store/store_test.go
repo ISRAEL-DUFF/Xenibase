@@ -76,7 +76,7 @@ func TestReclaimStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := q.ReclaimStaleOperations(ctx, time.Now().Add(time.Minute))
+	ids, err := q.ReclaimStaleOperations(ctx, -60)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +86,35 @@ func TestReclaimStale(t *testing.T) {
 	got, _ := q.GetOperation(ctx, op.ID)
 	if got.Status != "queued" || got.LockedBy != nil || string(got.Log) == "[]" {
 		t.Fatalf("unexpected state after reclaim: %+v log=%s", got, got.Log)
+	}
+}
+
+// The lease cutoff is measured on the database's clock, which wrote
+// locked_at, so a worker whose clock runs ahead reclaims nothing early.
+func TestReclaimUsesDatabaseClock(t *testing.T) {
+	ctx := context.Background()
+	pool := storetest.New(t)
+	q := store.New(pool)
+	lease := (30 * time.Second).Seconds()
+
+	op, _ := q.EnqueueOperation(ctx, store.EnqueueOperationParams{Kind: "noop", Params: json.RawMessage(`{}`)})
+	if _, err := q.ClaimOperation(ctx, store.ClaimOperationParams{Worker: "w", Kinds: []string{"noop"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		age  string
+		want int
+	}{{"10 seconds", 0}, {"40 seconds", 1}} {
+		if _, err := pool.Exec(ctx, `UPDATE operations SET locked_at = now() - $2::interval WHERE id = $1`, op.ID, c.age); err != nil {
+			t.Fatal(err)
+		}
+		ids, err := q.ReclaimStaleOperations(ctx, lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != c.want {
+			t.Fatalf("lease held for %s: reclaimed %d, want %d", c.age, len(ids), c.want)
+		}
 	}
 }
 

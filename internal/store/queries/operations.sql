@@ -76,7 +76,8 @@ SET status = 'queued', attempts = GREATEST(attempts - 1, 0), error = @error::tex
 WHERE id = @id AND locked_by = @worker::text AND attempts = @attempt::int AND status = 'running';
 
 -- ReclaimStaleOperations requeues running operations whose worker stopped
--- heartbeating (crashed or partitioned), so they resume elsewhere.
+-- heartbeating (crashed or partitioned), so they resume elsewhere. The
+-- cutoff is on the database's clock, the one locked_at was written with.
 -- name: ReclaimStaleOperations :many
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations
@@ -84,7 +85,7 @@ SET status = 'queued', locked_by = NULL, locked_at = NULL,
     log = log || jsonb_build_array(jsonb_build_object(
       'ts', now(), 'step', 'queue', 'level', 'warn',
       'msg', 'worker ' || locked_by || ' stopped heartbeating; requeued'))
-WHERE status = 'running' AND locked_at < @stale_before::timestamptz
+WHERE status = 'running' AND locked_at < now() - make_interval(secs => @lease_seconds::float8)
 RETURNING id;
 
 -- name: ProjectHasActiveOperation :one

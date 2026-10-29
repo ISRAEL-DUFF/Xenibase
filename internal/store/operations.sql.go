@@ -278,15 +278,16 @@ SET status = 'queued', locked_by = NULL, locked_at = NULL,
     log = log || jsonb_build_array(jsonb_build_object(
       'ts', now(), 'step', 'queue', 'level', 'warn',
       'msg', 'worker ' || locked_by || ' stopped heartbeating; requeued'))
-WHERE status = 'running' AND locked_at < $1::timestamptz
+WHERE status = 'running' AND locked_at < now() - make_interval(secs => $1::float8)
 RETURNING id
 `
 
 // ReclaimStaleOperations requeues running operations whose worker stopped
-// heartbeating (crashed or partitioned), so they resume elsewhere.
+// heartbeating (crashed or partitioned), so they resume elsewhere. The
+// cutoff is on the database's clock, the one locked_at was written with.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
-func (q *Queries) ReclaimStaleOperations(ctx context.Context, staleBefore time.Time) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, reclaimStaleOperations, staleBefore)
+func (q *Queries) ReclaimStaleOperations(ctx context.Context, leaseSeconds float64) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, reclaimStaleOperations, leaseSeconds)
 	if err != nil {
 		return nil, err
 	}

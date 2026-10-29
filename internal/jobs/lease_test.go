@@ -138,7 +138,7 @@ func TestPartitionedAttemptStopsAndIsFenced(t *testing.T) {
 	proxy.setCut(true)
 	time.Sleep(cfg.LeaseTTL + 200*time.Millisecond)
 	// Another worker's reclaim loop, on the other side of the partition.
-	if _, err := store.New(pool).ReclaimStaleOperations(context.Background(), time.Now().Add(-cfg.LeaseTTL)); err != nil {
+	if _, err := store.New(pool).ReclaimStaleOperations(context.Background(), cfg.LeaseTTL.Seconds()); err != nil {
 		t.Fatal(err)
 	}
 	proxy.setCut(false)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -22,7 +21,7 @@ func crashOnClaim(t *testing.T, pool *pgxpool.Pool, kind string, n int) {
 		if _, err := q.ClaimOperation(context.Background(), store.ClaimOperationParams{Worker: "dead", Kinds: []string{kind}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.ReclaimStaleOperations(context.Background(), time.Now().Add(time.Minute)); err != nil {
+		if _, err := q.ReclaimStaleOperations(context.Background(), -60); err != nil {
 			t.Fatal(err)
 		}
 	}
