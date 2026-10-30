@@ -79,6 +79,61 @@ type Kind struct {
 	// since a crash during OnFail runs it again. Its error is logged, and
 	// the operation is marked failed regardless.
 	OnFail func(ctx context.Context, op store.Operation, log *StepLogger, cause error) error
+	// Class decides how the kind is claimed beside others (see Class).
+	// Empty means ClassInteractive.
+	Class Class
+}
+
+// Class groups operation kinds for claiming. Each runner claims
+// interactive kinds first, and caps how many of its slots long and
+// scheduled kinds may hold at once, keeping one free for interactive work
+// (RunnerConfig.LongSlots and ScheduledSlots), so a create, restore or
+// delete does not wait behind a 48-hour move or the nightly backups.
+//
+// A handler that waits for another operation to finish must not wait for
+// one of a capped class (long or scheduled) while it is in one itself:
+// with few slots, the two could wait for each other.
+type Class string
+
+// Operation classes.
+const (
+	// ClassInteractive is work someone is waiting for: create, delete,
+	// restore, rotate, settings, pause and resume, branches. The default.
+	ClassInteractive Class = "interactive"
+	// ClassLong is work that may hold a slot for hours: moves, major
+	// upgrades, promotion and demotion, HA, replicas, resizes, imports.
+	ClassLong Class = "long"
+	// ClassScheduled is work the platform queues on a timetable or in bulk:
+	// backups, restore tests, sweeps, minor upgrades in the maintenance
+	// window, the metadata backup.
+	ClassScheduled Class = "scheduled"
+)
+
+// Classes lists every class, interactive first.
+var Classes = []Class{ClassInteractive, ClassLong, ClassScheduled}
+
+// ClassOf returns the kind's class: ClassInteractive unless it says
+// otherwise.
+func (k Kind) ClassOf() Class {
+	if k.Class == "" {
+		return ClassInteractive
+	}
+	return k.Class
+}
+
+// Classifier returns the class of each kind in kinds; a kind not in it
+// (one no worker of this release runs) counts as interactive.
+func Classifier(kinds map[string]Kind) func(kind string) Class {
+	classes := make(map[string]Class, len(kinds))
+	for name, k := range kinds {
+		classes[name] = k.ClassOf()
+	}
+	return func(kind string) Class {
+		if c, ok := classes[kind]; ok {
+			return c
+		}
+		return ClassInteractive
+	}
 }
 
 // Defaults for Kind.

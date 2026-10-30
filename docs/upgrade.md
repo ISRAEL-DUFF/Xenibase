@@ -69,6 +69,15 @@ an older minor (an older agent doesn't know the new work) and shows it on
 the Nodes page; a newer minor or any patch version is fine. Replace the agent binary (or image) on each node and restart it; its
 state directory keeps its identity, so it needs no new registration.
 
+Agents accept only the client certificate serials xenibase-server gives
+them (the allow list, kept in `client-serials.json` in the state
+directory) once a server has given them one. An agent never given a list
+accepts any `xenibase-server` certificate of the agent CA, so an agent
+upgraded before the server keeps working; and for 31 days after its first
+list it still accepts a certificate from a server from before allow lists.
+With several servers on one metadata database, upgrade them all within
+that time.
+
 ## PostgreSQL minor versions
 
 Each major's image is built from a pinned minor release:

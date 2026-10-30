@@ -23,22 +23,26 @@ const KindSharedCluster = "shared_cluster"
 
 // Kinds returns the operation kinds this service runs.
 func (s *Service) Kinds() map[string]jobs.Kind {
+	// Classes (jobs.Class): the long kinds share a capped number of each
+	// server's slots. ha_etcd_move stays interactive because Move all, a
+	// long one, waits for each in turn: in one capped class they could
+	// wait for each other's slot.
 	return map[string]jobs.Kind{
 		KindSharedCluster:     {Handler: s.runSharedCluster, OnFail: s.failSharedCluster, MaxAttempts: 3},
-		KindPromote:           {Handler: s.runPromote, OnFail: s.failPromote, MaxAttempts: 2, Timeout: 12 * time.Hour},
-		KindDemote:            {Handler: s.runDemote, OnFail: s.failDemote, MaxAttempts: 2, Timeout: 12 * time.Hour},
-		KindMove:              {Handler: s.runMove, OnFail: s.failMove, MaxAttempts: 2, Timeout: 48 * time.Hour},
-		KindUpgrade:           {Handler: s.runMove, OnFail: s.failMove, MaxAttempts: 2, Timeout: 48 * time.Hour},
-		KindHAEnable:          {Handler: s.runHAEnable, OnFail: s.failHAEnable, MaxAttempts: 2, Timeout: 24 * time.Hour},
+		KindPromote:           {Handler: s.runPromote, OnFail: s.failPromote, MaxAttempts: 2, Timeout: 12 * time.Hour, Class: jobs.ClassLong},
+		KindDemote:            {Handler: s.runDemote, OnFail: s.failDemote, MaxAttempts: 2, Timeout: 12 * time.Hour, Class: jobs.ClassLong},
+		KindMove:              {Handler: s.runMove, OnFail: s.failMove, MaxAttempts: 2, Timeout: 48 * time.Hour, Class: jobs.ClassLong},
+		KindUpgrade:           {Handler: s.runMove, OnFail: s.failMove, MaxAttempts: 2, Timeout: 48 * time.Hour, Class: jobs.ClassLong},
+		KindHAEnable:          {Handler: s.runHAEnable, OnFail: s.failHAEnable, MaxAttempts: 2, Timeout: 24 * time.Hour, Class: jobs.ClassLong},
 		KindHADisable:         {Handler: s.runHADisable, MaxAttempts: 3},
 		KindHASwitchover:      {Handler: s.runSwitchover, MaxAttempts: 1, Timeout: 5 * time.Minute},
 		KindHAEtcdMove:        {Handler: s.runHAEtcdMove, MaxAttempts: 2, Timeout: 24 * time.Hour},
-		KindRegionEtcdMoveAll: {Handler: s.runRegionEtcdMoveAll, MaxAttempts: 1, Timeout: 7 * 24 * time.Hour},
-		KindCreateReplica:     {Handler: s.runCreateReplica, OnFail: s.failCreateReplica, MaxAttempts: 2, Timeout: 24 * time.Hour},
+		KindRegionEtcdMoveAll: {Handler: s.runRegionEtcdMoveAll, MaxAttempts: 1, Timeout: 7 * 24 * time.Hour, Class: jobs.ClassLong},
+		KindCreateReplica:     {Handler: s.runCreateReplica, OnFail: s.failCreateReplica, MaxAttempts: 2, Timeout: 24 * time.Hour, Class: jobs.ClassLong},
 		KindDeleteReplica:     {Handler: s.runDeleteReplica, MaxAttempts: 3},
-		KindDetachReplica:     {Handler: s.runDetachReplica, OnFail: s.failDetachReplica, MaxAttempts: 2, Timeout: 6 * time.Hour},
-		KindResize:            {Handler: s.runResize, OnFail: s.failResize, MaxAttempts: 2, Timeout: 2 * time.Hour},
-		KindMinorUpgrade:      {Handler: s.runMinorUpgrade, OnFail: s.failMinorUpgrade, MaxAttempts: 1, Timeout: 3 * time.Hour},
+		KindDetachReplica:     {Handler: s.runDetachReplica, OnFail: s.failDetachReplica, MaxAttempts: 2, Timeout: 6 * time.Hour, Class: jobs.ClassLong},
+		KindResize:            {Handler: s.runResize, OnFail: s.failResize, MaxAttempts: 2, Timeout: 2 * time.Hour, Class: jobs.ClassLong},
+		KindMinorUpgrade:      {Handler: s.runMinorUpgrade, OnFail: s.failMinorUpgrade, MaxAttempts: 1, Timeout: 3 * time.Hour, Class: jobs.ClassScheduled},
 	}
 }
 

@@ -4272,6 +4272,34 @@ type AdvisorFindings struct {
 	Items []AdvisorFinding `json:"items"`
 }
 
+// AgentClientCert defines model for AgentClientCert.
+type AgentClientCert struct {
+	// Current The certificate the answering server is using.
+	Current   bool       `json:"current"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	IssuedAt  time.Time  `json:"issued_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+
+	// Serial The certificate's serial, lower-case hex.
+	Serial string `json:"serial"`
+
+	// Server The xenibase-server it was issued to (its host name).
+	Server string `json:"server"`
+}
+
+// AgentClientCertRevoke Exactly one of serial and server.
+type AgentClientCertRevoke struct {
+	Serial *string `json:"serial,omitempty"`
+	Server *string `json:"server,omitempty"`
+}
+
+// AgentClientCertRevoked defines model for AgentClientCertRevoked.
+type AgentClientCertRevoked struct {
+	// NotPushed Agents the new list did not reach now; each gets it at its next health check.
+	NotPushed []string          `json:"not_pushed"`
+	Revoked   []AgentClientCert `json:"revoked"`
+}
+
 // AgentRegisterRequest defines model for AgentRegisterRequest.
 type AgentRegisterRequest struct {
 	AdvertiseHost *string `json:"advertise_host,omitempty"`
@@ -11001,6 +11029,9 @@ type SupportWhatsAppVerifyParams struct {
 // SupportWhatsAppWebhookJSONBody defines parameters for SupportWhatsAppWebhook.
 type SupportWhatsAppWebhookJSONBody map[string]interface{}
 
+// RevokeAgentClientCertsJSONRequestBody defines body for RevokeAgentClientCerts for application/json ContentType.
+type RevokeAgentClientCertsJSONRequestBody = AgentClientCertRevoke
+
 // PutBillingSettingsJSONRequestBody defines body for PutBillingSettings for application/json ContentType.
 type PutBillingSettingsJSONRequestBody = BillingSettings
 
@@ -11620,6 +11651,44 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+
+	// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+	//
+	// Each xenibase-server issues itself a client certificate for its
+	// agents, a day long and renewed at half-life, and records its
+	// serial. The live ones (unexpired, unrevoked) are the allow list
+	// every agent is given; an agent that has a list accepts no other.
+	// Listed: live certificates, and those expired or revoked in the
+	// last week.
+	//
+	// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+	ListAgentClientCerts(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeAgentClientCertsWithBody Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCertsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCerts(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListPlatformAudit The platform audit log, newest first (platform admin)
 	//
@@ -16128,6 +16197,74 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /readyz (the `GetReadyz` operationId).
 	GetReadyz(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+//
+// Each xenibase-server issues itself a client certificate for its
+// agents, a day long and renewed at half-life, and records its
+// serial. The live ones (unexpired, unrevoked) are the allow list
+// every agent is given; an agent that has a list accepts no other.
+// Listed: live certificates, and those expired or revoked in the
+// last week.
+//
+// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+func (c *Client) ListAgentClientCerts(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAgentClientCertsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeAgentClientCertsWithBody Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *Client) RevokeAgentClientCertsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeAgentClientCertsRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *Client) RevokeAgentClientCerts(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeAgentClientCertsRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 // ListPlatformAudit The platform audit log, newest first (platform admin)
@@ -26626,6 +26763,73 @@ func (c *Client) GetReadyz(ctx context.Context, reqEditors ...RequestEditorFn) (
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewListAgentClientCertsRequest constructs an http.Request for the ListAgentClientCerts method
+func NewListAgentClientCertsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/agent-client-certs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRevokeAgentClientCertsRequest calls the generic RevokeAgentClientCerts builder with application/json body
+func NewRevokeAgentClientCertsRequest(server string, body RevokeAgentClientCertsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRevokeAgentClientCertsRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewRevokeAgentClientCertsRequestWithBody constructs an http.Request for the RevokeAgentClientCerts method, with any body, and a specified content type
+func NewRevokeAgentClientCertsRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/agent-client-certs/revoke")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
 }
 
 // NewListPlatformAuditRequest constructs an http.Request for the ListPlatformAudit method
@@ -44816,6 +45020,46 @@ func WithBaseURL(baseURL string) ClientOption {
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
 
+	// ListAgentClientCertsWithResponse The client certificates xenibase-servers issued themselves for agents
+	//
+	// Each xenibase-server issues itself a client certificate for its
+	// agents, a day long and renewed at half-life, and records its
+	// serial. The live ones (unexpired, unrevoked) are the allow list
+	// every agent is given; an agent that has a list accepts no other.
+	// Listed: live certificates, and those expired or revoked in the
+	// last week.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+	ListAgentClientCertsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListAgentClientCertsResponse, error)
+
+	// RevokeAgentClientCertsWithBodyWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCertsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error)
+
+	// RevokeAgentClientCertsWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCertsWithResponse(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error)
+
 	// ListPlatformAuditWithResponse The platform audit log, newest first (platform admin)
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -49789,6 +50033,106 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /readyz (the `GetReadyz` operationId).
 	GetReadyzWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetReadyzResponse, error)
+}
+
+type ListAgentClientCertsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *struct {
+		Items []AgentClientCert `json:"items"`
+	}
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListAgentClientCertsResponse) GetJSON200() *struct {
+	Items []AgentClientCert `json:"items"`
+} {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListAgentClientCertsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListAgentClientCertsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAgentClientCertsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAgentClientCertsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListAgentClientCertsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type RevokeAgentClientCertsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AgentClientCertRevoked
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r RevokeAgentClientCertsResponse) GetJSON200() *AgentClientCertRevoked {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r RevokeAgentClientCertsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r RevokeAgentClientCertsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeAgentClientCertsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeAgentClientCertsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RevokeAgentClientCertsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type ListPlatformAuditResponse struct {
@@ -69495,6 +69839,64 @@ func (r GetReadyzResponse) ContentType() string {
 	return ""
 }
 
+// ListAgentClientCertsWithResponse The client certificates xenibase-servers issued themselves for agents
+//
+// Each xenibase-server issues itself a client certificate for its
+// agents, a day long and renewed at half-life, and records its
+// serial. The live ones (unexpired, unrevoked) are the allow list
+// every agent is given; an agent that has a list accepts no other.
+// Listed: live certificates, and those expired or revoked in the
+// last week.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+func (c *ClientWithResponses) ListAgentClientCertsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListAgentClientCertsResponse, error) {
+	rsp, err := c.ListAgentClientCerts(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAgentClientCertsResponse(rsp)
+}
+
+// RevokeAgentClientCertsWithBodyWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *ClientWithResponses) RevokeAgentClientCertsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error) {
+	rsp, err := c.RevokeAgentClientCertsWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeAgentClientCertsResponse(rsp)
+}
+
+// RevokeAgentClientCertsWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *ClientWithResponses) RevokeAgentClientCertsWithResponse(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error) {
+	rsp, err := c.RevokeAgentClientCerts(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeAgentClientCertsResponse(rsp)
+}
+
 // ListPlatformAuditWithResponse The platform audit log, newest first (platform admin)
 //
 // Returns a wrapper object for the known response body format(s).
@@ -78061,6 +78463,74 @@ func (c *ClientWithResponses) GetReadyzWithResponse(ctx context.Context, reqEdit
 		return nil, err
 	}
 	return ParseGetReadyzResponse(rsp)
+}
+
+// ParseListAgentClientCertsResponse parses an HTTP response from a ListAgentClientCertsWithResponse call
+func ParseListAgentClientCertsResponse(rsp *http.Response) (*ListAgentClientCertsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAgentClientCertsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Items []AgentClientCert `json:"items"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeAgentClientCertsResponse parses an HTTP response from a RevokeAgentClientCertsWithResponse call
+func ParseRevokeAgentClientCertsResponse(rsp *http.Response) (*RevokeAgentClientCertsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeAgentClientCertsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentClientCertRevoked
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseListPlatformAuditResponse parses an HTTP response from a ListPlatformAuditWithResponse call

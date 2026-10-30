@@ -238,7 +238,8 @@ func serve(o *opts) error {
 	}
 	svc := agentsvc.New(agentsvc.Config{
 		Version: version.Get().Version, NodeID: st.NodeID, PGBinDir: o.pgBin, DiskPath: o.diskPath,
-		Instances: agentsvc.InstanceConfig{Docker: o.dockerHost, Image: o.image, Network: o.network, PublishAddr: o.publish, HBAAllow: cidrs, MoveAllow: moveCIDRs, EtcdImage: o.etcdImage},
+		Instances:   agentsvc.InstanceConfig{Docker: o.dockerHost, Image: o.image, Network: o.network, PublishAddr: o.publish, HBAAllow: cidrs, MoveAllow: moveCIDRs, EtcdImage: o.etcdImage},
+		ClientAllow: agentsvc.LoadClientAllow(st.Dir, st.CACert, log),
 	}, log)
 	if o.poolerDir != "" {
 		if err := enablePooler(ctx, svc, o, log); err != nil {

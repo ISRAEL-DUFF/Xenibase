@@ -144,8 +144,13 @@ quarter of the data rate still running, and the same renders again from
 the cache. `XENIBASE_LOAD_BACKEND_PROJECTS` (1,000), `XENIBASE_LOAD_RPS`
 (2,000), `XENIBASE_LOAD_SECONDS` (60), `XENIBASE_LOAD_TRANSFORMS` (200) and
 `XENIBASE_LOAD_STEPS` (lower rates to run first, such as `500,1000`) change
-it; it writes `tmp/load-report-backend.md`. The 10,000-connection realtime
-test is `TestRealtimeLoad`, above.
+it; it writes `tmp/load-report-backend.md`.
+
+`TestRealtimeLoad` (`make test-load`) holds 10,000 connections on one edge
+for a minute, 5,000 of them subscribed to a table change and 5,000 to a
+broadcast, and checks every message arrives and every connection is alive
+at the end. In the development container every change and broadcast was
+delivered in about a quarter of a second (decision M34 #12).
 
 It fails if more than 0.1% of requests fail, under 95% of the target
 rate is served, the data API's p95 exceeds 250 ms (500 ms during the

@@ -115,7 +115,7 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 		KindEnable:  {Handler: s.runEnable, MaxAttempts: 3, Timeout: 10 * time.Minute},
 		KindDisable: {Handler: s.runDisable, MaxAttempts: 3, Timeout: 10 * time.Minute},
 		// A branch's files (V4.1 §9.5): retried, skipping what is copied.
-		KindCopyBranchFiles: {Handler: s.runCopyBranchFiles, MaxAttempts: 3, Timeout: 6 * time.Hour},
+		KindCopyBranchFiles: {Handler: s.runCopyBranchFiles, MaxAttempts: 3, Timeout: 6 * time.Hour, Class: jobs.ClassLong},
 	}
 	for k, v := range s.supabaseKinds() {
 		kinds[k] = v

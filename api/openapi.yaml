@@ -1673,6 +1673,59 @@ paths:
                 $ref: "#/components/schemas/RegistrationToken"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/admin/agent-client-certs:
+    get:
+      operationId: listAgentClientCerts
+      summary: The client certificates xenibase-servers issued themselves for agents
+      description: |
+        Each xenibase-server issues itself a client certificate for its
+        agents, a day long and renewed at half-life, and records its
+        serial. The live ones (unexpired, unrevoked) are the allow list
+        every agent is given; an agent that has a list accepts no other.
+        Listed: live certificates, and those expired or revoked in the
+        last week.
+      tags: [nodes]
+      responses:
+        "200":
+          description: The certificates, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentClientCert"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/admin/agent-client-certs/revoke:
+    post:
+      operationId: revokeAgentClientCerts
+      summary: Revoke a server's agent client certificate, by serial or every live one of a server
+      description: |
+        Removes the certificates from the allow list and pushes the new
+        list to every agent at once, so a copied certificate stops working
+        (agents that do not answer get it at their next health check). A
+        server whose own certificate is revoked issues and registers a new
+        one and keeps its agents.
+      tags: [nodes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentClientCertRevoke"
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentClientCertRevoked"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/agent/register:
     post:
       operationId: registerAgent
@@ -10817,6 +10870,49 @@ components:
         command:
           type: string
           description: A ready-to-run registration command for the node.
+    AgentClientCert:
+      type: object
+      required: [serial, server, issued_at, expires_at, current]
+      properties:
+        serial:
+          type: string
+          description: The certificate's serial, lower-case hex.
+        server:
+          type: string
+          description: The xenibase-server it was issued to (its host name).
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+          description: The certificate the answering server is using.
+    AgentClientCertRevoke:
+      type: object
+      description: Exactly one of serial and server.
+      properties:
+        serial:
+          type: string
+        server:
+          type: string
+    AgentClientCertRevoked:
+      type: object
+      required: [revoked, not_pushed]
+      properties:
+        revoked:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentClientCert"
+        not_pushed:
+          type: array
+          description: Agents the new list did not reach now; each gets it at its next health check.
+          items:
+            type: string
     AgentRegisterRequest:
       type: object
       required: [token, csr]

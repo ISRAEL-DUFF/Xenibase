@@ -111,7 +111,11 @@ server cannot rewrite, ship the server's logs or a logical replica of
   one private network.
 - Agents use mTLS with a private CA; the server pins each agent's
   certificate fingerprint and node ID; no work is sent to an agent of
-  another major version (`nodes.Compatible`, spec §11.3).
+  another major version (`nodes.Compatible`, spec §11.3). Each server's
+  client certificate is its own and lasts a day; agents accept only the
+  serials on the CA-signed list the servers push, on every request, and an
+  admin can revoke one (`TestAllowListRefusesUnlisted`,
+  `TestRevokedServerRefused`).
 - Webhook alerts can be signed (`X-Xenibase-Signature: t=…,v1=HMAC-SHA256`).
 - `/metrics` needs a session or `XENIBASE_METRICS_TOKEN`.
 
@@ -386,7 +390,7 @@ cookie attributes, don't: the edge sets no cookies).
 | 2.7.1–2.7.4, 2.8.4 | Out-of-band codes | 6 digits from `crypto/rand`, hashed at rest, 10 minutes, single use, **used up after five wrong tries** (refused even when then right, and still counted for the one-a-minute rule until it expires) | `TestAuthCodeBruteForce` |
 | 2.8.1–2.8.5 | TOTP | RFC 6238 SHA-1, 30 s, ±1 step; the matched step is stored and must increase, so a code works once; constant-time compare; five wrong codes in a row lock the factor (a minute, doubling to a day) and the MFA routes have a per-IP limit; MFA factors can only be removed at aal2 | `TestAuthCodeBruteForce`, `TestAuthPhoneOAuthMFA`, `TestTOTPGuessesLockTheFactor` |
 | 3.2.1–3.2.3 | Session tokens | A new session and refresh token at every sign-in; access tokens are ES256 JWTs (1 hour by default, 5 minutes to a day); refresh tokens are 256-bit random, stored as SHA-256 | `TestAuthCore` |
-| 3.3.1, 3.3.4 | Sign-out | `logout` ends the session (local), all sessions (global) or the others; ended sessions' access tokens are refused at once (the edge checks the session), not at expiry | `TestAuthCore` |
+| 3.3.1, 3.3.4 | Sign-out | `logout` ends the session (local), all sessions (global) or the others. Routes under `/auth/v1` read the session, so an ended session's access token is refused there at once; the data API, storage and realtime only verify the token, so it works there until it expires (see Accepted) | `TestAuthCore` |
 | 3.3.2 | Idle and absolute timeouts | `session_inactivity_seconds` per project (default off); no absolute timeout (see Accepted) | code review (refresh refused after the idle time) |
 | 3.3.3 | Sessions after a credential change | **A password change ends every other session** (found in this review, fixed) | `TestPasswordChangeEndsOtherSessions` |
 | 3.5.2, 3.5.3 | Token integrity | ES256 only (no `none`, no HS*), key by `kid` from the project's own JWKS, `aud` is the project; refresh-token reuse revokes the whole session family | `FuzzGatewayIsolation`, `TestSignVerify`, `TestAuthCore` |
@@ -418,6 +422,14 @@ cookie attributes, don't: the edge sets no cookies).
 - **No idle timeout by default, and no absolute timeout** (3.3.2): mobile
   apps expect long sessions. The idle timeout is a per-project setting;
   an app that needs an absolute limit can sign users out itself.
+- **Access tokens outlive sign-out on the data path** (3.3.1). After
+  sign-out, a password change, refresh-token reuse or a ban, an access
+  token still reads and writes data, files and realtime until its `exp`:
+  an hour by default, up to a day if the project sets it. Only
+  `/auth/v1` checks the session. A short lifetime bounds the window, as
+  V4 §4.8 says; projects that need sign-out to take effect at once should
+  keep the default hour or less. Checking the session on the data path is
+  a recorded priority (atlas, Assessment).
 - **Sign-up says when an address is taken** (`user_already_exists`), as
   GoTrue does, so apps can tell the user; sign-in and recovery don't.
 

@@ -198,16 +198,26 @@ func TestInsightConfig(t *testing.T) {
 	if cfg.Insight.ConsoleDisabled || cfg.Insight.MetricsInterval != time.Minute || cfg.Insight.MetricsToken != "" {
 		t.Fatalf("insight defaults: %+v", cfg.Insight)
 	}
+	if in := cfg.Insight; in.WebhookListenMax != 50 || in.WebhookIdleAfter != 10*time.Minute || in.WebhookIdlePoll != 30*time.Second {
+		t.Fatalf("webhook LISTEN defaults: %+v", in)
+	}
 	cfg, err = load(env(map[string]string{
 		"XENIBASE_CONSOLE_DISABLED": "true", "XENIBASE_METRICS_INTERVAL": "15s", "XENIBASE_METRICS_TOKEN": strings.Repeat("t", 24),
+		"XENIBASE_WEBHOOK_LISTEN_MAX": "0", "XENIBASE_WEBHOOK_IDLE_AFTER": "2m", "XENIBASE_WEBHOOK_IDLE_POLL": "10s",
 	}), noFiles)
 	if err != nil || !cfg.Insight.ConsoleDisabled || cfg.Insight.MetricsInterval != 15*time.Second || len(cfg.Insight.MetricsToken) != 24 {
 		t.Fatalf("insight overrides: %+v %v", cfg.Insight, err)
 	}
+	if in := cfg.Insight; in.WebhookListenMax != 0 || in.WebhookIdleAfter != 2*time.Minute || in.WebhookIdlePoll != 10*time.Second {
+		t.Fatalf("webhook LISTEN overrides: %+v", in)
+	}
 	for k, v := range map[string]string{
-		"XENIBASE_CONSOLE_DISABLED": "maybe",
-		"XENIBASE_METRICS_INTERVAL": "100ms",
-		"XENIBASE_METRICS_TOKEN":    "short",
+		"XENIBASE_CONSOLE_DISABLED":   "maybe",
+		"XENIBASE_METRICS_INTERVAL":   "100ms",
+		"XENIBASE_METRICS_TOKEN":      "short",
+		"XENIBASE_WEBHOOK_LISTEN_MAX": "-1",
+		"XENIBASE_WEBHOOK_IDLE_AFTER": "1s",
+		"XENIBASE_WEBHOOK_IDLE_POLL":  "1h",
 	} {
 		if _, err := load(env(map[string]string{k: v}), noFiles); err == nil || !strings.Contains(err.Error(), k) {
 			t.Errorf("%s=%s: %v", k, v, err)

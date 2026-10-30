@@ -20,8 +20,10 @@ ORDER BY created_at DESC, id DESC
 LIMIT @max_rows;
 
 -- ClaimOperation takes the next runnable operation of one of the given
--- kinds. SKIP LOCKED lets any number of workers claim concurrently without
--- blocking each other or double-claiming.
+-- kinds: one of first_kinds (the interactive ones) if any is runnable,
+-- otherwise the oldest. The runner leaves out of kinds the classes whose
+-- slots are full. SKIP LOCKED lets any number of workers claim
+-- concurrently without blocking each other or double-claiming.
 -- name: ClaimOperation :one
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 UPDATE operations
@@ -29,7 +31,7 @@ SET status = 'running', attempts = attempts + 1, locked_by = @worker::text, lock
 WHERE id = (
   SELECT o.id FROM operations o
   WHERE o.status = 'queued' AND o.run_after <= now() AND o.kind = ANY(@kinds::text[])
-  ORDER BY o.run_after, o.created_at
+  ORDER BY (o.kind = ANY(@first_kinds::text[])) IS TRUE DESC, o.run_after, o.created_at
   FOR UPDATE SKIP LOCKED
   LIMIT 1
 )
@@ -93,6 +95,18 @@ RETURNING id;
 -- ProjectHasActiveOperation reports any operation queued or running on
 -- the project, background ones included: a new exclusive one waits for
 -- them too.
+-- QueuedOperationAges is, per kind, how many runnable operations wait and
+-- how long the oldest has (since its run_after, on the database's clock),
+-- for the queue-age alert.
+-- name: QueuedOperationAges :many
+-- tenant: system - the queue-age alert looks at the whole queue, every organisation's operations.
+SELECT kind, count(*)::bigint AS queued,
+       extract(epoch FROM now() - min(run_after))::float8 AS waited_seconds
+FROM operations
+WHERE status = 'queued' AND run_after <= now()
+GROUP BY kind
+ORDER BY kind;
+
 -- name: ProjectHasActiveOperation :one
 -- tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 SELECT EXISTS (

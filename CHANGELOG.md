@@ -39,6 +39,36 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The security review no longer overstates sign-out.** `docs/security-review.md`
+  (ASVS 3.3.1) said an ended session's access tokens are refused at once.
+  That holds for `/auth/v1` only: the data API, storage and realtime accept
+  an access token until it expires (an hour by default, up to a day). The
+  review now says so and lists it under Accepted. Stale text elsewhere is
+  corrected too: the branch sweep runs every 10 minutes, not hourly
+  (`docs/operations.md` and a comment), and `docs/load-test.md` describes
+  the realtime load test it pointed to.
+- **A copied server certificate can be withdrawn, and lasts a day.** Every
+  xenibase-server presented the same kind of client certificate to agents,
+  `CN=xenibase-server`, valid 30 days, and agents accepted any the agent CA
+  signed with that name, so a copy of one server's certificate and key
+  commanded every agent (root on each node, with the Docker socket) until
+  it expired, with no way to withdraw it. Each server now issues itself a
+  certificate with its own key, valid 24 hours and renewed at half-life,
+  that names the server (the subject's OU and a
+  `xenibase://server/<host>` URI) and keeps the `xenibase-server` subject.
+  Its serial is recorded in the metadata database (migration 00101), and
+  the live serials of every server sharing it (unexpired, unrevoked) are
+  the allow list each agent is given, signed by the agent CA, over the
+  agent API (`PUT /v1/client-serials`) before the server's first call with
+  a new certificate. An agent with a list checks every request against
+  it, so a revoked serial is refused even on a connection it already has
+  open, and keeps the list in its state directory across restarts. `POST
+  /api/v1/admin/agent-client-certs/revoke` (platform admins, audited as
+  `node.client_cert_revoke`) revokes a serial or every live certificate of
+  a server and pushes the new list to every agent at once; the revoked
+  server issues itself a new certificate and keeps its agents. `GET
+  /api/v1/admin/agent-client-certs` lists them. The `agent_client_cert`
+  alert now fires with under 6 hours left, renewal having failed for 6.
 - **A status page push is bound to its endpoint.** The push signature
   covered the timestamp and body only, so a signed heartbeat replayed to
   `PUT /api/v1/subscribers/managed` decoded as an empty list and deleted
@@ -1063,8 +1093,92 @@ bundle share one version (spec §11.5).
   reachable from the commit (not one on the commit itself, so CI on a
   release tag upgrades from the release before), falling back to v4.1.0;
   `UPGRADE_FROM` still overrides it.
+- **Interactive operations no longer wait behind moves and backups.** The
+  queue took the oldest runnable operation, 4 at a time per server, so two
+  48-hour moves and the nightly backups (all queued between 02:00 and
+  04:00 UTC) could hold every slot while a create, restore or delete
+  waited. Each operation kind now has a class: interactive (create,
+  delete, restore, rotate, settings, pause and resume, branches, the
+  default), long (moves, major upgrades, promotion and demotion, HA
+  enable, replicas, resizes, imports, Supabase user and storage copies,
+  branch file copies, Move all) or scheduled (backups, base backups,
+  restore tests, the metadata backup, storage switches, isolation checks,
+  minor upgrades, the Free tier's pause and archive, the V1 renames and
+  credential expiry). A server claims interactive operations first, and
+  lets long ones hold at most half its slots and long and scheduled ones
+  together all but one, so with the default 4 slots at most 2 long and 3
+  scheduled operations run at once and one slot is always free for
+  interactive work. The claim keeps `SKIP LOCKED`, the lease, the one
+  exclusive operation per project and the per-organisation limit. A new
+  `queue_age` alert fires when the oldest runnable operation of a class
+  has waited longer than 15 minutes (interactive, critical) or an hour
+  (long and scheduled, warning).
+- **Every stuck project raises `project_stuck`.** The alert covered
+  projects left `moving`, `promoting`, `demoting` or `upgrading` only. It
+  now covers a live project in any status but `active` (paused and
+  archived projects are `active`) with no queued or running operation 10
+  minutes after its last one ended: also `provisioning`, `restoring` and
+  `deleting` (critical: nothing repairs them, see `docs/operations.md`)
+  and `error` (warning: delete the project once the cause is fixed). The
+  repair loop still thaws only the move-like statuses, the ones with a
+  safe automatic repair.
+- **One server collects metrics.** Every xenibase-server, every minute,
+  listed every active project, opened a fresh admin connection to every
+  instance, read every PgBouncer and upserted `metric_points`, so each
+  added server repeated the work and multiplied the instance connections.
+  Now one server collects at a time, under an advisory lock held on a
+  connection of its own, and another takes over on its next round when
+  it stops. It keeps one admin connection per instance between rounds,
+  opened again after the instance closes it or its address or
+  credentials change, and closed when idle or when the instance has no
+  active project left. Each server still reads its own local PgBouncers,
+  which only it reaches, and leaves the counts in `pooler_readings` for
+  the collecting server, so `pooler_clients`, `pooler_waiting` and the
+  Free tier's activity cover every server's poolers. Every server still
+  serves `/metrics` from the stored points.
+- **Webhook `LISTEN` connections are capped and released when idle.** The
+  delivering server held a direct admin connection, outside the poolers,
+  for every project with webhooks, and nothing counted them against the
+  cluster's `max_connections` (500 in the bundle). Now an instance gets at
+  most `XENIBASE_WEBHOOK_LISTEN_MAX` (50) of them, a project gives its own
+  back once its outbox has had nothing to send for
+  `XENIBASE_WEBHOOK_IDLE_AFTER` (10 minutes), and the other projects are
+  polled every `XENIBASE_WEBHOOK_IDLE_POLL` (30 seconds), every 5 seconds
+  while events are going out, taking a connection again when one is free.
+  Order and at-least-once delivery are unchanged. `/metrics` shows the
+  number held as `xenibase_instance_webhook_listen_connections`, labelled
+  by instance, kind and node.
 
 ### Upgrading
+- Migration 00102 adds `pooler_readings`, where each server leaves its
+  local PgBouncers' counts for the server collecting metrics. Nothing to
+  set. With several servers, the first to start after the upgrade
+  collects; points from older servers still running the previous release
+  are upserted alongside until they are upgraded.
+- New settings, passed through by the bundle's `compose.yaml`:
+  `XENIBASE_WEBHOOK_LISTEN_MAX` (default 50; `0` polls every project),
+  `XENIBASE_WEBHOOK_IDLE_AFTER` (10m) and `XENIBASE_WEBHOOK_IDLE_POLL`
+  (30s). A project with webhooks that has been quiet for 10 minutes, or
+  past the cap on its instance, can now take up to 30 seconds to send its
+  first event; lower `XENIBASE_WEBHOOK_IDLE_POLL` or raise the cap if that
+  matters more than the connections. An instance with more than 50 busy
+  webhook projects has the rest polled; leave room in its
+  `max_connections` before raising the cap.
+- Migration 00101 adds `agent_client_certs` and `agent_client_cert_state`.
+  Agents of this release accept any `xenibase-server` certificate, as
+  before, until a server of this release gives them a list; from then on
+  only the listed serials, plus, for 31 days after an agent's first list,
+  certificates that name no server (issued by an older server, which
+  registers none). So an older agent works with a newer server (it never
+  asks for a list), and a newer agent with an older server (no list is
+  pushed). With several servers on one metadata database, finish
+  upgrading all of them within those 31 days: an older server still
+  running after that is refused by every agent that has a list. A server
+  needs its host name to be unique among them to revoke one by name
+  (revoking by serial works either way). `client-serials.json` in an
+  agent's state directory holds its list; an agent restarted without it
+  accepts by subject again until a server's next health check (30
+  seconds) gives it a new one.
 - Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
   up`. An install with backend services on keeps the Caddy image
   `enable-services.sh` built until it is run again, which rebuilds it pinned.
@@ -1203,6 +1317,20 @@ bundle share one version (spec §11.5).
   and an organisation already at its allowance gets new replicas and
   dedicated projects refused (or a promotion turned into a request) until
   the allowance is raised.
+- The operations queue has classes (no migration). With the default 4
+  workers a server runs at most 2 long operations (moves, upgrades, HA,
+  replicas, resizes, imports) and 3 scheduled ones (backups and other
+  timetabled work) at once, where it used to run 4 of either: a night with
+  many projects to back up takes longer, and `queue_age` warns if a
+  scheduled operation waits over an hour. Raise `XENIBASE_WORKERS` for
+  more of both; with `XENIBASE_WORKERS=1` nothing is kept back. Servers of
+  an older release sharing the metadata database still claim oldest first
+  until upgraded.
+- `project_stuck` now also fires for projects left `provisioning`,
+  `restoring`, `deleting` or `error` with no operation, so an install may
+  see it for such projects at the first evaluation after the upgrade.
+  Delete a project in `error`; the others need repair by hand
+  (`docs/operations.md`, "Projects stuck in a status").
 
 ## v4.2.4
 

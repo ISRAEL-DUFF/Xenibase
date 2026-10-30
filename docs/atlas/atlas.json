@@ -8,6 +8,8 @@
     "go-lines": { "kind": "lines", "files": ["*.go"] },
     "go-lines-nontest": { "kind": "lines", "files": ["*.go"], "exclude": "_test\\.go$" },
     "go-test-lines": { "kind": "lines", "files": ["*_test.go"] },
+    "go-lines-handwritten": { "kind": "lines", "files": ["*.go"], "exclude": "(_test\\.go|\\.gen\\.go|^internal/store/(\\w+\\.sql|batch|copyfrom|db|models)\\.go)$" },
+    "go-lines-generated": { "kind": "lines", "files": ["*.gen.go", "internal/store/*.go"], "exclude": "^internal/store/(?!(\\w+\\.sql|batch|copyfrom|db|models)\\.go$)" },
     "ts-lines": { "kind": "lines", "files": ["web/src/*.ts", "web/src/*.tsx"] },
     "packages": { "kind": "packages" },
     "binaries": { "kind": "dirs", "dir": "cmd", "having": "main.go" },

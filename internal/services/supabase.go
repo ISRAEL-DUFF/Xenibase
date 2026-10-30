@@ -98,8 +98,8 @@ var supabaseSteps = map[string]string{
 func (s *Service) supabaseKinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
 		KindMigrateSupabasePolicies: {Handler: s.runMigratePolicies, MaxAttempts: 1, Timeout: 30 * time.Minute},
-		KindMigrateSupabaseUsers:    {Handler: s.runMigrateUsers, MaxAttempts: 1, Timeout: 2 * time.Hour},
-		KindMigrateSupabaseStorage:  {Handler: s.runMigrateStorage, MaxAttempts: 1, Timeout: 12 * time.Hour},
+		KindMigrateSupabaseUsers:    {Handler: s.runMigrateUsers, MaxAttempts: 1, Timeout: 2 * time.Hour, Class: jobs.ClassLong},
+		KindMigrateSupabaseStorage:  {Handler: s.runMigrateStorage, MaxAttempts: 1, Timeout: 12 * time.Hour, Class: jobs.ClassLong},
 	}
 }
 

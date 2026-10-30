@@ -439,6 +439,7 @@ func Start(t testing.TB, opts Options) *Env {
 	consoleSvc := console.New(db, svc, keyring, false, log)
 	insightSvc := insights.New(db, svc, consoleSvc, insights.Config{SlowQuery: 200 * time.Millisecond, Plans: []string{"all"}}, log)
 	alertSvc := alerts.New(db, keyring, alerts.Config{PublicURL: "https://xenibase.test", Poolers: append(pm.Admins(), opts.ExtraPoolers...), PoolerGrace: time.Nanosecond, WakerAddr: pm.WakerAddr,
+		OperationClass: jobs.Classifier(kinds),
 		// One clear evaluation resolves, as the integration tests expect.
 		ResolveAfter: 1}, log)
 	collector := metrics.NewCollector(db, svc, pm, nodeSvc, time.Second, log)
@@ -473,7 +474,7 @@ func Start(t testing.TB, opts Options) *Env {
 	// The auth message and hook sender starts once its outbound client is set.
 	wg.Add(1)
 	go func() { defer wg.Done(); servicesSvc.RunAuthEmail(ctx) }()
-	webhookSvc := webhooks.New(db, keyring, svc, outboundSvc, tenancySvc, mailSvc, webhooks.Config{Poll: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
+	webhookSvc := webhooks.New(db, keyring, svc, outboundSvc, tenancySvc, mailSvc, webhooks.Config{Poll: 200 * time.Millisecond, IdlePoll: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
 	jobSvc := schedjobs.New(db, keyring, svc, consoleSvc, outboundSvc, tenancySvc, mailSvc, schedjobs.Config{Tick: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
 	svc.RefreshWebhooks = webhookSvc.Reinstall
 	tokenSvc := tokens.New(db, keyring, mailSvc, tokens.Config{Now: clock.Now, PublicURL: "https://xenibase.test"}, log)
@@ -546,6 +547,8 @@ func Start(t testing.TB, opts Options) *Env {
 		e.StopAutomation()
 		cancel()
 		wg.Wait()
+		// The collector keeps its instance connections between samples.
+		collector.Close()
 		e.dropLeftovers()
 		// Leave the test poolers with no routes from this run.
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)

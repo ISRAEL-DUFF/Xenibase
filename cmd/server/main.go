@@ -359,7 +359,7 @@ func run() error {
 		})
 	}
 
-	// Database branches and their hourly expiry (V2 §8).
+	// Database branches and their expiry, swept every 10 minutes (V2 §8, decision M13 #4).
 	var branchSvc *branching.Service
 	if backups != nil {
 		branchSvc = branching.New(pool, projects, backups, nodeSvc, mailSvc, branching.Config{PublicURL: cfg.Insight.PublicURL}, log)
@@ -535,7 +535,14 @@ func run() error {
 		if servicesSvc != nil {
 			servicesSvc.Outbound = outboundSvc
 		}
-		webhookSvc = webhooks.New(pool, keyring, projects, outboundSvc, tenancySvc, mailSvc, webhooks.Config{PublicURL: cfg.Insight.PublicURL}, log)
+		listenMax := cfg.Insight.WebhookListenMax
+		if listenMax == 0 {
+			listenMax = -1 // none: every project is polled
+		}
+		webhookSvc = webhooks.New(pool, keyring, projects, outboundSvc, tenancySvc, mailSvc, webhooks.Config{
+			PublicURL: cfg.Insight.PublicURL, ListenMax: listenMax,
+			IdleAfter: cfg.Insight.WebhookIdleAfter, IdlePoll: cfg.Insight.WebhookIdlePoll,
+		}, log)
 		// SQL jobs run through the console's login (it holds no privileges
 		// of its own), whether or not the console itself is turned off.
 		jobConsole := console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
@@ -568,6 +575,8 @@ func run() error {
 		alertCfg := alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
 			PoolerSkipped: pm.Skipped,
+			// Every kind is in kinds by now; the runner below serves the same map.
+			OperationClass: jobs.Classifier(kinds),
 		}
 		if nodeSvc != nil {
 			alertCfg.ClientCertExpiry = nodeSvc.ClientCertExpiry

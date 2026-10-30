@@ -17,7 +17,8 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | WAL archiving (`wal_archive`) | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
   | Isolation check (`isolation_check_failed`) | critical | A live shared cluster's latest tenant-isolation check (every 24 h) found a problem |
   | Minor upgrade failed (`minor_upgrade_failed`) | critical | A live instance's latest Postgres minor upgrade failed; it stays on its release until a newer one or **Run now** |
-  | Project stuck (`project_stuck`) | critical | A move, promotion, demotion or major upgrade failed and the project is still frozen 10 minutes on: the rollback can't give its logins back until its instance answers |
+  | Project stuck (`project_stuck`) | critical, or warning for `error` | A live project is in a status other than `active` with no queued or running operation, 10 minutes after its last one ended. `moving`, `promoting`, `demoting` or `upgrading`: the rollback can't give its logins back until its instance answers, and Xenibase retries every minute. `provisioning`, `restoring` or `deleting`: the operation ended without finishing, and nothing repairs it (see [Projects stuck in a status](#projects-stuck-in-a-status)). `error`: a delete or restore gave up; delete the project once the cause is fixed |
+  | Operations waiting (`queue_age`) | critical for interactive, warning otherwise | The oldest runnable operation of a class has waited over 15 minutes (interactive) or an hour (long, scheduled): every slot that may run it is busy, or no server runs its kind (see [The operations queue](#the-operations-queue)) |
   | Node unreachable (`node_unreachable`) | critical | A node's agent has not answered for 2+ minutes |
   | Node disk (`node_disk`) | warning | A reachable node's data disk is over 85% full, from its last health report |
   | Project disk (`project_disk`) | warning | A project is larger than its disk warning (Project Settings → Database), from a size sample of the last 30 minutes |
@@ -27,7 +28,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Pooler host not ready (`pooler_host_not_ready`) | critical | A healthy edge pooler host can't serve or is stale for 1 minute ([standby edge pooler](edge-poolers.md)) |
   | Pooler split brain (`pooler_split_brain`) | critical | Two edge pooler hosts in one region say keepalived made them MASTER, for 1 minute |
   | Waker down (`waker_down`) | critical | The Free tier's waker has refused connections for 1 minute: paused projects can't resume on connect, and pausing is on hold |
-  | Agent client certificate (`agent_client_cert`) | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
+  | Agent client certificate (`agent_client_cert`) | critical | xenibase-server's certificate for talking to agents (24 hours, renewed with 12 left) has under 6 hours left: renewing it, or recording its serial in the metadata database, keeps failing (see the server's log) |
   | Failure domain (`failure_domain`) | warning | HA members, etcd members or pooler hosts that must be apart share a failure domain |
   | Files share backups (`files_share_backups`) | warning | A region with stored files has no files target of its own, so its edges hold credentials that can delete its backups |
   | Capacity proposal (`capacity_proposal`) | warning | A capacity proposal waits for approval (Platform → Capacity) |
@@ -51,7 +52,19 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
 - **Operations** shows every long action with its step log.
 - **Metrics** (per project and per node) charts size, connections, TPS,
   cache hit ratio, CPU, memory, disk, and I/O; `/metrics` serves them to
-  Prometheus.
+  Prometheus. With several xenibase-servers, one samples at a time (an
+  advisory lock; another takes over within a `XENIBASE_METRICS_INTERVAL`
+  of it stopping), over one admin connection per instance that it keeps
+  between samples. Each server still reads its own local PgBouncers and
+  leaves the counts in the metadata database for the sampling server, so
+  pooler clients and Free-tier activity cover every server's poolers.
+  Every server serves `/metrics` from the stored points, so it does not
+  matter which one Prometheus reaches.
+- `xenibase_instance_webhook_listen_connections` is how many direct
+  `LISTEN` connections webhook delivery holds to each instance, outside
+  the poolers. They count against the instance's `max_connections`, at
+  most `XENIBASE_WEBHOOK_LISTEN_MAX` (50) per instance; see "Outbound
+  traffic" below.
 - `docker compose ps` and `docker compose logs <service>` for the
   containers themselves. Their logs are rotated: every service in the
   compose files (here, the status page's and the pooler hosts') uses
@@ -60,6 +73,55 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   that far. Ship them elsewhere if you need longer. A container created
   before this setting picks it up the next time it is recreated
   (`./install.sh` or `docker compose up -d`).
+
+## The operations queue
+
+Every long action is an operation, run by the server's workers
+(`XENIBASE_WORKERS`, 4 by default per server). Each kind has a class:
+
+| Class | Kinds | Slots per server (of 4) |
+| --- | --- | --- |
+| Interactive | Create, delete, restore, rotate, settings, pause and resume, unarchive, branches, services, HA disable and switchover, etcd, capacity, and any kind not listed below | All of them; claimed first |
+| Long | Moves, major upgrades, promotion and demotion, HA enable, creating and detaching replicas, resizes, imports, Supabase user and storage copies, branch file copies, Move all | At most half (2) |
+| Scheduled | Backups and base backups, restore tests, the metadata backup, storage switches, isolation checks, minor upgrades, the Free tier's pause and archive, V1 renames and credential expiry | At most all but one (3) |
+
+Long and scheduled operations together hold at most all but one slot, so
+one is always free for interactive work, and a server claims interactive
+operations before older ones of the other classes. With
+`XENIBASE_WORKERS=8`: 4 long, 7 scheduled, 7 together; with 1, nothing is
+kept back. More servers add slots: each applies the caps to its own.
+
+`queue_age` fires when the oldest runnable operation of a class has
+waited past its threshold. For interactive work, look at what the
+servers run (Operations, filtered by `running`): a burst of creates, or
+one server for many projects, calls for more workers or another server.
+For scheduled work during the backup window, a backlog of backups is
+expected for a while; one that lasts over an hour means the window needs
+more workers. An operation of a kind no server runs (a server of another
+release) waits too, and fails after a day.
+
+### Projects stuck in a status
+
+`project_stuck` names a live project left in a status other than `active`
+that no operation will move on. Read its last operation's log
+(Operations, or the project's own list) first.
+
+- `moving`, `promoting`, `demoting`, `upgrading`: Xenibase gives the
+  logins back, resumes the poolers and sets the project `active` once its
+  instance answers. Bring the instance's node back.
+- `error`: a delete gave up, or a restore could not put the safety
+  backup back. Fix the cause the log names and delete the project again
+  (a branch can also be reset).
+- `provisioning`, `deleting`: the create or delete ended without setting
+  the project's final status. There is no button for these: in the
+  metadata database set the project's status to `error`, then delete it,
+  which drops whatever the create left (a delete finds what is already
+  gone).
+- `restoring`: the restore ended without reopening the project. If the
+  log shows the restore, or its rollback, finished and the database is as
+  expected, set the status to `active` (and `RESUME` its database on both
+  PgBouncers if clients are refused); otherwise restore one of its backups
+  into a new project, then set it to `error` and delete it.
 
 ## Backups
 
@@ -340,7 +402,7 @@ organisation's own shared cluster if it has one), from its latest backup
 or live, schema only or with data. Developers and above create them under
 **Database → Branches** or with `xenibase branch create`; they expire after
 7 days unless given another TTL (1 hour to 30 days, or kept), the
-creator is emailed a day before, and an hourly job deletes expired ones
+creator is emailed a day before, and a sweep every 10 minutes deletes expired ones
 without a final backup. **Reset** refills a branch from its parent while
 keeping its database name, URL, password and members' logins;
 **Detach** turns it into a standalone project (which can then be
@@ -439,6 +501,25 @@ On an organisation's admin page you can:
 Only one xenibase-server delivers webhooks and runs the scheduler at a time
 (advisory locks), so more servers can be added later without double
 deliveries.
+
+To wake on each commit, the delivering server holds a direct admin
+connection with `LISTEN` to a project's database. These bypass the poolers
+and count against the instance's `max_connections` (500 on the bundle's
+shared cluster), so they are bounded:
+
+- at most `XENIBASE_WEBHOOK_LISTEN_MAX` (default 50) per instance; `0`
+  holds none;
+- a project gives its connection back once its outbox has had nothing to
+  send for `XENIBASE_WEBHOOK_IDLE_AFTER` (default 10 minutes);
+- a project without one is polled every `XENIBASE_WEBHOOK_IDLE_POLL`
+  (default 30 seconds) over a connection opened for the read, every 5
+  seconds while it has events going out, and takes a `LISTEN` connection
+  again when one is free. Its first event after a quiet spell can wait up
+  to the poll interval.
+
+`xenibase_instance_webhook_listen_connections` on `/metrics` shows how many
+are held per instance. Leave room for them in `max_connections` when you
+size a cluster, or lower the cap.
 
 Imports and Supabase migrations connect to a database the tenant names, from
 xenibase-server and an agent, whose addresses every cluster trusts. Their

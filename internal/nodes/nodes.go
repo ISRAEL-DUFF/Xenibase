@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -43,7 +44,9 @@ var (
 type Service struct {
 	db        *pgxpool.Pool
 	ca        *agentca.CA
-	certs     *clientCerts // xenibase-server's client certificate
+	certs     *clientCerts // this server's client certificate
+	name      string       // this server, in its client certificates
+	allow     allowList    // the agents' allow list, as last read
 	bootstrap string       // install-time token, see Register
 	bootNode  string       // the only node it registers
 	home      string       // the home region (V3 §6.1)
@@ -83,12 +86,28 @@ func (s *Service) regionOr(r string) string {
 // lets the install bundle's own agent register the local node (named
 // "local" unless SetBootstrapNode says otherwise) once, without an
 // operator; empty disables it.
+//
+// The server issues itself a client certificate for its agents at once,
+// named after its host (a day long, renewed at half-life), and records its
+// serial in the metadata database, which agents' allow lists are made from.
 func NewService(db *pgxpool.Pool, ca *agentca.CA, bootstrapToken string, log *slog.Logger) (*Service, error) {
-	certs, err := newClientCerts(ca.ServerClientCertAt, time.Now, log)
-	if err != nil {
-		return nil, err
+	return newService(db, ca, bootstrapToken, defaultServerName(), log)
+}
+
+func newService(db *pgxpool.Pool, ca *agentca.CA, bootstrapToken, name string, log *slog.Logger) (*Service, error) {
+	s := &Service{db: db, ca: ca, name: name, bootstrap: bootstrapToken, bootNode: "local", log: log, health: map[uuid.UUID]Status{}}
+	s.certs = newClientCerts(func(now time.Time) (tls.Certificate, error) { return ca.ServerClientCertFor(s.name, now) }, time.Now, log)
+	s.certs.register = s.registerClientCert
+	s.certs.after = func(ctx context.Context) {
+		if err := s.refreshAllow(ctx); err != nil {
+			log.Warn("reading the agent allow list failed", "err", err)
+		}
+		s.agents.closeIdle()
 	}
-	return &Service{db: db, ca: ca, certs: certs, bootstrap: bootstrapToken, bootNode: "local", log: log, health: map[uuid.UUID]Status{}}, nil
+	if _, err := s.certs.get(); err != nil {
+		return nil, fmt.Errorf("agent client certificate: %w", err)
+	}
+	return s, nil
 }
 
 // SetBootstrapNode names the node the bootstrap token registers: the
@@ -294,6 +313,15 @@ func (s *Service) Run(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
+		// The allow list first: a revoked serial reaches every agent at this
+		// pass, and a revoked certificate of this server's is replaced.
+		if err := s.refreshAllow(ctx); err != nil {
+			s.log.Warn("reading the agent allow list failed", "err", err)
+		}
+		s.checkOwnSerial()
+		if _, err := s.certs.get(); err != nil {
+			s.log.Error("no agent client certificate", "err", err)
+		}
 		ns, err := store.New(s.db).ListNodes(ctx)
 		if err == nil {
 			for _, n := range ns {

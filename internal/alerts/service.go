@@ -23,6 +23,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/faildomain"
+	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -61,7 +62,7 @@ const (
 	nodeDiskThreshold      = 0.85
 	nodeUnreachableAfter   = 2 * time.Minute
 	projectSizeFreshWithin = 30 * time.Minute
-	clientCertWarnWithin   = 3 * 24 * time.Hour
+	clientCertWarnWithin   = 6 * time.Hour
 	// walArchiveWindow is how far back failed archiving attempts count;
 	// walArchiveStale how long a completed WAL segment may wait (with
 	// archive_timeout at 60 s, a healthy archive waits seconds).
@@ -81,13 +82,30 @@ const (
 	KindFilesShareBackups = "files_share_backups"
 )
 
-// KindProjectStuck: a move, promotion, demotion or major upgrade failed and
-// its rollback still cannot unfreeze the project (its instance does not
-// answer), 10 minutes on.
+// KindProjectStuck: a live project is in a status other than active with
+// no queued or running operation, 10 minutes after its last one ended: a
+// move, promotion, demotion or major upgrade whose rollback still cannot
+// unfreeze it (its instance does not answer), a create, restore or delete
+// that ended without setting the project's final status, or a project
+// left in error.
 const (
 	KindProjectStuck  = "project_stuck"
 	projectStuckAfter = 10 * time.Minute
 )
+
+// KindQueueAge: the oldest runnable operation of a class has waited too
+// long for a worker: every slot is busy (interactive), or the class is at
+// its cap (long, scheduled), or no worker runs its kind.
+const KindQueueAge = "queue_age"
+
+// queueAgeAfter is how long the oldest runnable operation of each class
+// may wait before queue_age fires. The nightly backups fill the scheduled
+// slots for a while by design, and a long kind waits for one of 2 slots.
+var queueAgeAfter = map[jobs.Class]time.Duration{
+	jobs.ClassInteractive: 15 * time.Minute,
+	jobs.ClassLong:        time.Hour,
+	jobs.ClassScheduled:   time.Hour,
+}
 
 // Config configures the service.
 type Config struct {
@@ -108,6 +126,10 @@ type Config struct {
 	// ClientCertExpiry returns when xenibase-server's agent client
 	// certificate expires (renewing it first when due); nil skips the check.
 	ClientCertExpiry func() time.Time
+	// OperationClass returns an operation kind's class, for queue_age
+	// (jobs.Classifier of the runner's kinds); nil counts every kind as
+	// interactive.
+	OperationClass func(kind string) jobs.Class
 	// ResolveAfter is how many evaluations in a row, from any server, must
 	// find a firing alert's condition clear before it resolves (default
 	// 3), spanning about ResolveAfter-1 intervals: a value hovering at a
@@ -364,15 +386,19 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 			fmt.Sprintf("No backup of %s in 26 hours (%s)", p.Name, since), map[string]any{"last_backup_at": p.LastBackupAt}})
 	}
 
-	stuck, err := q.ListStuckProjects(ctx, projectStuckAfter.Seconds())
+	stuck, err := q.ListProjectsLeftWithoutOperation(ctx, projectStuckAfter.Seconds())
 	if err != nil {
 		errs = append(errs, err)
 	}
 	for _, p := range stuck {
-		out = append(out, condition{KindProjectStuck, SeverityCritical, "project", p.ID.String(), p.Name,
-			fmt.Sprintf("%s is still %s after its operation failed: the rollback cannot give its logins back until its instance answers", p.Name, p.Status),
-			map[string]any{"status": p.Status}})
+		out = append(out, stuckCondition(p))
 	}
+
+	ages, err := q.QueuedOperationAges(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	out = append(out, queueAgeConditions(ages, s.cfg.OperationClass)...)
 	archives, err := q.WALArchiveSamples(ctx, time.Now().Add(-walArchiveWindow))
 	if err != nil {
 		errs = append(errs, err)
@@ -644,9 +670,9 @@ func (s *Service) wakerConditions(ctx context.Context) ([]condition, error) {
 }
 
 // clientCertConditions reports xenibase-server's agent client certificate
-// when less than clientCertWarnWithin is left: it is renewed with a week
-// left, so renewing has been failing. Once it expires no agent accepts the
-// server.
+// when less than clientCertWarnWithin is left: it lasts a day and is
+// renewed with twelve hours left, so renewing has been failing for six
+// hours. Once it expires no agent accepts the server.
 func (s *Service) clientCertConditions() []condition {
 	if s.cfg.ClientCertExpiry == nil {
 		return nil
@@ -656,7 +682,7 @@ func (s *Service) clientCertConditions() []condition {
 		return nil
 	}
 	return []condition{{KindAgentClientCert, SeverityCritical, "control_plane", "agent_client_cert", "agent client certificate",
-		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until it restarts.", exp.UTC().Format(time.RFC3339)),
+		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until a renewal succeeds.", exp.UTC().Format(time.RFC3339)),
 		map[string]any{"expires_at": exp.UTC().Format(time.RFC3339)}}}
 }
 

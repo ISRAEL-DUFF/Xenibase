@@ -25,7 +25,12 @@ outbox table and a trigger function. Each configured table gets triggers
 that write every change to the outbox **in the same transaction**: a
 rolled-back change never produces an event, and a committed one always
 does. Xenibase's delivery worker wakes on each commit (and checks every five
-seconds), and posts the events of each webhook in commit order.
+seconds), and posts the events of each webhook in commit order. A project
+whose webhooks have had nothing to send for 10 minutes, or one on a server
+already holding its limit of such wake-up connections, is checked every 30
+seconds instead, so its first event after a quiet spell can take up to
+that long; the next ones go out at once again. The operator sets both
+times ([operations](operations.md), "Outbound traffic").
 
 The `xenibase` schema name is reserved: a schema of that name you created is
 replaced. Your role owns its tables, so it can drop Xenibase's triggers;
