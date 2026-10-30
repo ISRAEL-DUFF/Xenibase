@@ -3791,8 +3791,31 @@ export interface paths {
         /** Billing contacts, who receive invoices and payment email */
         get: operations["listBillingContacts"];
         put?: never;
-        /** Add a billing contact */
+        /**
+         * Add a billing contact
+         * @description Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+         */
         post: operations["addBillingContact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/billing/contacts/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm a billing contact from the emailed link (public)
+         * @description An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+         */
+        post: operations["confirmBillingContact"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5046,7 +5069,10 @@ export interface paths {
         /** WhatsApp numbers registered for support (Pro and Team) */
         get: operations["listSupportPhones"];
         put?: never;
-        /** Register a WhatsApp number (E.164) for the organisation's support */
+        /**
+         * Register a WhatsApp number (E.164) for the organisation's support
+         * @description The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+         */
         post: operations["addSupportPhone"];
         delete?: never;
         options?: never;
@@ -5085,6 +5111,12 @@ export interface paths {
          * @description Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
          *     password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
          *     inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+         *     The sender is trusted only on the provider's verdicts: DMARC pass, or
+         *     DKIM and SPF passes aligned with From's domain, read from the
+         *     Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+         *     API's `authentication_results` (the provider's Authentication-Results
+         *     value, a string or an array). Other mail opens a ticket with no
+         *     organisation, flagged unverified_sender, that never joins a thread.
          */
         post: operations["supportInboundEmail"];
         delete?: never;
@@ -10050,6 +10082,8 @@ export interface components {
              * @description The plan's response target; null is best effort.
              */
             respond_by?: string | null;
+            /** @description An email whose sender the provider didn't authenticate (no DMARC pass, nor aligned DKIM and SPF passes): the From address may be forged, so the ticket has no organisation. */
+            unverified_sender: boolean;
         };
         TicketList: {
             items: components["schemas"]["Ticket"][];
@@ -10145,6 +10179,12 @@ export interface components {
             phone: string;
             /** Format: date-time */
             created_at: string;
+            /** @description The code was sent from the number; only then do its messages open tickets. */
+            verified: boolean;
+            /** @description While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678. */
+            code?: string | null;
+            /** Format: date-time */
+            code_expires_at?: string | null;
         };
         RevenueMonth: {
             /** @example 2026-10 */
@@ -10437,6 +10477,8 @@ export interface components {
             name?: string | null;
             /** @description Gets the status page's incident emails while the organisation is on a paid plan (default true). */
             status_emails?: boolean;
+            /** @description A member's verified address, or confirmed from the emailed link. Only a verified contact's email to support opens tickets for the organisation; billing email goes to every contact. */
+            readonly verified?: boolean;
         };
         LegalDocument: {
             /** Format: uuid */
@@ -17932,6 +17974,34 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BillingContact"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    confirmBillingContact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Confirmed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        email: string;
+                        org_name: string;
+                    };
                 };
             };
             default: components["responses"]["Error"];

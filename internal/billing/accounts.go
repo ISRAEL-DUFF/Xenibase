@@ -73,7 +73,13 @@ func (s *Service) UpdateDetails(ctx context.Context, orgID uuid.UUID, d Details)
 	})
 }
 
-// AddContact adds a billing contact (V3 §3.2).
+// AddContact adds a billing contact (V3 §3.2). Invoices and billing email
+// go to every contact at once, but support routes a contact's email to the
+// organisation only once the contact is verified: at once when it is the
+// verified address of one of the organisation's members, otherwise when its
+// owner follows the confirmation link emailed to it (ConfirmContact).
+// Adding an unverified contact again sends the link again, at most every
+// ten minutes.
 func (s *Service) AddContact(ctx context.Context, orgID uuid.UUID, email string, name *string) (store.BillingContact, error) {
 	a, err := mail.ParseAddress(strings.TrimSpace(email))
 	if err != nil || a.Name != "" {
@@ -82,13 +88,42 @@ func (s *Service) AddContact(ctx context.Context, orgID uuid.UUID, email string,
 	if name != nil && strings.TrimSpace(*name) == "" {
 		name = nil
 	}
+	addr := strings.ToLower(a.Address)
 	q := store.New(s.db)
-	if rows, err := q.ListBillingContacts(ctx, orgID); err != nil {
+	rows, err := q.ListBillingContacts(ctx, orgID)
+	if err != nil {
 		return store.BillingContact{}, err
-	} else if len(rows) >= 10 {
+	}
+	exists := false
+	for _, r := range rows {
+		exists = exists || strings.EqualFold(r.Email, addr)
+	}
+	if !exists && len(rows) >= 10 {
 		return store.BillingContact{}, invalid("an organisation has at most 10 billing contacts")
 	}
-	return q.AddBillingContact(ctx, store.AddBillingContactParams{OrgID: orgID, Email: strings.ToLower(a.Address), Name: name})
+	c, err := q.AddBillingContact(ctx, store.AddBillingContactParams{OrgID: orgID, Email: addr, Name: name})
+	if err != nil || c.VerifiedAt != nil {
+		return c, err
+	}
+	now := s.Now()
+	member, err := q.IsVerifiedMemberEmail(ctx, store.IsVerifiedMemberEmailParams{OrgID: orgID, Email: addr})
+	if err != nil {
+		return c, err
+	}
+	if member {
+		if err := q.MarkBillingContactVerified(ctx, store.MarkBillingContactVerifiedParams{OrgID: orgID, Email: addr, Now: &now}); err != nil {
+			return c, err
+		}
+		c.VerifiedAt = &now
+		return c, nil
+	}
+	if c.VerifySentAt != nil && now.Sub(*c.VerifySentAt) < 10*time.Minute {
+		return c, nil
+	}
+	if err := s.sendContactConfirmation(ctx, orgID, addr); err != nil {
+		s.log.Warn("billing contact confirmation", "org", orgID, "err", err)
+	}
+	return c, nil
 }
 
 // RemoveContact removes one.

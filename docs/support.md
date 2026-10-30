@@ -27,9 +27,24 @@ WAT, Monday to Friday. Public holidays aren't counted yet.
 **WhatsApp** is for Pro and Team organisations. An owner or admin
 registers the numbers that may write to Xenibase (Organisation → Support →
 WhatsApp). Local Nigerian numbers such as `0803…` are stored as `+234…`. A
-message from a registered number opens a ticket for that organisation,
+new number shows a code such as `XB-12345678`: send it, as the whole
+message, from that number to Xenibase's support number on WhatsApp within
+7 days (registering the number again gives a new code). Until then the
+number is pending and its messages don't reach the organisation. Once
+confirmed, a message from the number opens a ticket for that organisation,
 or adds to its open ticket from the same number, and replies arrive on
 WhatsApp. Any other number gets a reply explaining how to reach support.
+Several organisations can have a number pending, but only one can confirm
+it; the others' registrations are then dropped.
+
+**Email** to the support address opens a ticket for your organisation when
+it comes from a member's verified address, or from a billing contact who
+confirmed the link Xenibase emailed them when they were added (Billing →
+Billing contacts shows **unconfirmed** until then; contacts who are members
+need no link). Unconfirmed contacts still get invoices and billing email.
+A reply joins a ticket only from the person who opened it or from a member
+of the ticket's organisation, and only when the email provider could
+authenticate the sender (below).
 
 ## For support staff
 
@@ -56,8 +71,14 @@ not billing settings, nodes, other organisations' pages or their data.
   also set the priority and the assignee. The assignee must be support
   staff or a platform admin.
 - An email from someone Xenibase can't place opens a ticket with no
-  organisation. The sender is matched first by an organisation's billing
-  contact, then by membership of exactly one organisation.
+  organisation. The sender is matched first by an organisation's verified
+  billing contact, then by the verified address of a member of exactly
+  one organisation.
+- **Unverified sender** marks an email whose sender the provider couldn't
+  authenticate. Its From address may be forged: it has no organisation or
+  user, never joins an existing ticket, and its acknowledgement only gives
+  the reference. Check with the organisation another way before acting on
+  what it asks, and before assigning it an organisation.
 
 ## Setting it up
 
@@ -65,6 +86,7 @@ not billing settings, nodes, other organisations' pages or their data.
 | --- | --- |
 | `XENIBASE_SUPPORT_EMAIL` | The support address, e.g. `support@example.com`. It is the Reply-To of support emails, and mail from it is never turned into tickets. |
 | `XENIBASE_SUPPORT_INBOUND_SECRET` (or `_FILE`) | At least 16 characters. The email provider's inbound webhook presents it. |
+| `XENIBASE_SUPPORT_AUTHSERV_ID` | Optional. The authserv-id of the `Authentication-Results` header your email provider adds (e.g. `mx.example.net`); only headers naming it count. Not needed with Postmark. |
 | `XENIBASE_WHATSAPP_PHONE_NUMBER_ID` | The WhatsApp Business number's ID (Meta Cloud API). |
 | `XENIBASE_WHATSAPP_ACCESS_TOKEN` | A system-user token with `whatsapp_business_messaging`. |
 | `XENIBASE_WHATSAPP_APP_SECRET` | The Meta app's secret, at least 16 characters. It checks `X-Hub-Signature-256` on every webhook. |
@@ -90,10 +112,32 @@ The endpoint accepts either of these JSON bodies:
 
 - Postmark's inbound JSON;
 - a plain body: `from`, `from_name`, `subject`, `text`, `message_id`,
-  `in_reply_to`, `references`.
+  `in_reply_to`, `references`, and `authentication_results`: your
+  provider's `Authentication-Results` value for the message (a string, or
+  an array of them).
 
-A reply joins its ticket by the `[T-n]` reference in its subject, or by
-`In-Reply-To` or `References` naming one of Xenibase's emails. Quoted text
+The webhook's secret proves your provider called, not who wrote the
+email, so Xenibase trusts the sender only on the provider's verdicts: a
+DMARC pass for the From domain, or DKIM and SPF passes for domains aligned
+with it (equal, or one a subdomain of the other). It reads them from:
+
+- Postmark's `Received-SPF` (the topmost one) and `X-Spam-Tests`
+  (`DKIM_VALID_AU` with an SPF pass for the envelope sender's domain, or
+  `DMARC_PASS`);
+- `Authentication-Results` headers, only those whose authserv-id is
+  `XENIBASE_SUPPORT_AUTHSERV_ID` (a sender can write the header too);
+- the plain body's `authentication_results`, which is taken as the
+  provider's (and filtered by `XENIBASE_SUPPORT_AUTHSERV_ID` when set).
+
+Mail without such a verdict is still accepted, as a new ticket with no
+organisation, flagged **unverified sender**, and never joins a thread. If
+every inbound email shows as unverified, your provider's verdicts aren't
+reaching Xenibase: check which of these it sends.
+
+An authenticated reply joins its ticket by the `[T-n]` reference in its
+subject, or by `In-Reply-To` or `References` naming one of Xenibase's
+emails, when it is from the ticket's requester or a verified member of its
+organisation. Quoted text
 (`On … wrote:` and the lines starting with `>`) is removed. A redelivered
 email is recorded once.
 

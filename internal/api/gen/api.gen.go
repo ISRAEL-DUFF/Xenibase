@@ -5078,6 +5078,9 @@ type BillingContact struct {
 
 	// StatusEmails Gets the status page's incident emails while the organisation is on a paid plan (default true).
 	StatusEmails *bool `json:"status_emails,omitempty"`
+
+	// Verified A member's verified address, or confirmed from the emailed link. Only a verified contact's email to support opens tickets for the organisation; billing email goes to every contact.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 // BillingDetailsUpdate defines model for BillingDetailsUpdate.
@@ -9535,8 +9538,14 @@ type SupportOperation struct {
 
 // SupportPhone defines model for SupportPhone.
 type SupportPhone struct {
-	CreatedAt time.Time `json:"created_at"`
-	Phone     string    `json:"phone"`
+	// Code While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678.
+	Code          *string    `json:"code,omitempty"`
+	CodeExpiresAt *time.Time `json:"code_expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	Phone         string     `json:"phone"`
+
+	// Verified The code was sent from the number; only then do its messages open tickets.
+	Verified bool `json:"verified"`
 }
 
 // SupportProject defines model for SupportProject.
@@ -9691,7 +9700,10 @@ type Ticket struct {
 	RespondBy *time.Time   `json:"respond_by,omitempty"`
 	Status    TicketStatus `json:"status"`
 	Subject   string       `json:"subject"`
-	UpdatedAt time.Time    `json:"updated_at"`
+
+	// UnverifiedSender An email whose sender the provider didn't authenticate (no DMARC pass, nor aligned DKIM and SPF passes): the From address may be forged, so the ticket has no organisation.
+	UnverifiedSender bool      `json:"unverified_sender"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // TicketChannel defines model for Ticket.Channel.
@@ -11171,6 +11183,9 @@ type ResendVerificationJSONRequestBody = EmailRequest
 // RestoreBackupJSONRequestBody defines body for RestoreBackup for application/json ContentType.
 type RestoreBackupJSONRequestBody = RestoreRequest
 
+// ConfirmBillingContactJSONRequestBody defines body for ConfirmBillingContact for application/json ContentType.
+type ConfirmBillingContactJSONRequestBody = TokenRequest
+
 // CreateDevOperationJSONRequestBody defines body for CreateDevOperation for application/json ContentType.
 type CreateDevOperationJSONRequestBody = NoopParams
 
@@ -11932,6 +11947,9 @@ type ServerInterface interface {
 	// RestoreBackup Restore a backup into a new project or in place
 	// (POST /api/v1/backups/{id}/restore)
 	RestoreBackup(w http.ResponseWriter, r *http.Request, id BackupID)
+	// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+	// (POST /api/v1/billing/contacts/confirm)
+	ConfirmBillingContact(w http.ResponseWriter, r *http.Request)
 	// CreateDevOperation Enqueue a dummy operation (development only)
 	// (POST /api/v1/dev/operations)
 	CreateDevOperation(w http.ResponseWriter, r *http.Request)
@@ -13585,6 +13603,12 @@ func (_ Unimplemented) DownloadBackup(w http.ResponseWriter, r *http.Request, id
 // RestoreBackup Restore a backup into a new project or in place
 // (POST /api/v1/backups/{id}/restore)
 func (_ Unimplemented) RestoreBackup(w http.ResponseWriter, r *http.Request, id BackupID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+// (POST /api/v1/billing/contacts/confirm)
+func (_ Unimplemented) ConfirmBillingContact(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -18429,6 +18453,20 @@ func (siw *ServerInterfaceWrapper) RestoreBackup(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.RestoreBackup(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ConfirmBillingContact operation middleware
+func (siw *ServerInterfaceWrapper) ConfirmBillingContact(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ConfirmBillingContact(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -27633,6 +27671,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/orgs/{org}/billing/contacts", wrapper.AddBillingContact)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/billing/contacts/confirm", wrapper.ConfirmBillingContact)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/v1/orgs/{org}/billing/contacts/{email}", wrapper.RemoveBillingContact)

@@ -469,6 +469,7 @@ func run() error {
 	// Support (V3 §7.1): tickets from the dashboard, email and WhatsApp.
 	supportSvc := support.New(pool, mailSvc, support.Config{
 		Address: cfg.Support.Email, PublicURL: cfg.Insight.PublicURL, InboundSecret: cfg.Support.InboundSecret,
+		AuthservID: cfg.Support.AuthservID,
 	}, log)
 	if cfg.Support.WhatsAppOn() {
 		supportSvc.SetWhatsApp(support.CloudAPI{

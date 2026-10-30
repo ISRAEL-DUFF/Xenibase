@@ -796,7 +796,7 @@ function ContactsPanel({ org }: { org: string }) {
   return (
     <Panel
       title="Billing contacts"
-      description="Invoices and payment emails go here. With none, they go to the owners and billing members. On a paid plan, contacts with status page emails on (and the owners) are emailed about incidents affecting the organisation's projects; each email has an unsubscribe link."
+      description="Invoices and payment emails go here. With none, they go to the owners and billing members. On a paid plan, contacts with status page emails on (and the owners) are emailed about incidents affecting the organisation's projects; each email has an unsubscribe link. A contact who isn't a member gets a link to confirm the address; until then, their email to support isn't filed under this organisation."
       testId="billing-contacts"
     >
       <div className="flex flex-col gap-3">
@@ -806,7 +806,28 @@ function ContactsPanel({ org }: { org: string }) {
             className="flex items-center justify-between text-sm"
             data-testid="billing-contact"
           >
-            <span>{c.email}</span>
+            <span className="flex items-center gap-2">
+              {c.email}
+              {c.verified === false && (
+                <>
+                  <Badge tone="warn">unconfirmed</Badge>
+                  <Button
+                    size="small"
+                    variant="ghost"
+                    onClick={async () => {
+                      setErr(null);
+                      try {
+                        await api.addBillingContact(org, { email: c.email });
+                      } catch (x) {
+                        setErr(errorMessage(x));
+                      }
+                    }}
+                  >
+                    Send the link again
+                  </Button>
+                </>
+              )}
+            </span>
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-2 text-xs text-fg-muted">
                 <input

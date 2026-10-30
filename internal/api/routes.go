@@ -92,6 +92,8 @@ var routeRules = map[string]rule{
 	"GET /api/v1/terms":                                  {scope: scopePublic, beforeTerms: true},
 	"POST /api/v1/invitations/preview":                   {scope: scopePublic},
 	"POST /api/v1/invitations/accept":                    {scope: scopePublic},
+	// The emailed link confirming a billing contact; the token is the proof.
+	"POST /api/v1/billing/contacts/confirm": {scope: scopePublic},
 	// The CLI's device login; the approval itself needs a session.
 	"POST /api/v1/auth/device":       {scope: scopePublic},
 	"POST /api/v1/auth/device/token": {scope: scopePublic},
