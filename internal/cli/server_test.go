@@ -149,7 +149,7 @@ func TestPlainHTTPOnlyToLoopback(t *testing.T) {
 		"ftp://xenibase.example.com":   false,
 		"xenibase.example.com":         false,
 	} {
-		if err := checkServerURL(s); (err == nil) != ok {
+		if err := checkServerURL(s, false); (err == nil) != ok {
 			t.Errorf("%s: %v", s, err)
 		}
 	}
@@ -163,6 +163,17 @@ func TestPlainHTTPOnlyToLoopback(t *testing.T) {
 	cfg := &Config{Current: "old", Contexts: map[string]*Context{"old": {Server: "http://xenibase.example.com", Token: "xb_old"}}}
 	if code, out = runWith(t, map[string]string{}, cfg, "whoami"); code != ExitUsage {
 		t.Fatalf("stored http context: exit %d: %s", code, out)
+	}
+	// XENIBASE_ALLOW_HTTP=1 opts in to http:// elsewhere, with a warning.
+	if err := checkServerURL("http://10.0.0.1:8080", true); err != nil {
+		t.Fatalf("http with the opt-in: %v", err)
+	}
+	if err := checkServerURL("ftp://xenibase.example.com", true); err == nil {
+		t.Fatal("the opt-in allowed a non-http scheme")
+	}
+	code, out = runWith(t, map[string]string{"XENIBASE_ALLOW_HTTP": "1"}, cfg, "whoami")
+	if code == ExitUsage || !strings.Contains(out, "warning: sending the token to http://xenibase.example.com over plain http://") {
+		t.Fatalf("stored http context with the opt-in: exit %d: %s", code, out)
 	}
 	// Loopback is fine (the test server is http://127.0.0.1).
 	srv := newFakeServer(t)

@@ -193,7 +193,7 @@ func (a *App) resolve() (target, error) {
 	if t.Token == "" {
 		return t, usageErrorf("no token for %s%s: run xenibase login --server %s, or set XENIBASE_TOKEN", t.Server, skipped, t.Server)
 	}
-	if err := checkServerURL(t.Server); err != nil {
+	if err := a.checkServerURL(t.Server); err != nil {
 		return t, err
 	}
 	t.Server = strings.TrimRight(t.Server, "/")
@@ -243,13 +243,27 @@ func sameServer(a, b string) bool { return normalServer(a) == normalServer(b) }
 
 // checkServerURL accepts an https:// URL, or http:// to this machine only:
 // a token sent over plain HTTP to another host can be read on the way.
-func checkServerURL(server string) error {
+func checkServerURL(server string, allowHTTP bool) error {
 	u, err := url.Parse(server)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return usageErrorf("the server must be a URL like https://xenibase.example.com, not %q", server)
 	}
-	if u.Scheme == "http" && !isLoopback(u.Hostname()) {
-		return usageErrorf("%s uses plain http://, which would send the token unencrypted: use https:// (http:// is allowed only for localhost, 127.0.0.0/8 and ::1)", server)
+	if u.Scheme == "http" && !allowHTTP && !isLoopback(u.Hostname()) {
+		return usageErrorf("%s uses plain http://, which would send the token unencrypted: use https:// (http:// is allowed only for localhost, 127.0.0.0/8 and ::1, or anywhere with XENIBASE_ALLOW_HTTP=1 on a network you trust)", server)
+	}
+	return nil
+}
+
+// checkServerURL is checkServerURL with XENIBASE_ALLOW_HTTP=1 read from the
+// environment: an explicit opt-in to plain http:// beyond loopback, for a
+// development or private network without TLS, warned about on stderr.
+func (a *App) checkServerURL(server string) error {
+	allow := a.getenv("XENIBASE_ALLOW_HTTP") == "1"
+	if err := checkServerURL(server, allow); err != nil {
+		return err
+	}
+	if u, _ := url.Parse(server); allow && u.Scheme == "http" && !isLoopback(u.Hostname()) {
+		fmt.Fprintf(a.Stderr, "xenibase: warning: sending the token to %s over plain http:// (XENIBASE_ALLOW_HTTP=1)\n", server)
 	}
 	return nil
 }

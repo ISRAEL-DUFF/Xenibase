@@ -1069,7 +1069,8 @@ bundle share one version (spec §11.5).
   up`. An install with backend services on keeps the Caddy image
   `enable-services.sh` built until it is run again, which rebuilds it pinned.
 - A CLI context saved for an `http://` server other than this machine stops
-  working: log in again with `https://`. A script that sets `XENIBASE_SERVER`
+  working: log in again with `https://`, or, on a network you trust
+  without TLS, set `XENIBASE_ALLOW_HTTP=1` (each command warns). A script that sets `XENIBASE_SERVER`
   to a server other than its current context's needs `XENIBASE_TOKEN`, or a
   context for that server.
 - Migration 00097 adds billing contacts' `verified_at` and confirmation

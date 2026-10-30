@@ -53,7 +53,10 @@ Naming a context and a different server together (`--context prod
 The server must use `https://`. Plain `http://` is accepted only for
 this machine (`localhost`, `127.0.0.0/8` and `::1`), for a local
 development server; `login` refuses any other `http://` server, and a
-saved token is not sent to one.
+saved token is not sent to one. On a development or private network
+without TLS (a server on a Docker network, say), `XENIBASE_ALLOW_HTTP=1`
+allows `http://` to any host, and every command then warns on stderr that
+the token travels unencrypted.
 
 ## Tokens
 

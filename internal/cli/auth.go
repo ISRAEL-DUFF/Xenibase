@@ -33,7 +33,7 @@ func (a *App) login(args []string) error {
 	if server == "" {
 		return usageErrorf("usage: xenibase login --server https://xenibase.example.com")
 	}
-	if err := checkServerURL(server); err != nil {
+	if err := a.checkServerURL(server); err != nil {
 		return err
 	}
 	ca := *caFile
