@@ -2693,7 +2693,7 @@ paths:
   /api/v1/me/password:
     post:
       operationId: changePassword
-      summary: Change your password; ends your other sessions
+      summary: Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
       tags: [account]
       requestBody:
         required: true
@@ -10661,7 +10661,8 @@ components:
           description: manual (registered by hand) or the cloud provider that created it.
         lifecycle:
           type: string
-          enum: [active, provisioning, draining]
+          description: retiring is an empty node out of placement whose server is about to be deleted.
+          enum: [active, provisioning, draining, retiring]
         server_type:
           type: string
           nullable: true
@@ -15184,8 +15185,11 @@ components:
             $ref: "#/components/schemas/OAuthGrantProject"
     OAuthAuthorizeInfo:
       type: object
-      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations]
+      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations, consent]
       properties:
+        consent:
+          type: string
+          description: The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
         client_id:
           type: string
         client_name:
@@ -15212,6 +15216,9 @@ components:
       type: object
       required: [client_id, redirect_uri, code_challenge, code_challenge_method, approve]
       properties:
+        consent:
+          type: string
+          description: The `consent` the consent page was given; required to approve.
         client_id:
           type: string
         redirect_uri:
@@ -15226,7 +15233,7 @@ components:
           type: boolean
         scopes:
           type: array
-          description: Within what the app asked for; the request's scopes by default.
+          description: Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
           items:
             $ref: "#/components/schemas/TokenScope"
         org_id:
@@ -15461,6 +15468,10 @@ components:
           type: string
           format: password
           minLength: 12
+        revoke_tokens:
+          type: boolean
+          default: true
+          description: Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
     Terms:
       type: object
       required: [version, terms_md, privacy_md, published_at]
@@ -18707,7 +18718,8 @@ components:
       properties:
         kind:
           type: string
-          enum: [statement, idle_in_transaction]
+          description: statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+          enum: [statement, statement_terminated, idle_in_transaction]
         role:
           type: string
         duration_s:

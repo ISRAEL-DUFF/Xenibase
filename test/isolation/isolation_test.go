@@ -187,6 +187,11 @@ func TestTenantIsolation(t *testing.T) {
 		mustFail(t, a.conn, `SELECT pg_stat_get_db_numbackends(oid) FROM pg_database WHERE datname = '`+b.db()+`'`, "permission denied")
 		mustFail(t, a.conn, `SELECT pg_stat_get_backend_dbid(s) FROM pg_stat_get_backend_idset() s`, "permission denied")
 		mustFail(t, a.conn, `SELECT pg_stat_get_backend_userid(s) FROM pg_stat_get_backend_idset() s`, "permission denied")
+		// Nor which databases have backends and what they lock.
+		mustFail(t, a.conn, `SELECT d.datname, l.pid, l.relation FROM pg_locks l JOIN pg_database d ON d.oid = l.database`, "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_lock_status()`, "permission denied")
+		mustFail(t, a.conn, "SELECT pg_blocking_pids("+itoa(bpid)+")", "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_prepared_xacts`, "permission denied")
 		mustFail(t, a.conn, "SELECT pg_terminate_backend("+itoa(bpid)+")", "permission denied", "must be a member")
 		mustFail(t, a.conn, "SELECT pg_cancel_backend("+itoa(bpid)+")", "permission denied", "must be a member")
 		if _, err := b.conn.Exec(ctx, "SELECT 1"); err != nil {
@@ -303,7 +308,7 @@ func TestTenantIsolation(t *testing.T) {
 }
 
 // TestClusterConfiguration checks the cluster-wide items of spec §7.1
-// with the same checker the weekly live check runs.
+// with the same checker the live check runs every 24 hours.
 func TestClusterConfiguration(t *testing.T) {
 	e := testenv.Start(t, testenv.Options{})
 	admin := e.SharedAdmin("postgres")
@@ -316,13 +321,26 @@ func TestClusterConfiguration(t *testing.T) {
 	}
 }
 
-// TestLiveIsolationCheck runs the weekly isolation_check operation through
-// the API: it passes on a correctly provisioned cluster, and a violation
-// of any kind makes it fail with a finding.
+// TestLiveIsolationCheck runs the isolation_check operation (every 24
+// hours in production) through the API: it passes on a correctly
+// provisioned cluster, with a project's backend services on, and a
+// violation of any kind makes it fail with a finding.
 func TestLiveIsolationCheck(t *testing.T) {
 	e := testenv.Start(t, testenv.Options{})
 	ctx := context.Background()
 	p := e.CreateProject("audited")
+	other := e.CreateProject("neighbour")
+	enableServices := func(id uuid.UUID) {
+		t.Helper()
+		var en gen.BackendServicesEnabled
+		if code := e.Do("POST", "/api/v1/projects/"+id.String()+"/services", nil, &en); code != http.StatusAccepted {
+			t.Fatalf("enable services: %d", code)
+		}
+		if op := e.WaitOperation(en.Operation.Id); op.Status != gen.OperationStatusSucceeded {
+			t.Fatalf("enable services: %s\n%s", op.Status, testenv.FormatLog(op))
+		}
+	}
+	enableServices(p.Project.Id)
 
 	run := func() gen.Operation {
 		t.Helper()
@@ -362,6 +380,10 @@ func TestLiveIsolationCheck(t *testing.T) {
 	// Each violation is found, then undone.
 	db := pgx.Identifier{p.Project.DbName}.Sanitize()
 	role := pgx.Identifier{p.Project.OwnerRole}.Sanitize()
+	anon := pgx.Identifier{p.Project.DbName + "_anon"}.Sanitize()
+	edge := pgx.Identifier{p.Project.DbName + "_edge"}.Sanitize()
+	service := pgx.Identifier{p.Project.DbName + "_service"}.Sanitize()
+	neighbour := pgx.Identifier{other.Project.OwnerRole}.Sanitize()
 	projectDB := e.SharedAdmin(p.Project.DbName)
 	for _, v := range []struct {
 		name, finding string
@@ -375,10 +397,18 @@ func TestLiveIsolationCheck(t *testing.T) {
 		{"dblink installed", "escape-prone extensions", projectDB, "CREATE EXTENSION dblink", "DROP EXTENSION dblink"},
 		{"PUBLIC may read pg_stat_database", "activity privacy", projectDB, "GRANT SELECT ON pg_catalog.pg_stat_database TO PUBLIC", "REVOKE SELECT ON pg_catalog.pg_stat_database FROM PUBLIC"},
 		{"PUBLIC may run pg_stat_get_backend_dbid", "activity privacy", projectDB, "GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_get_backend_dbid(integer) TO PUBLIC", "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_stat_get_backend_dbid(integer) FROM PUBLIC"},
+		{"PUBLIC may read pg_locks", "activity privacy", projectDB, "GRANT SELECT ON pg_catalog.pg_locks TO PUBLIC", "REVOKE SELECT ON pg_catalog.pg_locks FROM PUBLIC"},
 		// V2 §10.2, §10.4, §10.8.
 		{"a descriptive database name", "metadata leak", admin, "CREATE DATABASE customer_invoices", "DROP DATABASE customer_invoices"},
 		{"no temp_file_limit", "temp_file_limit", admin, "ALTER ROLE " + role + " RESET temp_file_limit", "ALTER ROLE " + role + " SET temp_file_limit = '2GB'"},
 		{"no connection limit", "connection limit", admin, "ALTER ROLE " + role + " CONNECTION LIMIT -1", "ALTER ROLE " + role + " CONNECTION LIMIT 20"},
+		// The backend services' logins, and grants to other projects.
+		{"a request role without temp_file_limit", "temp_file_limit", admin, "ALTER ROLE " + anon + " RESET temp_file_limit", "ALTER ROLE " + anon + " SET temp_file_limit = '2GB'"},
+		{"a request role gains CREATEROLE", "role attributes", admin, "ALTER ROLE " + anon + " CREATEROLE", "ALTER ROLE " + anon + " NOCREATEROLE"},
+		{"the edge may become the service role", "service logins", admin, "GRANT " + service + " TO " + edge, "REVOKE " + service + " FROM " + edge},
+		{"another project's owner may connect", "database grants", admin, "GRANT CONNECT ON DATABASE " + db + " TO " + neighbour, "REVOKE CONNECT ON DATABASE " + db + " FROM " + neighbour},
+		{"a superuser's SECURITY DEFINER function", "security definer", projectDB,
+			"CREATE FUNCTION public.xenibase_escalate() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'", "DROP FUNCTION public.xenibase_escalate()"},
 	} {
 		if _, err := v.conn.Exec(ctx, v.do); err != nil {
 			t.Fatalf("%s: %v", v.name, err)
@@ -399,6 +429,7 @@ func TestLiveIsolationCheck(t *testing.T) {
 	// then switch one back on behind Xenibase's back.
 	team := e.CreateOrg("Isolated team")
 	tp := e.CreateProjectIn("suspended app", team)
+	enableServices(tp.Project.Id)
 	e.Reauth()
 	if code := e.Do("POST", "/api/v1/admin/orgs/"+team.String()+"/suspend", map[string]string{"reason": "test"}, nil); code != http.StatusNoContent {
 		t.Fatalf("suspend: %d", code)
@@ -415,6 +446,18 @@ func TestLiveIsolationCheck(t *testing.T) {
 		t.Errorf("a suspended project that can log in: %s (%s)", op.Status, deref(op.Error))
 	}
 	if _, err := admin.Exec(ctx, "ALTER ROLE "+tRole+" NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	// So must its backend services' logins, which tenant SQL runs as.
+	tAnon := pgx.Identifier{tp.Project.DbName + "_anon"}.Sanitize()
+	if _, err := admin.Exec(ctx, "ALTER ROLE "+tAnon+" LOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	op = run()
+	if op.Status != gen.OperationStatusFailed || !strings.Contains(deref(op.Error), "suspended logins") {
+		t.Errorf("a suspended project whose request role can log in: %s (%s)", op.Status, deref(op.Error))
+	}
+	if _, err := admin.Exec(ctx, "ALTER ROLE "+tAnon+" NOLOGIN"); err != nil {
 		t.Fatal(err)
 	}
 }

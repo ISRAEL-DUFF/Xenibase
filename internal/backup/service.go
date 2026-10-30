@@ -110,6 +110,8 @@ type Service struct {
 	// filesWarned is when FilesTarget last warned that a region's files
 	// share its backup target (by region).
 	filesWarned sync.Map
+	// verify is verifyRestore; tests without agents replace it.
+	verify func(ctx context.Context, p store.Project, b store.Backup, log *jobs.StepLogger) error
 }
 
 // NewService returns a Service and hooks final backups into deletes.
@@ -117,6 +119,7 @@ func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps
 	cfg.setDefaults()
 	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log,
 		CheckSource: outbound.New(db, outbound.Config{Blocked: cfg.SourceBlock, Internal: cfg.SourceInternal}, log).CheckSource}
+	s.verify = s.verifyRestore
 	ps.FinalBackup = s.finalBackup
 	return s
 }

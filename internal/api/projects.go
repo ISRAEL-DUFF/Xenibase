@@ -13,6 +13,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
+	"github.com/israel-duff/xenibase/internal/tenancy"
 )
 
 // ListProjects implements GET /api/v1/projects.
@@ -348,7 +349,11 @@ func (s *Server) requireProjects(w http.ResponseWriter) bool {
 }
 
 func (s *Server) provisionError(w http.ResponseWriter, what string, err error) {
+	// A quota counted again as the create was recorded (tenancy's claim).
+	var qe *tenancy.QuotaError
 	switch {
+	case errors.As(err, &qe):
+		writeQuotaError(w, qe)
 	case errors.Is(err, provision.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, provision.ErrNotFound):

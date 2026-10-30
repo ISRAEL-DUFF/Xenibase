@@ -39,6 +39,125 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The empty-node sweep no longer deletes a server something was just
+  placed on.** It read what was on each node once, then deleted the
+  server, retired its clusters and removed the node, while placement still
+  offered the node (an empty one first, as the emptiest), so a project
+  created in between lost its database. Now the sweep first takes the
+  node out of placement (lifecycle **retiring**, under the node's row
+  lock, which a new project's placement also takes), and on a sweep at
+  least 10 minutes later counts again under the lock: if anything is
+  there, or the node was marked keep, it goes back into service;
+  otherwise its clusters are retired, then its server deleted (retried by
+  the next sweep if that fails), then the node removed.
+- **The capacity budget is a ceiling across proposals.** The budget check
+  added a proposal's server to the nodes' monthly cost only, and a started
+  proposal has no node until its operation runs, so one evaluation over
+  several regions and tiers, or dedicated creations finding no host at
+  the same time, all saw the same headroom and all started: with nodes at
+  1,500 a month and a budget of 3,000, four servers of 1,000 made 5,500.
+  The check now counts approved and provisioning proposals without a node
+  yet, in the same statement as the nodes, and holds a lock across the
+  check and the start, so only what fits starts and the rest wait for
+  approval.
+- **A Free project whose organisation upgrades is no longer paused or
+  archived on the way.** A pause or archive operation queued by the sweep
+  re-checked only the project's activity when it ran, so an organisation
+  that moved to a paid plan (or was suspended) in between had the project
+  paused, or archived and its database dropped, and then woken or restored
+  by the next sweep. Both now check that the organisation is still active,
+  on the Free plan and not on the Unlimited quota plan, and skip
+  otherwise; the archive checks again after its backup, before the
+  database is dropped, and a pause retried after an earlier attempt paused
+  the project wakes it again. The sweep no longer archives the projects of
+  a suspended organisation either.
+- **An archive retry no longer drops a Free project's database on an
+  unverified backup.** The archive backup was marked succeeded before its
+  restore test ran, and deleted only if the test failed and the delete
+  worked. When the server stopped during the test (a deploy, a crash), or
+  the delete failed, the next attempt found the backup and dropped the
+  database on it unverified. A backup now records when its restore test
+  passed (`backups.verified_at`), the archive drops the database only on a
+  verified one, and a retry that finds an unverified backup tests it again
+  first; if that fails the database stays and the project stays paused.
+- **OAuth consent narrows scopes on the server, not just the page.** The
+  consent page's answer was checked only against the scopes the app may
+  ever ask for, so the narrowing to what this request asked for (decision
+  OAuth #4) was the page's alone. `GET /api/v1/oauth/authorize` now also
+  returns `consent`, the validated request sealed for the user (30
+  minutes); approving must send it back, and a scope beyond what the app
+  asked for is refused (`400 invalid`). A consent page left open across the
+  upgrade must be reloaded.
+- **A billing member stays billing.** Accepting an invitation, or a
+  project transfer, turned a billing member into a plain member, so an
+  admin could invite a billing member's address with a project and take
+  their billing access while giving them the project, which only owners
+  may do. An existing member now keeps their role unless the new one is
+  higher (owner, then admin); inviting someone who is already a member is
+  refused (`409 conflict`: change their role or add them to a project
+  instead); and a project transferred into an organisation where one of
+  its members is billing leaves that member, with their database login on
+  it.
+- **A read-scoped token can no longer cut its user off.** Leaving an
+  organisation (`POST /orgs/{org}/leave`) and revoking a token
+  (`DELETE /tokens/{token_id}`) took only the `read` scope, so a leaked
+  read-only CI token or a read-only connected app could make its user
+  leave, losing every token and database login there, or revoke their
+  admin tokens. Both now need `write` from a token (`403
+  insufficient_scope`); any token may still revoke itself, as
+  `xenibase logout` does.
+- **Disconnecting an app no longer leaves tokens it made for itself.** An
+  OAuth app's token with `write` could create a token of its own, which
+  carried no record of the app, so **Disconnect** and disabling the app left
+  it working for up to a year. A token created by a token now records its
+  parent, and revoking a token, however it is revoked, revokes the tokens
+  it made and theirs; and an OAuth app's token can't create tokens at all
+  (`403 token_not_allowed`).
+- **Taking an account back now revokes its API tokens, and a session mints
+  them only after a step-up.** A password reset, a password change and a
+  two-factor reset ended sessions but left every API token working, though
+  the reset email promised to sign you out everywhere; and creating a token
+  or approving a CLI login needed no step-up, so a stolen session cookie
+  could mint a 365-day admin token that outlived the owner's reset, and a
+  `/device?code=…` link was one click from a 90-day token. A password reset
+  and a two-factor reset now revoke every token the user has (the emails
+  say so); a password change does too unless **Also revoke my API tokens**
+  is unticked (`revoke_tokens: false`). `POST /api/v1/tokens` from a
+  session, and approving a device login, now need a step-up in the last
+  10 minutes (`403 reauth_required`; the web UI asks); denying one doesn't.
+- **Invitations are no longer an unlimited mail relay with linked names.**
+  Nothing counted invitations, every account owns an organisation, and the
+  organisation's and inviter's names were linkified in the email, so anyone
+  with an account could send Xenibase-branded email to any address with a
+  link of their choosing beside the real button. An organisation may now
+  send 100 invitations in any 24 hours and an inviter 50 across their
+  organisations (`XENIBASE_INVITES_PER_ORG_DAY`,
+  `XENIBASE_INVITES_PER_USER_DAY`; 0 turns a cap off); past either,
+  inviting answers `429 rate_limited` with `Retry-After`. Names someone
+  chose (the organisation's, the inviter's, a token's, the first name in a
+  greeting) go into email through the new `mail.Inert`, which keeps a web
+  address in them from becoming a link, here or in most mail clients.
+- **The sign-in lockout no longer reveals accounts, grows, and tells the
+  owner.** Five wrong passwords for a registered address answered
+  `429 locked` while an unknown address only ever answered `401`, so five
+  requests told anyone whether an address had an account; the lock was a
+  fixed 15 minutes that reset the count, so someone with the password could
+  try about 480 TOTP codes a day; and the owner was never told. An address
+  without an enabled account is now counted and locked exactly as an
+  account is; each failure after the fifth locks for twice as long as the
+  last, up to a day (`429 locked` now carries `Retry-After`); and the owner
+  is emailed when a lock starts, at most once an hour. Signup in approval
+  and open mode now hashes the password and sends one email for an
+  existing address as for a new one, so it takes as long either way.
+- **Break-glass can no longer become permanent membership.** Under
+  break-glass a platform admin acts as an org admin, and could invite their
+  own address as admin and accept it, keeping the access after the session
+  expired or an owner ended it, with nothing after that flagged
+  `break_glass`. Invitations (to the organisation or a project), role
+  changes and ownership transfers made under break-glass now answer 403
+  `break_glass`; everything else it allows is unchanged. Nobody can invite
+  their own address, and an invitation sent by the account accepting it is
+  refused, so one sent before this release can't be used either.
 - **A new delivering server no longer starts with a full webhook rate.**
   The per-organisation delivery rate was a token bucket in the delivering
   server's memory, so a server that took over after a failover or a restart
@@ -648,8 +767,168 @@ bundle share one version (spec §11.5).
   be deleted while it holds files. A region without one keeps working as
   before, with a warning in the server's log, a launch-check warning and
   the new `files_share_backups` alert.
+- **A wallet debit that failed is no longer booked as paid.** When a
+  transfer's answer was lost, Xenibase looked its key up at the wallet
+  provider and settled the invoice as soon as the provider called the
+  request finished, without reading how it finished: a transfer that ended
+  `failed` marked the invoice paid with no money moved, and only the
+  nightly balance reconciliation showed it. A debit is now booked only when
+  the provider says it completed. One that ended failed (or was declined,
+  cancelled, expired or reversed) is a declined attempt: nothing is posted
+  and dunning starts as for a wallet that is short. A finished request in
+  a status nobody has written down is neither booked nor retried: it stays
+  pending, with an error in the log, for a person to look at. See
+  `docs/iswallet.md`.
+- **A wallet is no longer debited twice for one invoice.** A debit attempt
+  read what the invoice owed before recording itself, and the one pending
+  debit allowed per invoice only kept out an attempt that overlapped while
+  the other was still pending. An attempt that was slow (reading the
+  wallet's balance, say) while another debited and settled the invoice
+  then recorded its own and debited again, and the second amount became
+  credit that could not be refunded to the wallet. The triggers can meet: a
+  deposit, **Pay from wallet** and the daily dunning on every server. The
+  amount is now read again under the invoice's lock in the transaction
+  that records the attempt, and only what is still owed is debited.
+- **A month's invoices that fail to issue are tried again.** The monthly
+  run marked a month done whatever happened, so a draft refused for a
+  stale exchange rate, a provider outage or a database error stayed a
+  draft until the admin issued it by hand, and nothing was collected
+  meanwhile; an organisation whose rating failed got no draft at all. A
+  month is now done only once every organisation's draft is made, and
+  every billing run (every 10 minutes) issues the drafts of past months
+  that aren't held, stopping at the first stale rate or outage rather than
+  asking the provider for each. Turning automatic issue on therefore
+  issues earlier months' unheld drafts too: hold any you mean to issue by
+  hand first. The status page's "Last month's invoices are late" now counts
+  earlier months as well. See `docs/billing.md`.
+- **A deposit whose processing failed is processed again.** A payment
+  event that failed (the provider's verify call timed out, the database
+  refused) was answered 500 so the provider would retry, but the event was
+  already stored, so the retry was answered as a duplicate; the hourly
+  re-query had one try of its own, then skipped it too. A deposit could
+  stay unbooked, with the books short of the wallet. A stored event that
+  failed, or whose processing was cut off, is now processed again when the
+  provider redelivers it, when a re-query lists it, and by every hourly
+  re-query for 30 days; a deposit is still booked only once. A deposit the
+  provider reports as still pending is retried rather than rejected, and
+  an event that couldn't be stored at all is answered 500 rather than 200.
+  Migration 00091 adds `attempts` and `claimed_at` to `payment_events`.
+- **Wallets are no longer debited under superseded debit terms.** The
+  version of the debit terms an owner agreed to is stored so that a change
+  of wording asks again, and the Billing page did ask, but automatic debits
+  only checked that some consent existed and went on under the old
+  wording. They now need a consent to the current version; with an older
+  one an organisation is treated as without consent until an owner agrees
+  again. **Pay from wallet** still works, and each invoice's email says the
+  invoice won't be debited and where to agree.
+- **Rotating the master key no longer takes backend services offline.**
+  The edge and request roles' passwords, the console logins' passwords,
+  the keys that sign file URLs and the pooler admin's salt were derived
+  from the primary master key, so after `-rotate-master-key` the edge was
+  handed new passwords while the poolers and the instances still held the
+  verifiers made from the old ones, and every data API, auth, storage and
+  realtime request failed until the stored verifiers were cleared by hand;
+  signed file URLs stopped verifying too. They are now derived from a
+  derive seed, 32 bytes sealed under the master key in the `derive_seed`
+  settings row, which a rotation re-seals like every other secret, so they
+  do not change. `rotate.Verify` opens the seed and fails when projects
+  exist without one.
+- **The statement reaper ends a statement that catches its cancel.**
+  PL/pgSQL can trap `query_canceled`, so a block that caught it kept
+  running the same statement after the reaper's cancel: every 15 seconds
+  the reaper cancelled it again and logged another row, and a tenant could
+  keep a heavy statement running on a shared cluster indefinitely. The
+  reaper now records the backend and the statement's start with each
+  cancel, and on a later pass terminates a backend still running a
+  statement it cancelled. The project's reaped log shows it as
+  `statement_terminated` ("statement ended").
+- **The isolation check now audits the backend services' logins and every
+  database grant.** It looked at the owner, console and members' logins
+  only, so one of the five backend-service logins tenant SQL runs as on
+  the shared tier (`<db>_edge`, `_anon`, `_user`, `_service`,
+  `_auth_hook`) could keep `LOGIN` while its organisation was suspended,
+  lack its connection limit or `temp_file_limit`, gain an attribute or
+  join a predefined role, and the check passed; and it asked only whether
+  `PUBLIC` could connect, so `CONNECT` on one project's database granted
+  to another project's role passed too. The check now covers the five
+  logins (which must hold no role), requires every holder of `CONNECT` or
+  `TEMPORARY` on a project database to be one of that project's roles,
+  and, as V2 §10.4 asks, reports `SECURITY DEFINER` functions owned by
+  roles other than the tenant's, apart from Xenibase's own in the `xb_*`
+  and `xenibase` schemas with a pinned `search_path`. The live probes also
+  try a cross-project grant.
+- **One tenant can no longer fill a shared node's disk between size
+  samples.** Storage enforcement used only the 5-minute size sample, and
+  the soft lock lets a tenant write in a read-write transaction, so a
+  tenant at 99% could insert at disk speed for up to six minutes before
+  the hard lock, tens of gigabytes past its limit. Projects at the warning
+  or the soft lock are now measured with `pg_database_size` on every
+  enforcement pass (each minute); one that reaches 120%, or grows by 5% of
+  its limit while soft-locked, is hard-locked at once. A hard lock now
+  lifts only when the project is back under its limit (it used to drop to
+  the soft lock under 120%, letting the tenant write again).
+- **Shared-cluster tenants can no longer see each other's locks.**
+  `pg_locks` (over `pg_lock_status()`) stayed readable by `PUBLIC` after
+  the activity views were hidden, and lists every lock in the cluster with
+  its database, relation and backend, so a tenant could tell which other
+  projects were active, with how many sessions, and what they touched.
+  `SELECT` on `pg_locks` and `pg_prepared_xacts` and `EXECUTE` on
+  `pg_lock_status`, `pg_blocking_pids`, `pg_safe_snapshot_blocking_pids`,
+  `pg_isolation_test_session_is_blocked` and `pg_prepared_xact` are now
+  revoked from `PUBLIC` in every shared project database, and the
+  isolation check reports any of them readable. Query insights' locks view
+  is unchanged.
+- **Creates sent at once no longer go past the projects and branches
+  quotas or the dedicated allowance.** The quota was counted before the
+  create, outside the transaction that recorded it, so N requests sent
+  together each saw the same count and all succeeded: a Personal
+  organisation limited to 10 projects could hold 10 + N, and the same went
+  for branches, detached branches, dedicated projects, promotions and read
+  replicas. Each of these now counts again in the transaction that records
+  it, holding the organisation's row (`SELECT … FOR UPDATE`), and a create
+  past the limit answers `409 quota_exceeded`. Read replicas, and a queued
+  promotion's target instance, now count towards the dedicated allowance
+  (a replica as an instance the size of its primary); they were not
+  counted, so replicas could be added whatever the allowance.
+- **Suspension and hard locks now switch off the logins a dedicated
+  project's owner created.** With role management on, the owner's own
+  logins (an app login, say, recorded in `project_owned_logins`) were left
+  out of the logins a suspension or a hard storage lock switches off, so
+  they could still log in at the instance from the private network, and
+  sessions opened before kept running. They are now switched off and their
+  sessions ended with the project's other logins, and switched back on
+  with them; the role sync keeps them recorded meanwhile.
 
 ### Upgrading
+- Migration 00094 adds the node lifecycle `retiring`, with
+  `nodes.retiring_at` and `nodes.retiring_from`: an empty node out of
+  placement whose server the next sweep deletes. The API's node
+  `lifecycle` can now be `retiring`.
+- Migration 00093 adds `backups.verified_at`, when a backup's restore test
+  passed. Earlier backups have none; an archive in progress at the upgrade
+  tests its backup again before dropping the database.
+- Migration 00088 adds `api_tokens.parent_id` and a trigger that revokes a
+  token's descendants with it. Tokens created by other tokens before the
+  upgrade have no recorded parent: to find any an OAuth app made for
+  itself, look under Organisation → API tokens for tokens created via
+  `api` by a user with a connected app, and revoke them.
+- A password reset, a two-factor reset, and (by default) a password change
+  now revoke every API token the user has, including the CLI's and
+  connected apps': CI jobs using a revoked token fail with
+  `401 invalid_token` until given a new one. A password change keeps them
+  with `"revoke_tokens": false` (or by unticking the box under Account →
+  Security). Creating a token from a browser session, or approving
+  `xenibase login`, asks for the password and code when the last step-up is
+  more than 10 minutes old; scripts that create tokens with a session
+  cookie call `POST /api/v1/auth/reauth` first.
+- Organisation invitations are capped at 100 per organisation and 50 per
+  inviter in any 24 hours. An installation that onboards more people a
+  day raises `XENIBASE_INVITES_PER_ORG_DAY` and
+  `XENIBASE_INVITES_PER_USER_DAY` (0 turns a cap off).
+- Migration 00087 adds `users.lockout_notified_at` and the
+  `login_address_failures` table. Sign-in locks now double with each
+  further failure up to a day instead of staying at 15 minutes, and their
+  owners are emailed.
 - Backend services' schema version 7 runs on every enabled project with its
   next reconcile (within seconds of the upgrade). It revokes the request
   roles' `EXECUTE` on functions an extension installed; the data API no
@@ -690,6 +969,35 @@ bundle share one version (spec §11.5).
   `files_share_backups` alert fires for each region with backend services:
   give each a files target, copying `files/` across around the switch
   (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
+- The first server to start makes the derive seed. On an install with
+  projects it is the current master key, so every derived password and URL
+  key stays as it is; a new install gets random bytes. Upgrade before you
+  rotate the master key. A rotation run before any server of this release
+  started makes the seed from the old key itself, and refuses when
+  `XENIBASE_MASTER_KEY_PREVIOUS` lists more than one key, since it cannot
+  tell which one the servers used (`docs/operations.md`, "Secrets").
+- Migration 00089 adds `reaped_sessions.pid` and `started_at` and the
+  `statement_terminated` kind, which `GET /api/v1/projects/{id}/reaped`
+  can now return. A statement cancelled before the upgrade has no `pid`
+  recorded, so if it caught the cancel it is cancelled once more, then
+  ended on the following pass.
+- The isolation check audits more (the backend-service logins, every
+  grantee of `CONNECT` and `TEMPORARY`, `SECURITY DEFINER` functions), so
+  the first check after the upgrade can fail on something earlier checks
+  missed, such as a grant made by hand, and raise `isolation_check_failed`.
+  Its log names each finding.
+- Migration 00090 queues `apply_settings` for each active shared project,
+  which revokes `pg_locks` and the lock functions from `PUBLIC` in its
+  database (a project with an exclusive operation pending gets it from its
+  next `apply_settings`). Tenant SQL, including the SQL console, that
+  reads `pg_locks` or calls `pg_blocking_pids` on the shared tier now
+  answers "permission denied"; the project's Query insights → Locks view
+  shows its blocking chains instead.
+- Read replicas now count towards an organisation's dedicated allowance,
+  so the Usage & quotas page shows more in use where there are replicas,
+  and an organisation already at its allowance gets new replicas and
+  dedicated projects refused (or a promotion turned into a request) until
+  the allowance is raised.
 
 ## v4.2.4
 

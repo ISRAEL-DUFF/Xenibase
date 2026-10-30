@@ -569,6 +569,11 @@ func (s *Service) Detach(ctx context.Context, p DetachParams) (store.Project, er
 				return err
 			}
 		}
+		// The projects quota again, under the organisation's lock, so
+		// branches detached in parallel cannot all pass.
+		if err := s.projects.Claim(ctx, tx, provision.Claim{OrgID: b.OrgID, Project: true}); err != nil {
+			return err
+		}
 		out, err = q.DetachBranch(ctx, b.ID)
 		return err
 	})
@@ -628,7 +633,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 			Title:     fmt.Sprintf("Branch %s expires soon", b.Name),
 			Blocks: []mail.Block{
 				mail.P("Hello,"),
-				mail.P(fmt.Sprintf("Your branch %q of %s will be deleted on %s.", b.Name, b.ParentName, b.ExpiresAt.UTC().Format("2 January 2006 at 15:04 MST"))),
+				mail.P(fmt.Sprintf("Your branch %q of %s will be deleted on %s.", mail.Inert(b.Name), mail.Inert(b.ParentName), b.ExpiresAt.UTC().Format("2 January 2006 at 15:04 MST"))),
 				mail.P("To keep it a little longer, extend it from the branches page, or with `xenibase branch extend`. To keep it for good, detach it from its parent."),
 				mail.Button("Open the branches", fmt.Sprintf("%s/projects/%s/branches", s.cfg.PublicURL, b.ID)),
 			},

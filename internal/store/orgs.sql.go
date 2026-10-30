@@ -13,6 +13,53 @@ import (
 	"github.com/google/uuid"
 )
 
+const countInviterInvitationsSince = `-- name: CountInviterInvitationsSince :one
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE invited_by = $1 AND kind = 'org' AND created_at >= $2::timestamptz
+`
+
+type CountInviterInvitationsSinceParams struct {
+	InvitedBy uuid.UUID
+	Since     time.Time
+}
+
+type CountInviterInvitationsSinceRow struct {
+	Sent   int32
+	Oldest time.Time
+}
+
+// tenant: system - one inviter's organisation invitations in every organisation, for the daily cap.
+func (q *Queries) CountInviterInvitationsSince(ctx context.Context, arg CountInviterInvitationsSinceParams) (CountInviterInvitationsSinceRow, error) {
+	row := q.db.QueryRow(ctx, countInviterInvitationsSince, arg.InvitedBy, arg.Since)
+	var i CountInviterInvitationsSinceRow
+	err := row.Scan(&i.Sent, &i.Oldest)
+	return i, err
+}
+
+const countOrgInvitationsSince = `-- name: CountOrgInvitationsSince :one
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE org_id = $1 AND created_at >= $2::timestamptz
+`
+
+type CountOrgInvitationsSinceParams struct {
+	OrgID *uuid.UUID
+	Since time.Time
+}
+
+type CountOrgInvitationsSinceRow struct {
+	Sent   int32
+	Oldest time.Time
+}
+
+// Invitations an organisation sent since a time, and the oldest of them
+// (the daily cap).
+func (q *Queries) CountOrgInvitationsSince(ctx context.Context, arg CountOrgInvitationsSinceParams) (CountOrgInvitationsSinceRow, error) {
+	row := q.db.QueryRow(ctx, countOrgInvitationsSince, arg.OrgID, arg.Since)
+	var i CountOrgInvitationsSinceRow
+	err := row.Scan(&i.Sent, &i.Oldest)
+	return i, err
+}
+
 const countOrgOwners = `-- name: CountOrgOwners :one
 SELECT count(*) FROM org_members WHERE org_id = $1 AND role = 'owner'
 `
@@ -527,7 +574,7 @@ INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, $3)
 ON CONFLICT (org_id, user_id) DO UPDATE SET role = CASE
   WHEN org_members.role = 'owner' OR EXCLUDED.role = 'owner' THEN 'owner'
   WHEN org_members.role = 'admin' OR EXCLUDED.role = 'admin' THEN 'admin'
-  ELSE 'member' END
+  ELSE org_members.role END
 `
 
 type InsertOrgMemberParams struct {
@@ -536,7 +583,9 @@ type InsertOrgMemberParams struct {
 	Role   string
 }
 
-// Adds a member; an existing member keeps the higher of the two roles.
+// Adds a member; an existing member keeps their role unless the new one is
+// higher (owner, then admin). Billing and member are not ranked: a billing
+// member stays billing, and a member doesn't become one.
 func (q *Queries) InsertOrgMember(ctx context.Context, arg InsertOrgMemberParams) error {
 	_, err := q.db.Exec(ctx, insertOrgMember, arg.OrgID, arg.UserID, arg.Role)
 	return err
@@ -607,7 +656,7 @@ func (q *Queries) ListInvitationsForEmail(ctx context.Context, email string) ([]
 }
 
 const listOrgBackups = `-- name: ListOrgBackups :many
-SELECT b.id, b.project_id, b.kind, b.object_key, b.size_bytes, b.checksum, b.started_at, b.finished_at, b.status, b.expires_at, b.storage_target_id, b.operation_id, b.key_wrapped, b.error, b.deleted_at, b.encryption_key_id, b.walg_prefix, b.copy_of, b.copy_target_id, b.copy_status, b.copied_at, b.copy_error, p.name AS project_name, (p.deleted_at IS NOT NULL)::bool AS project_deleted,
+SELECT b.id, b.project_id, b.kind, b.object_key, b.size_bytes, b.checksum, b.started_at, b.finished_at, b.status, b.expires_at, b.storage_target_id, b.operation_id, b.key_wrapped, b.error, b.deleted_at, b.encryption_key_id, b.walg_prefix, b.copy_of, b.copy_target_id, b.copy_status, b.copied_at, b.copy_error, b.verified_at, p.name AS project_name, (p.deleted_at IS NOT NULL)::bool AS project_deleted,
        t.name AS target_name, t.org_id AS target_org_id, k.fingerprint AS key_fingerprint
 FROM backups b JOIN projects p ON p.id = b.project_id
 LEFT JOIN storage_targets t ON t.id = b.storage_target_id
@@ -652,6 +701,7 @@ type ListOrgBackupsRow struct {
 	CopyStatus      *string
 	CopiedAt        *time.Time
 	CopyError       *string
+	VerifiedAt      *time.Time
 	ProjectName     string
 	ProjectDeleted  bool
 	TargetName      *string
@@ -700,6 +750,7 @@ func (q *Queries) ListOrgBackups(ctx context.Context, arg ListOrgBackupsParams) 
 			&i.CopyStatus,
 			&i.CopiedAt,
 			&i.CopyError,
+			&i.VerifiedAt,
 			&i.ProjectName,
 			&i.ProjectDeleted,
 			&i.TargetName,

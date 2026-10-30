@@ -887,7 +887,7 @@ func (q *Queries) RecordAvailability(ctx context.Context, arg RecordAvailability
 }
 
 const regionPoolerHosts = `-- name: RegionPoolerHosts :many
-SELECT id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group FROM nodes WHERE role = 'pooler' AND status <> 'removed' AND region = $1 ORDER BY name
+SELECT id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from FROM nodes WHERE role = 'pooler' AND status <> 'removed' AND region = $1 ORDER BY name
 `
 
 // tenant: system - platform infrastructure (a region's pooler hosts).
@@ -933,6 +933,8 @@ func (q *Queries) RegionPoolerHosts(ctx context.Context, region string) ([]Node,
 			&i.Keep,
 			&i.FailureDomain,
 			&i.PlacementGroup,
+			&i.RetiringAt,
+			&i.RetiringFrom,
 		); err != nil {
 			return nil, err
 		}

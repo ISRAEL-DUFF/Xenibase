@@ -22,9 +22,18 @@ platform admin can reset your two-factor after confirming who you are, and you
 sign in with your password until you turn it on again. Platform admins and
 support staff always have it on.
 
+Five wrong passwords or codes in a row lock signing in for 15 minutes, and
+each further wrong attempt after that for twice as long, up to a day; your
+right password works again once the lock ends. You are emailed when it
+locks: if it wasn't you, reset your password and turn on two-factor sign-in.
+
 **Account** lists your sessions (revoke any), lets you change your password
 and name, and shows new recovery codes (after confirming your password and
-code). A password reset by email signs you out everywhere.
+code). A password reset by email signs you out everywhere and revokes your
+API tokens; so does a two-factor reset, and so does changing your password
+unless you untick **Also revoke my API tokens**. Creating a token, or
+approving the CLI's login, asks for your password and code if you haven't
+confirmed them in the last 10 minutes.
 
 ### Getting around
 
@@ -70,7 +79,10 @@ Org owners and admins are admins of every project in the organisation.
 optionally project roles; **Project Settings → Members** adds someone to one project
 (they join the organisation as a member). Invitations last 7 days and can
 be revoked until they're accepted. If the address already has an account,
-accepting just adds the membership.
+accepting just adds the membership. Someone already in the organisation
+isn't invited again: change their role, or add them to a project, instead. An organisation can send 100
+invitations in any 24 hours, and each person 50 (the platform admin may
+change both); past that, wait for the time the error gives.
 
 You can **leave** an organisation yourself (Organisation → Leave), unless
 you are its last owner: transfer ownership first.
@@ -208,8 +220,10 @@ storage:
 - at **90%** of a project's limit you get an email and a banner;
 - at **100%** it is read-only by default (apps can still delete inside
   `BEGIN READ WRITE`; the console works, scheduled jobs' writes fail);
-- at **120%** apps can't connect, but the console still works so you can
-  delete data and **Reclaim space**.
+- at **120%**, or if it keeps growing while read-only (by 5% of the
+  limit), apps can't connect, but the console still works so you can
+  delete data and **Reclaim space**. Apps can connect again once the
+  project is back under its limit.
 
 Statements running over 10 minutes, and transactions idle over 5, are
 ended on the shared tier.
@@ -271,7 +285,8 @@ the organisation, and can also accept them when changing plan. Details:
 - The platform admin can't open your databases, console or backups through
   Xenibase except with **break-glass** access: at most 4 hours, with a reason,
   emailed to every owner, shown as a banner while it lasts, and marked in
-  your audit log. Any owner can end it. It is an audit control, not
+  your audit log. Any owner can end it, and it can't invite anyone or
+  change roles, so it can't become lasting access. It is an audit control, not
   encryption: someone with root on the servers can read the data.
 - **Deleting an organisation** (owners, Organisation → Delete) takes each
   project's final backup and gives a 7-day grace period in which an owner

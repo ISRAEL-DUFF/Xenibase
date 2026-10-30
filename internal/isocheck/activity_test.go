@@ -102,6 +102,11 @@ func TestActivityPrivacy(t *testing.T) {
 		`SELECT pg_stat_get_backend_dbid(1)`,
 		`SELECT pg_stat_get_backend_userid(1)`,
 		`SELECT count(*) FROM pg_stat_get_backend_idset()`,
+		`SELECT count(*) FROM pg_locks`,
+		`SELECT count(*) FROM pg_lock_status()`,
+		`SELECT pg_blocking_pids(pg_backend_pid())`,
+		`SELECT pg_safe_snapshot_blocking_pids(pg_backend_pid())`,
+		`SELECT count(*) FROM pg_prepared_xacts`,
 	} {
 		var v any
 		err := tenant.QueryRow(ctx, q).Scan(&v)

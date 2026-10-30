@@ -93,8 +93,10 @@ storage before it can be transferred to another organisation.
 
 Every shared cluster is checked nightly against the tenant-isolation
 checklist (Settings → Tenant isolation, **Check now** to run it at once):
-cluster settings and `pg_hba.conf`, every project's role and database, and
-two throwaway tenants that try to reach each other, discover other
+cluster settings and `pg_hba.conf`, every project's roles (its backend
+services' logins too), who may connect to its database, and its database
+(including `SECURITY DEFINER` functions that run as anyone but the
+tenant), and two throwaway tenants that try to reach each other, discover other
 projects' names, get round their quotas, or log in while suspended. See
 [security review](security-review.md).
 
@@ -132,7 +134,8 @@ docker compose exec xenibase-server xenibase-server admin reset-password you@exa
 
 `promote` also approves, verifies and re-enables the account (it need not
 have an authenticator yet; its next sign-in sets one up). `reset-2fa` removes
-the authenticator and recovery codes: a platform admin sets up a new one at the
+the authenticator and recovery codes, ends the user's sessions and revokes
+their API tokens: a platform admin sets up a new one at the
 next sign-in, and anyone else signs in with a password until they turn
 two-factor on again (Account → Security).
 `reset-password` prints a one-hour, single-use link for when email doesn't
@@ -203,13 +206,20 @@ Shared-tier projects are measured every minute:
 - **90%** of the project's storage limit: a warning email and banner.
 - **100%**: read-only by default. Apps can still delete in a read-write
   transaction (`BEGIN READ WRITE`), and the SQL console works.
-- **120%** (or 100% with the node's disk 95% full): apps cannot log in.
-  The console and table browser still work; delete data there, then
-  **Reclaim space** (Project Settings → Database) to give the space back.
+- **120%** (or 100% with the node's disk 95% full), or growth of 5% of
+  the limit while read-only (writes in read-write transactions): apps
+  cannot log in. The console and table browser still work; delete data
+  there, then **Reclaim space** (Project Settings → Database) to give the
+  space back.
 
-Locks lift at the next check once the project is under the limit.
-Statements running over 10 minutes are cancelled and transactions idle
-over 5 minutes are ended; the project's Metrics page lists them.
+Projects at 90% or over are measured on every check (every minute), not
+only from the 5-minute size sample, so one that keeps writing is locked
+within a minute. Locks lift at the next check once the project is under
+the limit; a project whose logins are off stays so until then.
+Statements running over 10 minutes are cancelled, a statement that keeps
+running after its cancel (PL/pgSQL can catch it) is ended with its session
+15 seconds later, and transactions idle over 5 minutes are ended; the
+project's Metrics page lists them.
 
 Dedicated instances beyond an org's allowance become requests (Dedicated
 requests) for you to approve or reject. An org can be given its own
@@ -226,7 +236,10 @@ can be turned off on its own, without suspending (see Outbound traffic).
 To look inside an org (a support case), open a **break-glass** session
 with a reason and a length (up to 4 hours). You act as an org admin; its
 owners and admins are emailed, every action is in its audit log marked
-break-glass, and they see a banner. End it when you are done.
+break-glass, and they see a banner. End it when you are done. A
+break-glass session can't invite anyone (you included), change a
+member's organisation or project role, or transfer ownership: it grants
+nothing that outlives it, so ask an owner for those.
 
 Owners can delete an organisation (Organisation → Delete). It is
 read-only for 7 days and can be cancelled; then each project gets a final
@@ -427,6 +440,17 @@ organisations allows the host.
   The rotation re-encrypts everything in one transaction and checks the new
   key alone opens it all; on any error nothing changes. Operators sign in
   again afterwards. Back up the new `.env`.
+- The passwords Xenibase derives instead of storing (the backend services'
+  edge and request logins, the console logins, the keys that sign file
+  URLs, the pooler admin's salt) come from a **derive seed**, sealed under
+  the master key in the `derive_seed` settings row. A rotation re-seals it,
+  so they do not change and backend services keep working. The first
+  server of this release to start makes the seed: on an install with
+  projects it is the master key in use then, so nothing changes on upgrade
+  either. If you
+  rotate before any server of this release has started, the rotation makes
+  the seed from the old key, and needs `XENIBASE_MASTER_KEY_PREVIOUS` to
+  hold that one key only.
 - Releases before this one skipped part of what is sealed (per-project
   backup keys, Patroni secrets, webhook secrets and headers, scheduled jobs,
   projects' auth SMTP settings and queued messages, device sign-in tokens,

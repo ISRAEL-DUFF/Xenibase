@@ -21,7 +21,7 @@ const (
 	OutcomeDuplicate = "duplicate"
 	OutcomeUnmatched = "unmatched" // verified money with no org to attribute it to
 	OutcomeRejected  = "rejected"  // failed re-verification
-	OutcomeFailed    = "failed"    // an error while processing; retried by re-query
+	OutcomeFailed    = "failed"    // an error while processing; processed again (HandleEvent, Requery)
 	OutcomeIgnored   = "ignored"
 )
 
@@ -74,8 +74,11 @@ func (s *Service) EnsureVirtualAccount(ctx context.Context, orgID uuid.UUID) (st
 // ---- Events ------------------------------------------------------------------------
 
 // HandleEvent records a provider event and acts on it (V3 §3.4.8): it is
-// stored once (duplicates are no-ops), and money is posted only after the
-// provider's verify endpoint confirms it.
+// stored once, and money is posted only after the provider's verify
+// endpoint confirms it. An event stored before is a duplicate, unless its
+// processing failed (or was cut off): then it is processed again, which
+// posts nothing twice (a payment is recorded once per provider reference,
+// with its ledger posting in the same transaction).
 func (s *Service) HandleEvent(ctx context.Context, provider string, ev Event) (string, error) {
 	q := store.New(s.db)
 	raw := ev.Raw
@@ -97,11 +100,19 @@ func (s *Service) HandleEvent(ctx context.Context, provider string, ev Event) (s
 		Provider: provider, ProviderEventID: ev.ID, Kind: ev.Kind, ProviderRef: pref, AmountMinor: amt, Currency: cur, Payload: raw,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return OutcomeDuplicate, nil
+		row, err = q.ClaimPaymentEvent(ctx, store.ClaimPaymentEventParams{Provider: provider, ProviderEventID: ev.ID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return OutcomeDuplicate, nil
+		}
 	}
 	if err != nil {
 		return "", err
 	}
+	return s.finishEvent(ctx, row, provider, ev)
+}
+
+// finishEvent processes a stored (or claimed) event and records the outcome.
+func (s *Service) finishEvent(ctx context.Context, row store.PaymentEvent, provider string, ev Event) (string, error) {
 	outcome, perr := s.processEvent(ctx, provider, ev)
 	var msg *string
 	if perr != nil {
@@ -111,10 +122,50 @@ func (s *Service) HandleEvent(ctx context.Context, provider string, ev Event) (s
 			outcome = OutcomeFailed
 		}
 	}
-	if err := q.FinishPaymentEvent(ctx, store.FinishPaymentEventParams{ID: row.ID, Outcome: &outcome, Error: msg}); err != nil {
+	if err := store.New(s.db).FinishPaymentEvent(ctx, store.FinishPaymentEventParams{ID: row.ID, Outcome: &outcome, Error: msg}); err != nil {
 		return outcome, err
 	}
 	return outcome, perr
+}
+
+// retryFailedEvents processes again each of a provider's events of the
+// last 30 days that failed (or whose processing was cut off), whatever the
+// window the re-query lists: the provider's own retries and the re-query
+// may both have come and gone. It returns how many were posted.
+// Events in tried (keyed "<provider> <event id>") are skipped.
+func (s *Service) retryFailedEvents(ctx context.Context, provider string, tried map[string]bool) (int, error) {
+	q := store.New(s.db)
+	rows, err := q.RetryablePaymentEvents(ctx, provider)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	var errs []error
+	for _, r := range rows {
+		if tried[provider+" "+r.ProviderEventID] {
+			continue
+		}
+		row, err := q.ClaimPaymentEvent(ctx, store.ClaimPaymentEventParams{Provider: r.Provider, ProviderEventID: r.ProviderEventID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // taken (or finished) by another server
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		ev := Event{ID: row.ProviderEventID, Kind: row.Kind, ProviderRef: deref0(row.ProviderRef), Currency: deref0(row.Currency), Raw: row.Payload}
+		if row.AmountMinor != nil {
+			ev.AmountMinor = *row.AmountMinor
+		}
+		out, err := s.finishEvent(ctx, row, provider, ev)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("event %d: %w", row.ID, err))
+		}
+		if out == OutcomePosted {
+			n++
+		}
+	}
+	return n, errors.Join(errs...)
 }
 
 func (s *Service) processEvent(ctx context.Context, provider string, ev Event) (string, error) {
@@ -159,6 +210,10 @@ func (s *Service) settleVerified(ctx context.Context, p PaymentProvider, provide
 		return err
 	}
 	switch {
+	case tx.Status == TxPending:
+		// Not settled at the provider yet: a failure to process now, so it
+		// is tried again, not a rejection.
+		return fmt.Errorf("the provider says transaction %s is still pending", providerRef)
 	case tx.Status != TxSucceeded:
 		return rejectedError{fmt.Sprintf("the provider says %s", tx.Status)}
 	case !strings.EqualFold(tx.Currency, "NGN"):
@@ -183,12 +238,16 @@ func (s *Service) settleVerified(ctx context.Context, p PaymentProvider, provide
 // ---- Missed events ---------------------------------------------------------------
 
 // Requery asks each provider for its transactions in [from, to) and posts
-// any successful one not yet recorded, and resolves wallet debits still pending
+// any successful one not yet recorded, processes again the events of the
+// last 30 days that failed, and resolves wallet debits still pending
 // (V3 §3.4.8: hourly for recent ones, nightly for the previous day).
 func (s *Service) Requery(ctx context.Context, from, to time.Time) (int, error) {
 	q := store.New(s.db)
 	n := 0
 	var errs []error
+	// Each event is processed at most once a run: a transaction listed twice,
+	// or one that just failed, waits for the next run.
+	tried := map[string]bool{}
 	for name, p := range s.providers {
 		txs, err := p.ListTransactions(ctx, from, to)
 		if err != nil {
@@ -206,7 +265,12 @@ func (s *Service) Requery(ctx context.Context, from, to time.Time) (int, error) 
 			if tx.Channel == ChannelTransfer {
 				kind = EventTransferReceived
 			}
-			out, err := s.HandleEvent(ctx, name, Event{ID: "requery:" + tx.ProviderRef, Kind: kind, ProviderRef: tx.ProviderRef,
+			id := "requery:" + tx.ProviderRef
+			if tried[name+" "+id] {
+				continue
+			}
+			tried[name+" "+id] = true
+			out, err := s.HandleEvent(ctx, name, Event{ID: id, Kind: kind, ProviderRef: tx.ProviderRef,
 				AmountMinor: tx.AmountMinor, Currency: tx.Currency})
 			if err != nil {
 				errs = append(errs, err)
@@ -215,6 +279,14 @@ func (s *Service) Requery(ctx context.Context, from, to time.Time) (int, error) 
 				n++
 			}
 		}
+	}
+	// Events that failed to process, outside the window too.
+	for name := range s.providers {
+		posted, err := s.retryFailedEvents(ctx, name, tried)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+		n += posted
 	}
 	if s.wallets == nil {
 		return n, errors.Join(errs...)

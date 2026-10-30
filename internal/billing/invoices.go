@@ -305,29 +305,36 @@ func invoiceTxn(inv store.Invoice, lines []store.InvoiceLine, by *uuid.UUID) (Tx
 	return t, len(t.Entries) >= 2
 }
 
-// IssueDue issues month's drafts that aren't held, once its usage is
-// recorded through the end of the month. It is a no-op when the billing
-// settings turn automatic issue off.
+// IssueDue issues the drafts that aren't held of month and of every month
+// before it, once month's usage is recorded through its end: a draft that
+// failed to issue (a stale rate, an outage, an error) is tried again on each
+// run until it is issued or held. It is a no-op when the billing settings
+// turn automatic issue off.
 func (s *Service) IssueDue(ctx context.Context, month time.Time) (int, error) {
 	set, err := s.Settings(ctx)
 	if err != nil || !set.AutoIssue {
 		return 0, err
 	}
-	drafts, err := store.New(s.db).DraftsForPeriod(ctx, pgDate(MonthStart(month)))
+	drafts, err := store.New(s.db).DraftsDue(ctx, pgDate(MonthStart(month)))
 	if err != nil {
 		return 0, err
 	}
 	n := 0
 	var errs []error
-	for _, d := range drafts {
-		if d.Held {
-			continue
-		}
-		if _, err := s.Issue(ctx, d.ID, nil); err != nil {
+	for i, d := range drafts {
+		_, err := s.Issue(ctx, d.ID, nil)
+		switch {
+		case err == nil:
+			n++
+		case errors.Is(err, ErrConflict):
+			// Issued meanwhile (another server's run, or the admin).
+		case errors.Is(err, ErrStaleRate) || errors.Is(err, ErrUnavailable):
+			// No usable rate for one is none for the rest: the next run
+			// tries them all again, without asking the provider for each.
+			return n, errors.Join(append(errs, fmt.Errorf("invoice for org %s, and %d more left as drafts: %w", d.OrgID, len(drafts)-i-1, err))...)
+		default:
 			errs = append(errs, fmt.Errorf("invoice for org %s: %w", d.OrgID, err))
-			continue
 		}
-		n++
 	}
 	return n, errors.Join(errs...)
 }
@@ -366,6 +373,9 @@ func (s *Service) mailInvoice(ctx context.Context, inv store.Invoice) {
 	}
 	if inv.WhtExpectedMinor > 0 {
 		c.Blocks = append(c.Blocks, mail.P(fmt.Sprintf("If you withhold tax, you may deduct %s. Please send us the WHT credit note.", Naira(inv.WhtExpectedMinor))))
+	}
+	if a, err := store.New(s.db).GetBillingAccount(ctx, inv.OrgID); err == nil && inv.TotalMinor > 0 && walletID(a) != "" && ConsentOf(a) != nil && !debitsAllowed(a) {
+		c.Blocks = append(c.Blocks, mail.P(DebitTermsChangedNotice))
 	}
 	c.Blocks = append(c.Blocks, mail.Button("View and download the invoice", fmt.Sprintf("%s/org/billing?org=%s&invoice=%s", s.publicURL, inv.OrgID, inv.ID)))
 	s.notifyContent(ctx, inv.OrgID, "billing.invoice", fmt.Sprintf("Xenibase invoice %s for %s", *inv.Number, month), c)
@@ -540,7 +550,8 @@ func (s *Service) usageRecordedThrough(ctx context.Context) (time.Time, error) {
 // Invoicing is the monthly cycle (V3 §3.6): on the last day of a month its
 // drafts are generated; once the next month starts and usage is recorded
 // through the end of the month, drafts are re-rated with the full month and
-// issued (unless held). Months that were missed are caught up.
+// issued (unless held). A month whose drafting failed is drafted again on
+// the next run, and drafts that failed to issue are issued on a later one.
 func (s *Service) Invoicing(ctx context.Context) error {
 	now := s.Now().UTC()
 	q := store.New(s.db)
@@ -556,16 +567,20 @@ func (s *Service) Invoicing(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// The month is done once every organisation's draft is made (or
+		// found to have nothing to bill); until then each run drafts it again.
 		if !done {
 			if _, err := s.DraftAll(ctx, prev); err != nil {
 				errs = append(errs, err)
-			}
-			if _, err := s.IssueDue(ctx, prev); err != nil {
+			} else if err := q.PutSetting(ctx, store.PutSettingParams{Key: invoicedKey, Value: mustJSON(prev)}); err != nil {
 				errs = append(errs, err)
 			}
-			if err := q.PutSetting(ctx, store.PutSettingParams{Key: invoicedKey, Value: mustJSON(prev)}); err != nil {
-				errs = append(errs, err)
-			}
+		}
+		// Issuing is not part of being done: every run issues what is left
+		// of this month and earlier ones, so a draft that failed to issue
+		// is tried again.
+		if _, err := s.IssueDue(ctx, prev); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	// The current month's drafts on its last day, refreshed each run.
@@ -581,7 +596,7 @@ const invoicedKey = "billing.invoiced_through"
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 
-// monthDone reports whether month was already drafted and issued.
+// monthDone reports whether every organisation's draft for month was made.
 func (s *Service) monthDone(ctx context.Context, month time.Time) (bool, error) {
 	raw, err := store.New(s.db).GetSetting(ctx, invoicedKey)
 	if errors.Is(err, pgx.ErrNoRows) {

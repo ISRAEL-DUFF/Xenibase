@@ -53,7 +53,15 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrNoCapacity means no shared instance can take a new project.
 	ErrNoCapacity = errors.New("no shared cluster available")
+
+	// errNodeRetiring: the node picked for a project was taken out of
+	// placement (by the empty-node sweep) before the project was recorded.
+	errNodeRetiring = errors.New("the node is being retired")
 )
+
+// nodeRetiring is the lifecycle of a node the empty-node sweep has taken
+// out of placement (capacity automation).
+const nodeRetiring = "retiring"
 
 // Config holds the connection details handed to clients and those the
 // control plane uses to smoke-test the poolers.
@@ -145,6 +153,13 @@ type Service struct {
 	// false while its storage is hard-locked or its organisation is
 	// suspended (V2 §10.4, §10.8). The tenancy service sets it.
 	LoginGate func(ctx context.Context, p store.Project) (bool, error)
+	// QuotaGate, when set, re-checks an organisation's quotas inside the
+	// transaction that records what they limit (Claim): a new project or
+	// branch, a dedicated instance, a read replica. It locks the
+	// organisation's row first, so creates sent in parallel cannot all
+	// pass checks made before them (V2 §10.3). The tenancy service sets
+	// it.
+	QuotaGate func(ctx context.Context, tx pgx.Tx, c Claim) error
 	// DatabaseRecreated, when set, hears that p's database was dropped and
 	// made again empty (a restore in place, a branch reset, a move's
 	// target): backend services re-apply their schemas once it is filled.
@@ -282,6 +297,27 @@ type CreateParams struct {
 	Branch *BranchSpec
 	// Sensitive marks the project "contains sensitive data" (V2 §8.5).
 	Sensitive bool
+}
+
+// A Claim is what one create takes from its organisation's quotas.
+type Claim struct {
+	OrgID uuid.UUID
+	// Project is one more project (towards the projects quota); Branch
+	// one more branch (towards the branches quota) instead.
+	Project, Branch bool
+	// Instance is one more dedicated instance (or read replica) of this
+	// size and VolumeGB of disk, within the dedicated allowance.
+	Instance *Profile
+	VolumeGB int
+}
+
+// Claim runs QuotaGate in tx, if it is set: before the insert the claim
+// guards, in the same transaction.
+func (s *Service) Claim(ctx context.Context, tx pgx.Tx, c Claim) error {
+	if s.QuotaGate == nil {
+		return nil
+	}
+	return s.QuotaGate(ctx, tx, c)
 }
 
 // BranchSpec describes a new branch.
@@ -427,13 +463,16 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 	var profile Profile
 	var inst store.Instance
 	defaults := store.DefaultSharedSettings()
+	pickShared := func() (store.Instance, error) {
+		inst, err := store.New(s.db).PickSharedInstance(ctx, store.PickSharedInstanceParams{OrgID: &p.OrgID, PgVersion: int32(p.PgVersion), Region: p.Region})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return inst, fmt.Errorf("%w (no shared cluster in %s runs Postgres %d)", ErrNoCapacity, p.Region, p.PgVersion)
+		}
+		return inst, err
+	}
 	switch tier {
 	case TierShared:
-		inst, err = store.New(s.db).PickSharedInstance(ctx, store.PickSharedInstanceParams{OrgID: &p.OrgID, PgVersion: int32(p.PgVersion), Region: p.Region})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Created{}, fmt.Errorf("%w (no shared cluster in %s runs Postgres %d)", ErrNoCapacity, p.Region, p.PgVersion)
-		}
-		if err != nil {
+		if inst, err = pickShared(); err != nil {
 			return Created{}, err
 		}
 	case TierDedicated:
@@ -479,7 +518,29 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 
 		var out Created
 		err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+			// The quotas, counted again under the organisation's lock. A
+			// detached replica's instance (InstanceID) is already in the
+			// allowance.
+			claim := Claim{OrgID: p.OrgID, Project: p.Branch == nil, Branch: p.Branch != nil}
+			if tier == TierDedicated && p.InstanceID == nil {
+				claim.Instance, claim.VolumeGB = &profile, p.VolumeGB
+			}
+			if err := s.Claim(ctx, tx, claim); err != nil {
+				return err
+			}
 			q := store.New(tx)
+			// The node stays as it is until this commits: the empty-node
+			// sweep, which takes it out of placement under its lock, either
+			// counts this project or has taken the node out already.
+			nodeID := inst.NodeID
+			if tier == TierDedicated {
+				nodeID = *p.NodeID
+			}
+			if lc, err := q.LockNodeForPlacement(ctx, nodeID); errors.Is(err, pgx.ErrNoRows) || (err == nil && lc == nodeRetiring) {
+				return errNodeRetiring
+			} else if err != nil {
+				return err
+			}
 			instanceID := inst.ID
 			if tier == TierDedicated {
 				iid := uuid.New()
@@ -545,6 +606,15 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		})
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && attempt < 5 {
+			continue
+		}
+		if errors.Is(err, errNodeRetiring) {
+			if tier != TierShared || attempt >= 5 {
+				return Created{}, fmt.Errorf("%w: the node chosen for the project is being retired; try again", ErrNoCapacity)
+			}
+			if inst, err = pickShared(); err != nil {
+				return Created{}, err
+			}
 			continue
 		}
 		if err != nil {

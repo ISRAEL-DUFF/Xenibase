@@ -411,6 +411,7 @@ func (s *Server) PromoteProject(w http.ResponseWriter, r *http.Request, id gen.P
 			s.requestDedicated(w, r, org, id, pp, req.Reason)
 			return
 		}
+		pp.WithinAllowance = true
 	}
 	op, err := ds.Promote(r.Context(), pp)
 	if err != nil {

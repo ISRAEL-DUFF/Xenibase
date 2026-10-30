@@ -122,3 +122,21 @@ func TestTransferKeepsBranchesWithTheirParent(t *testing.T) {
 		t.Fatalf("transfer a parent whose branches are gone: %v", err)
 	}
 }
+
+// TestNobodyInvitesThemselves: an invitation to the inviter's own address
+// is refused (only a platform admin under break-glass, who is not a member,
+// could want one, and their access must end with the session).
+func TestNobodyInvitesThemselves(t *testing.T) {
+	ctx := context.Background()
+	db := storetest.New(t)
+	admin, org := uuid.New(), uuid.New()
+	exec(t, db, `INSERT INTO users (id, email, password_hash) VALUES ($1, 'Root@example.com', 'x')`, admin)
+	exec(t, db, `INSERT INTO organizations (id, name, slug, plan_id) SELECT $1, 'Org', 'org', id FROM quota_plans ORDER BY name LIMIT 1`, org)
+	svc := orgs.New(db, nil, nil, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := svc.Invite(ctx, orgs.InviteParams{OrgID: &org, Email: "root@example.com", OrgRole: "admin", InvitedBy: admin}); !errors.Is(err, orgs.ErrForbidden) {
+		t.Fatalf("inviting oneself: %v", err)
+	}
+	if _, err := svc.Invite(ctx, orgs.InviteParams{OrgID: &org, Email: "someone@example.com", OrgRole: "admin", InvitedBy: admin}); err != nil {
+		t.Fatalf("inviting someone else: %v", err)
+	}
+}

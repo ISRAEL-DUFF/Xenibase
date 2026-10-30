@@ -178,6 +178,12 @@ func (s *Server) checkTokenGrant(w http.ResponseWriter, r *http.Request, orgID u
 			s.internalError(w, "authorize", err)
 			return false
 		}
+		if row.OauthClientID != nil {
+			// A connected app holds exactly what the user consented to; a
+			// token of its own making would be one more to track down.
+			writeError(w, http.StatusForbidden, "token_not_allowed", "a connected app's token can't create tokens")
+			return false
+		}
 		if s.now().Add(expiresIn).After(row.ExpiresAt) {
 			writeError(w, http.StatusForbidden, "insufficient_scope", "a token can't create a token that outlives it")
 			return false
@@ -240,7 +246,8 @@ func (s *Server) CreateToken(w http.ResponseWriter, r *http.Request) {
 	sess, _ := sessionFrom(r.Context())
 	p := tokens.CreateParams{UserID: sess.UserID, OrgID: req.OrgId, Name: req.Name, Scopes: scopes, ExpiresIn: expiryDays(req.ExpiresInDays), Via: "ui"}
 	if sess.Token != nil {
-		p.Via = "api"
+		// Revoking the token that made it revokes this one.
+		p.Via, p.ParentID = "api", &sess.Token.ID
 	}
 	if req.ProjectIds != nil {
 		p.Projects = *req.ProjectIds
@@ -261,6 +268,12 @@ func (s *Server) CreateToken(w http.ResponseWriter, r *http.Request) {
 // RevokeMyToken implements DELETE /api/v1/tokens/{token_id}.
 func (s *Server) RevokeMyToken(w http.ResponseWriter, r *http.Request, id gen.TokenID) {
 	sess, _ := sessionFrom(r.Context())
+	if sess.Token != nil && id != sess.Token.ID && !authz.HasScope(sess.Token.Scopes, authz.ScopeWrite) {
+		// A read token revokes only itself: it can't cut its user's other
+		// tokens off.
+		writeScopeError(w, authz.ScopeWrite)
+		return
+	}
 	if sess.Token != nil {
 		t, err := store.New(s.db).GetUserToken(r.Context(), store.GetUserTokenParams{ID: id, UserID: sess.UserID})
 		if err == nil && t.OrgID != sess.Token.OrgID {
@@ -412,6 +425,12 @@ func (s *Server) ApproveDeviceLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		a.set("denied", true)
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Approving issues a token, as creating one does: a session needs a
+	// recent step-up, so a link sent to a signed-in user can't be one click.
+	if sess, _ := sessionFrom(r.Context()); sess.Token == nil && !s.auth.RecentlyReauthenticated(sess) {
+		writeError(w, http.StatusForbidden, "reauth_required", "confirm your password and code to continue")
 		return
 	}
 	if req.OrgId == nil {

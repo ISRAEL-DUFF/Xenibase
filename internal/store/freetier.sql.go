@@ -193,7 +193,7 @@ JOIN organizations o ON o.id = p.org_id
 LEFT JOIN quota_plans qp ON qp.id = o.plan_id
 LEFT JOIN billing_accounts b ON b.org_id = p.org_id
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle = 'paused' AND p.paused_at < $1
-  AND coalesce(b.plan, 'free') = 'free'
+  AND o.status = 'active' AND coalesce(b.plan, 'free') = 'free'
   AND coalesce(qp.name, '') <> 'Unlimited'
 ORDER BY p.paused_at
 `
@@ -338,6 +338,31 @@ func (q *Queries) ProjectByDatabase(ctx context.Context, db string) (Project, er
 		&i.AllowedCidrs,
 		&i.BranchCopyFiles,
 	)
+	return i, err
+}
+
+const projectSleepPlan = `-- name: ProjectSleepPlan :one
+SELECT o.status AS org_status, coalesce(b.plan, 'free')::text AS plan, coalesce(qp.name, '')::text AS quota_plan
+FROM projects p
+JOIN organizations o ON o.id = p.org_id
+LEFT JOIN quota_plans qp ON qp.id = o.plan_id
+LEFT JOIN billing_accounts b ON b.org_id = p.org_id
+WHERE p.id = $1
+`
+
+type ProjectSleepPlanRow struct {
+	OrgStatus string
+	Plan      string
+	QuotaPlan string
+}
+
+// tenant: system - a pause or archive operation re-checks the plan of the project it already loaded.
+// What decides whether the Free tier may pause or archive a project: its
+// organisation's status, billing plan and quota plan.
+func (q *Queries) ProjectSleepPlan(ctx context.Context, id uuid.UUID) (ProjectSleepPlanRow, error) {
+	row := q.db.QueryRow(ctx, projectSleepPlan, id)
+	var i ProjectSleepPlanRow
+	err := row.Scan(&i.OrgStatus, &i.Plan, &i.QuotaPlan)
 	return i, err
 }
 

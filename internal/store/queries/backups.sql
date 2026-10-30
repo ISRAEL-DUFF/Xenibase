@@ -15,6 +15,11 @@ RETURNING *;
 -- tenant: system - backup workers and the scheduler, or a project the request already authorized.
 UPDATE backups SET status = 'failed', error = @error::text, finished_at = now() WHERE id = @id;
 
+-- name: MarkBackupVerified :one
+-- tenant: system - backup workers: a backup a restore test just read back.
+UPDATE backups SET verified_at = now() WHERE id = @id AND status = 'succeeded'
+RETURNING *;
+
 -- name: MarkBackupDeleted :exec
 -- tenant: system - backup workers and the scheduler, or a project the request already authorized.
 UPDATE backups SET status = 'deleted', deleted_at = now() WHERE id = @id;

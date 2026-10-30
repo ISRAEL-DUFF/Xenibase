@@ -24,6 +24,7 @@ type walletWorld struct {
 	clk    *clock
 	sent   *sentMail
 	fake   *iswallet.Fake
+	p      *iswallet.Client
 	events chan string
 }
 
@@ -43,6 +44,7 @@ func newWalletWorld(t *testing.T) *walletWorld {
 	t.Cleanup(srv.Close)
 	p := iswallet.New(iswallet.Config{BaseURL: srv.URL, APIKey: "isw-key", WebhookSecret: "isw-secret-0123456789", Now: clk.Now})
 	s.SetWallets(p, "xenibase:test")
+	w.p = p
 	hook := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		ev, err := p.ParseWebhook(r.Context(), r)
 		if err != nil {
@@ -379,6 +381,60 @@ func TestStaleRateIsNotUsedForAnInvoice(t *testing.T) {
 	if _, err := w.s.Issue(ctx, draft.ID, nil); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A month whose draft was refused for a stale rate is not left behind: a
+// later run, with a fresh rate, issues it.
+func TestInvoicingRetriesADraftThatFailedToIssue(t *testing.T) {
+	w := newWalletWorld(t)
+	ctx := context.Background()
+	org, _ := w.walletOrg(t, "retry", 100_000_00, true)
+	set, _ := w.s.Settings(ctx)
+	set.AutoIssue = true
+	if err := w.s.SetSettings(ctx, set); err != nil {
+		t.Fatal(err)
+	}
+	w.clk.t = day(1)
+	if _, err := w.s.ChangePlan(ctx, org, billing.PlanRequest{Plan: billing.PlanPro}); err != nil {
+		t.Fatal(err)
+	}
+	q := store.New(w.db)
+	// 1 November, usage recorded: the month is drafted, but the rate is stale.
+	w.clk.t = time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC)
+	putWatermark(t, w.db, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))
+	w.fake.SetRate("1500", 100, w.clk.Now().Add(-9*time.Hour))
+	if err := w.s.Invoicing(ctx); !errors.Is(err, billing.ErrStaleRate) {
+		t.Fatalf("first run: %v", err)
+	}
+	drafts, _ := q.DraftsForPeriod(ctx, pgDate(day(1)))
+	if len(drafts) != 1 {
+		t.Fatalf("%d drafts after a stale rate", len(drafts))
+	}
+	w.clk.t = w.clk.t.Add(24 * time.Hour)
+	if st, err := w.s.Health(ctx, w.clk.Now()); err != nil || st.Detail != "Last month's invoices are late." {
+		t.Fatalf("health %+v %v", st, err)
+	}
+	// A day later the rate is fresh again: the next run issues it.
+	w.fake.SetRate("1500", 100, time.Time{})
+	if err := w.s.Invoicing(ctx); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	inv := w.invoice(t, drafts[0].ID)
+	if inv.Status == billing.StatusDraft || inv.Number == nil {
+		t.Fatalf("the draft was never issued: %s", inv.Status)
+	}
+	w.waitPaid(t, inv.ID)
+	if st, err := w.s.Health(ctx, w.clk.Now()); err != nil || st.Detail != "" {
+		t.Fatalf("health %+v %v", st, err)
+	}
+	// Running again changes nothing.
+	if err := w.s.Invoicing(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := q.ListInvoices(ctx, store.ListInvoicesParams{Lim: 10}); len(rows) != 1 {
+		t.Fatalf("%d invoices", len(rows))
+	}
+	mustCheck(t, w.db)
 }
 
 func TestWalletRefusesWithoutBVN(t *testing.T) {

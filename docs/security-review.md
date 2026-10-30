@@ -2,29 +2,30 @@
 
 Each item of spec §7, how Xenibase enforces it, and what checks it
 automatically. "CI" means `.github/workflows/ci.yml` on every push (and
-weekly); "live" means xenibase-server's own nightly `isolation_check` operation
-on every shared cluster, whose failure raises an alert.
+weekly); "live" means xenibase-server's own `isolation_check` operation, run
+every 24 hours on every shared cluster (`isocheck.Every`), whose failure
+raises an alert.
 
 ## 7.1 Tenant isolation (shared tier)
 
 Every item below is enforced when a project is created and verified by
-`internal/isocheck`, which runs in CI (`test/isolation`) and nightly against
-live clusters (`isolation_check`, Settings → Tenant isolation). A failed
+`internal/isocheck`, which runs in CI (`test/isolation`) and every 24 hours
+against live clusters (`isolation_check`, Settings → Tenant isolation). A failed
 check raises the critical `isolation_check_failed` alert.
 `TestLiveIsolationCheck` breaks each item on purpose and requires the check
 to report it.
 
 | Checklist item | Enforced by | Verified by |
 | --- | --- | --- |
-| `CONNECT` on each database revoked from `PUBLIC` | `ensureDatabase`: `REVOKE ALL … FROM PUBLIC`, `GRANT CONNECT, TEMPORARY` to the owner only; `postgres` and `template1` revoked at cluster registration | `isocheck.Roles` (every project) and `Cluster` (maintenance databases); `TestTenantIsolation` "cannot connect to B's database", "public has no access"; live probe: tenant A connects to B, `postgres`, `template1` |
+| `CONNECT` on each database revoked from `PUBLIC` | `ensureDatabase`: `REVOKE ALL … FROM PUBLIC`, `GRANT CONNECT, TEMPORARY` to the owner only; `postgres` and `template1` revoked at cluster registration | `isocheck.Roles` (every project: every grantee of `CONNECT` or `TEMPORARY` on its database, from `aclexplode(datacl)`, must be one of that project's roles, its owner or a superuser) and `Cluster` (maintenance databases); `TestTenantIsolation` "cannot connect to B's database", "public has no access"; `TestRolesServiceLoginsAndGrants`; live probe: tenant A connects to B, `postgres`, `template1`, and grants itself `CONNECT` on B |
 | `CREATE` on `public` revoked from `PUBLIC` | `hardenDatabase` | `isocheck.Database` on every project database; isolation suite |
-| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console` and `<db>_console_ro`); "role has no dangerous attributes" |
-| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
-| Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions; the extension API allows only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
+| Project roles `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` | `ensureRole` spells every attribute out on `CREATE`/`ALTER ROLE`; console logins are `NOINHERIT` and the same | `isocheck.Roles` (owner, `<db>_console`, `<db>_console_ro`, members' logins and the five backend-service logins `<db>_edge`, `_anon`, `_user`, `_service`, `_auth_hook`, of which only `_service` may have `BYPASSRLS`); "role has no dangerous attributes"; `TestRolesServiceLoginsAndGrants` |
+| Not members of `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_execute_server_program`, or other privileged roles | Roles are never granted; the console login is granted only its project's owner and read-only role, the read-only console login only the read-only role (both `WITH INHERIT FALSE`) | `isocheck.Roles` (membership in any `pg_*` or privileged role; the read-only console login a member of the owner; a backend-service login a member of any role); "not a member of predefined roles"; `TestReadOnlyConsoleCannotBecomeOwner`; live probe |
+| Untrusted languages and `plpython3u`, `plperlu`, `dblink`, `postgres_fdw`, `file_fdw`, `adminpack` never available | Project roles cannot create untrusted extensions (they can create trusted ones themselves, which run as the role); the extension API installs only the §7.4 list for the tier (`postgres_fdw` only on dedicated) | `isocheck.Database` (none installed in any project DB); live probe tries each `CREATE EXTENSION`; `TestExtensionsAndMetrics` (API refuses `dblink`, `plpython3u`) |
 | etcd (HA, V3 §2.2) | TLS for clients and peers with client certificates required, from a separate etcd CA whose key is sealed with the master key; each HA instance's Patroni has its own client certificate. Patroni's REST API listens on the private network: reads are open, changes (switchover, configuration) need the instance's REST password. The SLA probe login can only connect and run `SELECT 1` (no grants beyond CONNECT). | `TestEtcdCluster` (no client certificate is refused) |
 | `pg_hba.conf` accepts only the pooler and control-plane addresses, `scram-sha-256`, `hostssl` where applicable | Bundle: `deploy/compose/shared-pg-hba.conf` names the fixed addresses of xenibase-server, the agent, and both poolers; agent-run clusters and instances: `xenibase-hba.sh` writes `XENIBASE_AGENT_DB_ALLOW` (default: private ranges) at initdb. V3 moves: the moves' own logins (`xenibase_move_<id>`, random password, dropped after the move) may also connect from `XENIBASE_AGENT_MOVE_ALLOW` (default: private ranges; bundle: its Docker network), added by the agent on every start; the bundle's shared cluster allows them from its Docker network | `isocheck.Cluster`: every network rule must be SCRAM (or `reject`/`cert`), name explicit addresses (no `all`, `samenet`, `0.0.0.0/0`), and use `hostssl` outside private ranges; `TestHBAFinding`; `TestClusterConfiguration` |
 | `log_statement` off; only `log_min_duration_statement` set | `log_statement=none`, `log_min_duration_statement=5s` in the bundle and agent-run clusters | `isocheck.Cluster` (`log_statement`, `log_duration`, `log_min_duration_statement` not 0) |
-| Isolation suite: A cannot connect to B, list B's tables, read B's data through any predefined role, create objects in B, or read server files | — | `test/isolation` (CI) and `isocheck.Probes` (live, two throwaway tenants created with the real create steps): connections, `SET ROLE`, `GRANT`, `ALTER ROLE`, `DROP DATABASE`, `pg_terminate_backend`, `pg_read_file`, `pg_ls_dir`, `COPY … PROGRAM`, `COPY FROM` file, `lo_import`, C functions, superuser-only settings, `pg_stat_activity` query text, `pg_stat_database`, `pg_stat_get_db_*` and `pg_stat_get_backend_*`; `isocheck.Database` flags any of them readable by `PUBLIC` |
+| Isolation suite: A cannot connect to B, list B's tables, read B's data through any predefined role, create objects in B, or read server files | — | `test/isolation` (CI) and `isocheck.Probes` (live, two throwaway tenants created with the real create steps): connections, `SET ROLE`, `GRANT`, `ALTER ROLE`, `DROP DATABASE`, `pg_terminate_backend`, `pg_read_file`, `pg_ls_dir`, `COPY … PROGRAM`, `COPY FROM` file, `lo_import`, C functions, superuser-only settings, `pg_stat_activity` query text, `pg_stat_database`, `pg_stat_get_db_*` and `pg_stat_get_backend_*`, `pg_locks`, `pg_lock_status()`, `pg_blocking_pids`, `pg_prepared_xacts`; `isocheck.Database` flags any of them readable by `PUBLIC` |
 
 The SQL console adds an escape route the spec did not list (`RESET ROLE`
 on an admin session). It signs in as a per-project login that inherits
@@ -42,7 +43,7 @@ AUTHORIZATION`, `set_config('role')`, `pg_authid`, `CREATE ROLE`, and
 | Server-side sessions, `HttpOnly`, `Secure`, `SameSite=Strict`, 12 h idle timeout | `sessions` table; `__Host-` cookies; idle 12 h, at most 7 days | `TestSessionCookieFlags`, `TestReauthAndIdleTimeout`, `TestLoginSessionLogout` |
 | CSRF double-submit on mutations | `guard` checks the header against the cookie and the Origin | `TestAuthFlowOverHTTP` |
 | Re-authentication for delete, in-place restore, master key rotation, node removal | `reauthRequired` (10 min window); master key rotation is a host CLI (`-rotate-master-key`), which needs the key | `TestReauthAndIdleTimeout`, backups and nodes integration tests |
-| Rate limiting and lockout | 10 sign-ins per 5 min per address; account lockout after 5 failures for 15 min | `TestLimiter`, `TestLoginRateLimit`, `TestLockout`, `TestWrongTOTPCountsTowardLockout` |
+| Rate limiting and lockout | 10 sign-ins per 5 min per address; account lockout after 5 failures for 15 min, doubling with each further failure up to a day, with an email to the owner; addresses without an account are counted and locked the same way, and signup takes as long for an existing address, so neither tells which addresses are registered | `TestLimiter`, `TestLoginRateLimit`, `TestLockout`, `TestWrongTOTPCountsTowardLockout`, `TestLockoutDoublesAndSaysNothing`, `TestSignupTakesAsLongForAnExistingAddress` |
 | Single operator in V1, `operators.role` kept | Setup creates one `owner` | `TestSetupFlow` |
 | API tokens (V2 §7.2): hashed, scoped to one org, scopes, project restriction, expiry | `internal/tokens`; the guard's bearer path skips cookies and CSRF; `authz.ScopeFor` per action; platform and session-only routes refuse tokens | `TestRestrictedWriteTokenInCI`, `TestAPITokens`, `TestCLIJobWithRestrictedWriteToken` |
 | Tokens follow their user and org | Revoked on removal or disable; disabled while the org is suspended | `TestAPITokens` |
@@ -54,7 +55,7 @@ AUTHORIZATION`, `set_config('role')`, `pg_authid`, `CREATE ROLE`, and
 | Item | Implementation | Test |
 | --- | --- | --- |
 | Secrets encrypted at rest with `XENIBASE_MASTER_KEY` (TOTP secrets, storage credentials, backup key, agent CA key, cluster and instance admin passwords, alert secrets, operation password hand-offs) | AES-256-GCM with per-secret associated data (`internal/crypto`) | `internal/crypto` tests |
-| Master key rotation by CLI | `xenibase-server -rotate-master-key` re-encrypts everything in one transaction, then proves the new key alone opens it all | `TestMasterKeyRotation` (including a wrong old key rolling back) |
+| Master key rotation by CLI | `xenibase-server -rotate-master-key` re-encrypts everything in one transaction, then proves the new key alone opens it all. What `Derive` gives (the backend services' and console logins' passwords, file URL keys, the pooler admin's salt) is keyed on a derive seed sealed in the `derive_seed` settings row, which the rotation re-seals, so derived values do not change and backend services keep working | `TestMasterKeyRotation` (including a wrong old key rolling back, and a project with backend services whose derived passwords still match its verifiers), `TestDerivedSurviveRotation`, `TestDeriveSeedSurvivesRotation`, `TestPrepareDeriveSeed` |
 | Backups encrypted before upload | Per-object file keys wrapped by the backup key (`internal/backupfmt`); WAL-G uses an OpenPGP key derived from it | backup integration tests (`TestBackupDeleteRestoreVerify` checks the object is ciphertext) |
 | The operator is made to export the backup key | Setup wizard step 4; a banner until it is confirmed | e2e "fresh install" |
 
@@ -63,9 +64,15 @@ shown once), SQL console query text (audit entries only).
 
 ## 7.4 Extension allow-list
 
-Enforced by `POST /projects/{id}/extensions` (per tier, and only extensions
-the server has); verified by `TestExtensionsAndMetrics` and, for the
-escape-prone ones, by the isolation checks above.
+`POST /projects/{id}/extensions` installs, as the superuser, only the
+tier's list and only extensions the server has; verified by
+`TestExtensionsAndMetrics`. The list binds what Xenibase installs, not what
+a tenant can: the owner role owns its database, so it can `CREATE
+EXTENSION` any extension Postgres marks trusted (`tablefunc`, `ltree`,
+`intarray`, `fuzzystrmatch` and the other trusted contrib modules) without
+the API. Trusted extensions are by definition ones a non-superuser may
+install, so none of them escapes the role; the untrusted and escape-prone
+ones stay refused, which the isolation checks above verify.
 
 ## 7.5 Audit log
 
@@ -118,11 +125,13 @@ review found and fixed.
 | Permission matrix (V2 §2.3, §2.4) | One `authz.Can`; every route declares an action (`routeRules`), resolved to an organisation before the check; foreign resources answer 404 | `TestEveryRouteDeclaresAnAction`, `TestPermissionMatrix` (every route × every role, platform admin and outsider), `TestMembersCanCreateProjectsSetting` |
 | Org scoping in the data layer (V2 §2.6) | Every query on a tenant table filters by `org_id`, or says why it is system-wide (`-- tenant: system`) | `TestTenantQueriesAreScoped` (CI lint), `TestTwoOrgsSeeOnlyTheirOwn` |
 | Opaque names (V2 §10.2) | `p_<10 base32>` databases and roles; nothing descriptive written into Postgres; Xenibase's own sessions use generic `application_name`s | `TestOtherTenantsCannotDiscoverProjectNames` |
-| Quotas and resource limits (V2 §10.3–10.4) | Plans checked before every create; soft and hard storage locks; `temp_file_limit` and statement reaper on the shared tier; a soft lock applies to SQL jobs too | `TestQuotasAndDedicatedRequests`, `TestStorageLimitLocks`, `TestReaperEndsLongStatements`, `TestJobSQLCannotEscalate` |
-| API tokens (V2 §7.2) | Hashed; one org; scopes; project restriction; expiry; refused for disabled or unverified users and suspended orgs; a removed member's tokens fail the membership check | `TestAPITokens`, `TestRestrictedWriteTokenInCI`, `TestTokenRateLimit`, `TestDeviceLogin` |
+| Quotas and resource limits (V2 §10.3–10.4) | Plans checked before every create, and counted again under the organisation's row lock in the transaction that records it (projects, branches, branch detach, the dedicated allowance with read replicas counted); soft and hard storage locks; `temp_file_limit` and the statement reaper on the shared tier (it cancels a statement past 10 minutes, and terminates the session of one still running the same statement on its next pass, since PL/pgSQL can catch the cancel; it ends sessions idle in a transaction past 5 minutes); a soft lock applies to SQL jobs too | `TestQuotasAndDedicatedRequests` (parallel creates too), `TestParallelCreatesKeepTheQuota`, `TestParallelClaimsKeepTheAllowance`, `TestStorageLimitLocks`, `TestSoftLockedGrowthIsHardLocked`, `TestReaperEndsLongStatements`, `TestReaperEndsStatementThatCatchesCancel`, `TestJobSQLCannotEscalate` |
+| API tokens (V2 §7.2) | Hashed; one org; scopes; project restriction; expiry; refused for disabled or unverified users and suspended orgs; a removed member's tokens fail the membership check; a token made by a token is revoked with it, and an OAuth app's token can't make tokens | `TestAPITokens`, `TestRestrictedWriteTokenInCI`, `TestTokenRateLimit`, `TestDeviceLogin` |
 | Outbound requests (V2 §9.1, §10.7) | `internal/outbound`, also for a project's own SMTP server and SMS provider `base_url`: https only (http to allow-listed hosts); every resolved address checked (IPv4-mapped, NAT64 and 6to4 addresses as the IPv4 address they embed); link-local and metadata never, even allow-listed; the request connects to the checked address, without proxies or redirects; per-org rate limits and counters; outbound off per org | `internal/outbound` tests, `TestWebhookDelivery`, `TestScheduledJobs` |
-| Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it | `TestSuspensionAndBreakGlass` |
+| Break-glass (V2 §2.4) | Platform admin only, step-up auth, at most 4 h, owners emailed, flagged in both audit logs, any owner can end it; it can't invite, change roles or transfer ownership, so it grants nothing that outlives it, and nobody accepts an invitation they sent themselves | `TestSuspensionAndBreakGlass`, `TestBreakGlassCannotGrantMembership` |
 | Webhook trigger function (V2 §9.1) | `xenibase.webhook_enqueue()` is `SECURITY DEFINER` with `search_path = pg_catalog, pg_temp`, in a superuser-owned schema with all access revoked from `PUBLIC` (so tenants can't call it or attach it to triggers); a `xenibase` schema anything else owns is dropped first; the worker delivers an outbox row only for one of its own project's webhooks | `TestWebhookDelivery`, `TestWebhooksAcrossCopies` |
+| No `SECURITY DEFINER` function owned by anything but tenant roles (V2 §10.4) | Xenibase's own (the backend services' in `xb_*`, the webhook trigger in `xenibase`) pin `search_path`; nothing else Xenibase installs is `SECURITY DEFINER` | `isocheck.Database`: a `SECURITY DEFINER` function not installed by an extension and owned by a superuser or a role not of that database (neither its owner nor named after it) is a finding, unless it is in an `xb_*` schema or `xenibase` with `search_path` set; `TestSecurityDefiners`, `TestLiveIsolationCheck` |
+| Limits on every login, and logins off while suspended or hard-locked (V2 §10.4, §10.8) | `CONNECTION LIMIT` and `temp_file_limit` on the owner, members' logins and the backend services' five logins; `SetLogins` switches them all off, and on a dedicated project the logins its owner created (`project_owned_logins`) | `isocheck.Roles`, for the backend-service logins too; `TestRolesServiceLoginsAndGrants`, `TestLiveIsolationCheck` (a suspended project's owner or request role switched back on), `TestSetLoginsCoversOwnedLogins`, `TestSyncOwnedRolesKeepsLoginsSwitchedOff` |
 | Personal roles across tier moves (V2 §3.5) | Member logins and the read-only role recreated with the same verifiers on promotion, demotion, restore and import | `TestMemberLoginsSurviveRestoreAndPromotion`, `TestDemotionLiveWriter` |
 | Running tenant SQL | The console, table editor, schema editor and SQL jobs sign in as the project's console login (`NOINHERIT`, may only `SET ROLE` to the project's roles), never an admin login. Read-only sessions (a `read_only` member, a read-scope token, the table browser's raw filter) sign in as `<db>_console_ro`, which may become only `<db>_ro` | `TestSQLConsole`, `TestJobSQLCannotEscalate`, `TestReadOnlySessionCannotBecomeOwner`, `TestReadOnlyConsoleCannotBecomeOwner` |
 | Copying a tenant's database | A restore runs the dump's functions (CHECK constraints, generated columns). Branches, restores, imports and the restore test restore as the console login with `--role` the owner; promotion and demotion through a short-lived login that inherits the project's roles but is no superuser (extensions created first, Xenibase's webhook schema copied on its own) | `TestCopiesDoNotRunAsSuperuser` |
@@ -216,6 +225,58 @@ a test that failed before.
   its project's routes, so nothing opens up) and raises
   `pooler_config_skipped`, instead of failing every region.
 
+## Atlas review: identity and access (Part E)
+
+The Atlas's identity page traced Xenibase's own accounts, organisations,
+tokens and email through the code; each is fixed with a test that failed
+before.
+
+### Found and fixed
+
+- **Break-glass could become permanent membership** (high). Under
+  break-glass a platform admin could invite their own address as admin and
+  accept it, keeping the access after the session, unflagged. Invitations,
+  role changes and ownership transfers now answer 403 `break_glass`; nobody
+  invites their own address or accepts an invitation they sent
+  (`TestBreakGlassCannotGrantMembership`).
+- **The lockout revealed accounts and never grew** (medium). Five wrong
+  passwords locked a registered address but never an unknown one, the lock
+  stayed at 15 minutes, nobody was told, and signup answered an existing
+  address 100 times faster. Unknown addresses are now locked the same way,
+  the lock doubles to a day, the owner is emailed, and signup hashes either
+  way (`TestLockoutDoublesAndSaysNothing`,
+  `TestSignupTakesAsLongForAnExistingAddress`).
+- **Tokens outlived account recovery, and a session minted them without
+  step-up** (high). A stolen cookie could create a year's admin token that
+  survived the owner's password reset, sign-out and two-factor reset. A
+  password reset and a two-factor reset now revoke every token (a password
+  change too, unless the user keeps them), and creating a token or
+  approving a device login from a session needs a recent step-up
+  (`TestRecoveryRevokesTokens`, `TestTokensNeedARecentStepUp`).
+- **An app's tokens outlived disconnecting it** (high). An OAuth token with
+  `write` could create a token of its own, which had no app recorded, so
+  Disconnect and disabling the app left it working for up to a year.
+  Tokens now record the token that created them (`parent_id`), revoking
+  one revokes its descendants, and an app's token can't create tokens
+  (`TestRevokingATokenRevokesWhatItMade`, `TestTokenMadeByATokenGoesWithIt`,
+  `TestOAuthFlowOverHTTP`).
+- **A read token could cut its user off** (low). Leaving an organisation
+  (`org.view`) and revoking a token took the `read` scope, so a leaked
+  read-only token could make its user leave or revoke their admin tokens.
+  Both now need `write`, except a token revoking itself
+  (`TestReadTokensChangeNothing`).
+- **The billing role was lost on re-invitation or transfer** (low). An
+  admin could invite a billing member's address with a project, taking
+  their billing role and giving them project access, which only owners may
+  change. A billing member now stays billing, existing members can't be
+  invited, and a transferred project leaves its billing members
+  (`TestBillingIsKept`).
+- **Invitations were an unlimited mail relay with linked names** (medium).
+  Organisation invitations are capped a day per organisation and per
+  inviter, and user-chosen names in email are never links
+  (`TestInvitationsAreCapped`, `TestInvitationNamesAreNotLinks`,
+  `TestInertTextIsNeverALink`).
+
 ## V3 review of payments and billing (M27)
 
 > Reviewed when cards and the Flutterwave and iSpend providers existed. They
@@ -230,7 +291,7 @@ them for real.
 | Webhook authentication | HMAC-SHA256 over the timestamp and body, compared in constant time, timestamp within 5 minutes. Unknown providers 404; bodies over 1 MB are cut off | `TestWebhookAuthenticationAndForgedEvents`, provider unit tests |
 | What a webhook can do | Nothing on its own: its body is a hint. Every payment is looked up again with the provider (`Verify`) before anything is posted, and only a successful naira transaction with an amount counts. A payment below its intent's amount is refused | `providers_test.go` |
 | Whose money it is | The provider's record decides: the virtual account the verified transaction was paid into, and the amount the provider reports; the event's own claims are ignored | `TestWebhookAuthenticationAndForgedEvents` |
-| Replays and duplicates | Event IDs are unique per provider; payments are unique per provider reference; ledger transactions are keyed. A replayed or re-sent event changes nothing | `TestPartialOverAndDuplicatePayments`, `TestDepositsAreHeldAndDuplicatesAreNoOps` |
+| Replays and duplicates | Event IDs are unique per provider; payments are unique per provider reference; ledger transactions are keyed. A replayed or re-sent event changes nothing; one that failed to process is processed again, and still posts once | `TestPartialOverAndDuplicatePayments`, `TestDepositsAreHeldAndDuplicatesAreNoOps`, `TestFailedDepositEventIsProcessedOnRetry` |
 | Organisations' billing | Owners and billing members (`org.billing`); members and admins see no invoices. Every invoice, payment, receipt and WHT certificate is looked up with the organisation in the path, so another organisation's ID answers 404 | `TestPermissionMatrix`, `TestBillingAccountsAndRoles` |
 | Money-moving admin actions | Platform admin only, and now a fresh step-up (password and code): refunds, recording a manual payment, credit notes, attributing an unmatched event, publishing a price book, an organisation's billing terms | `TestPermissionMatrix`, `reauthRequired` |
 | Refund limits | At most the payment less earlier refunds; beyond the org's credit only by reopening the invoices it settled | `TestRefundReopensInvoices` |
@@ -379,5 +440,5 @@ vulnerabilities in both; the Go toolchain is 1.25.13.
   the server: it owns the table and could disable the triggers (§7.5).
 
 Sign-off: every §7.1 item is enforced at create and verified automatically
-in CI and weekly on live clusters; §7.2–7.5 items are implemented and
+in CI and every 24 hours on live clusters; §7.2–7.5 items are implemented and
 covered by the tests named above.

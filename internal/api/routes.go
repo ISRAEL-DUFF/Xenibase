@@ -126,7 +126,9 @@ var routeRules = map[string]rule{
 	"GET /api/v1/regions":                                {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},
 	"POST /api/v1/imports/preflight":                     {scope: scopeSelf, action: authz.Self},
 	// API tokens (V2 §7.2): a token may manage its user's tokens in its own
-	// organisation, never exceeding itself (the handlers check).
+	// organisation, never exceeding itself (the handlers check). Revoking
+	// another token is a change, so it takes write; any token may revoke
+	// itself (xenibase logout), which RevokeMyToken allows.
 	"GET /api/v1/tokens":                           {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},
 	"POST /api/v1/tokens":                          {scope: scopeSelf, action: authz.Self, token: authz.ScopeWrite},
 	"DELETE /api/v1/tokens/{token_id}":             {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},

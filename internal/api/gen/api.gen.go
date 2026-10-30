@@ -1774,6 +1774,7 @@ const (
 	NodeLifecycleActive       NodeLifecycle = "active"
 	NodeLifecycleDraining     NodeLifecycle = "draining"
 	NodeLifecycleProvisioning NodeLifecycle = "provisioning"
+	NodeLifecycleRetiring     NodeLifecycle = "retiring"
 )
 
 // Valid indicates whether the value is a known member of the NodeLifecycle enum.
@@ -1784,6 +1785,8 @@ func (e NodeLifecycle) Valid() bool {
 	case NodeLifecycleDraining:
 		return true
 	case NodeLifecycleProvisioning:
+		return true
+	case NodeLifecycleRetiring:
 		return true
 	default:
 		return false
@@ -2272,8 +2275,9 @@ func (e ReadReplicaStatus) Valid() bool {
 
 // Defines values for ReapedSessionKind.
 const (
-	IdleInTransaction ReapedSessionKind = "idle_in_transaction"
-	Statement         ReapedSessionKind = "statement"
+	IdleInTransaction   ReapedSessionKind = "idle_in_transaction"
+	Statement           ReapedSessionKind = "statement"
+	StatementTerminated ReapedSessionKind = "statement_terminated"
 )
 
 // Valid indicates whether the value is a known member of the ReapedSessionKind enum.
@@ -2282,6 +2286,8 @@ func (e ReapedSessionKind) Valid() bool {
 	case IdleInTransaction:
 		return true
 	case Statement:
+		return true
+	case StatementTerminated:
 		return true
 	default:
 		return false
@@ -5359,6 +5365,9 @@ type CategoryCost struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+
+	// RevokeTokens Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+	RevokeTokens *bool `json:"revoke_tokens,omitempty"`
 }
 
 // ColumnRef A column's foreign key.
@@ -7159,8 +7168,10 @@ type Node struct {
 	Id                 openapi_types.UUID `json:"id"`
 
 	// Keep Never deleted for being empty.
-	Keep             *bool          `json:"keep,omitempty"`
-	LastHeartbeat    *time.Time     `json:"last_heartbeat,omitempty"`
+	Keep          *bool      `json:"keep,omitempty"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+
+	// Lifecycle retiring is an empty node out of placement whose server is about to be deleted.
 	Lifecycle        *NodeLifecycle `json:"lifecycle,omitempty"`
 	MonthlyCostMinor *int64         `json:"monthly_cost_minor,omitempty"`
 	Name             string         `json:"name"`
@@ -7177,7 +7188,7 @@ type Node struct {
 	Status     string  `json:"status"`
 }
 
-// NodeLifecycle defines model for Node.Lifecycle.
+// NodeLifecycle retiring is an empty node out of placement whose server is about to be deleted.
 type NodeLifecycle string
 
 // NodeCost defines model for NodeCost.
@@ -7249,6 +7260,9 @@ type OAuthAuthorizeInfo struct {
 	CodeChallenge       string `json:"code_challenge"`
 	CodeChallengeMethod string `json:"code_challenge_method"`
 
+	// Consent The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
+	Consent string `json:"consent"`
+
 	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
 	Organisations []OAuthGrantOrg `json:"organisations"`
 	RedirectUri   string          `json:"redirect_uri"`
@@ -7287,16 +7301,19 @@ type OAuthClientList struct {
 
 // OAuthDecision defines model for OAuthDecision.
 type OAuthDecision struct {
-	Approve             bool                  `json:"approve"`
-	ClientId            string                `json:"client_id"`
-	CodeChallenge       string                `json:"code_challenge"`
-	CodeChallengeMethod string                `json:"code_challenge_method"`
-	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
-	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
-	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
-	RedirectUri         string                `json:"redirect_uri"`
+	Approve             bool   `json:"approve"`
+	ClientId            string `json:"client_id"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
 
-	// Scopes Within what the app asked for; the request's scopes by default.
+	// Consent The `consent` the consent page was given; required to approve.
+	Consent       *string               `json:"consent,omitempty"`
+	ExpiresInDays *int                  `json:"expires_in_days,omitempty"`
+	OrgId         *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds    *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri   string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
 	Scopes *[]TokenScope `json:"scopes,omitempty"`
 	State  *string       `json:"state,omitempty"`
 }
@@ -8367,14 +8384,16 @@ type RealtimeTable struct {
 
 // ReapedSession defines model for ReapedSession.
 type ReapedSession struct {
-	CreatedAt time.Time         `json:"created_at"`
-	DurationS int               `json:"duration_s"`
-	Kind      ReapedSessionKind `json:"kind"`
-	Query     *string           `json:"query,omitempty"`
-	Role      string            `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	DurationS int       `json:"duration_s"`
+
+	// Kind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+	Kind  ReapedSessionKind `json:"kind"`
+	Query *string           `json:"query,omitempty"`
+	Role  string            `json:"role"`
 }
 
-// ReapedSessionKind defines model for ReapedSession.Kind.
+// ReapedSessionKind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
 type ReapedSessionKind string
 
 // ReapedSessionList defines model for ReapedSessionList.
@@ -11976,7 +11995,7 @@ type ServerInterface interface {
 	// AcceptMyInvitation Accept one of your pending invitations
 	// (POST /api/v1/me/invitations/{invitation_id}/accept)
 	AcceptMyInvitation(w http.ResponseWriter, r *http.Request, invitationId InvitationID)
-	// ChangePassword Change your password; ends your other sessions
+	// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	// (POST /api/v1/me/password)
 	ChangePassword(w http.ResponseWriter, r *http.Request)
 	// GetRecoveryCodes How many recovery codes you have left
@@ -13695,7 +13714,7 @@ func (_ Unimplemented) AcceptMyInvitation(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ChangePassword Change your password; ends your other sessions
+// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 // (POST /api/v1/me/password)
 func (_ Unimplemented) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)

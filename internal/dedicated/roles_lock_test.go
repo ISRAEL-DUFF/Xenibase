@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -24,8 +25,9 @@ import (
 // server, reached as its superuser.
 type rolesEnv struct {
 	*env
-	cluster *pgx.Conn
-	project store.Project
+	cluster  *pgx.Conn
+	project  store.Project
+	projects *provision.Service
 }
 
 func setupRoles(t *testing.T, withOwner bool) *rolesEnv {
@@ -94,7 +96,7 @@ func setupRoles(t *testing.T, withOwner bool) *rolesEnv {
 		}
 		t.Cleanup(func() { _, _ = cluster.Exec(context.Background(), "DROP ROLE IF EXISTS "+provision.Ident(owner)) })
 	}
-	return &rolesEnv{env: e, cluster: cluster, project: p}
+	return &rolesEnv{env: e, cluster: cluster, project: p, projects: ps}
 }
 
 func (e *rolesEnv) state(t *testing.T) (flag, createRole bool) {
@@ -141,5 +143,64 @@ func TestSetManageRolesSwitches(t *testing.T) {
 	}
 	if flag, cr := e.state(t); !flag || !cr {
 		t.Fatalf("flag=%v CREATEROLE=%v after switching on", flag, cr)
+	}
+}
+
+// While a project's logins are switched off (SetLogins made its owned
+// logins NOLOGIN), the sync keeps them recorded, so switching the logins
+// back on (ProjectLogins) finds and restores them. Once the logins are on,
+// a NOLOGIN role is the owner's choice and is dropped as before.
+func TestSyncOwnedRolesKeepsLoginsSwitchedOff(t *testing.T) {
+	e := setupRoles(t, true)
+	ctx := context.Background()
+	app := e.project.DbName + "_app"
+	verifier, err := crypto.SCRAMVerifier("app-password-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"CREATE DATABASE " + provision.Ident(e.project.DbName),
+		"CREATE ROLE " + provision.Ident(app) + " LOGIN PASSWORD '" + verifier + "'",
+		"GRANT " + provision.Ident(app) + " TO " + provision.Ident(e.project.OwnerRole) + " WITH ADMIN OPTION",
+	} {
+		if _, err := e.cluster.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		c := context.Background()
+		_, _ = e.cluster.Exec(c, "DROP DATABASE IF EXISTS "+provision.Ident(e.project.DbName)+" WITH (FORCE)")
+		_, _ = e.cluster.Exec(c, "DROP ROLE IF EXISTS "+provision.Ident(app))
+	})
+	synced := func() []string {
+		t.Helper()
+		res, err := e.svc.SyncOwnedRoles(ctx, e.project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Synced
+	}
+	if got := synced(); len(got) != 1 || got[0] != app {
+		t.Fatalf("synced: %v", got)
+	}
+	// Suspended: SetLogins switched it off.
+	on := false
+	e.projects.LoginGate = func(context.Context, store.Project) (bool, error) { return on, nil }
+	if _, err := e.cluster.Exec(ctx, "ALTER ROLE "+provision.Ident(app)+" NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if got := synced(); len(got) != 1 || got[0] != app {
+		t.Fatalf("a login switched off by a suspension was dropped from the record: %v", got)
+	}
+	roles, err := e.projects.ProjectLogins(ctx, e.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(roles, app) {
+		t.Fatalf("ProjectLogins after the sync: %v", roles)
+	}
+	on = true
+	if got := synced(); len(got) != 0 {
+		t.Fatalf("a NOLOGIN role with the logins on is still synced: %v", got)
 	}
 }

@@ -68,6 +68,7 @@ type ApiToken struct {
 	ExpiryNotifiedAt *time.Time
 	CreatedAt        time.Time
 	OauthClientID    *uuid.UUID
+	ParentID         *uuid.UUID
 }
 
 type AuditLog struct {
@@ -175,6 +176,7 @@ type Backup struct {
 	CopyStatus      *string
 	CopiedAt        *time.Time
 	CopyError       *string
+	VerifiedAt      *time.Time
 }
 
 type BackupKey struct {
@@ -639,6 +641,13 @@ type LegalDocument struct {
 	PublishedAt time.Time
 }
 
+type LoginAddressFailure struct {
+	Email        string
+	FailedLogins int32
+	LockedUntil  *time.Time
+	UpdatedAt    time.Time
+}
+
 type MessageSend struct {
 	ID        int64
 	ProjectID uuid.UUID
@@ -731,6 +740,8 @@ type Node struct {
 	Keep                  bool
 	FailureDomain         *string
 	PlacementGroup        *string
+	RetiringAt            *time.Time
+	RetiringFrom          *string
 }
 
 type OauthClient struct {
@@ -866,6 +877,8 @@ type PaymentEvent struct {
 	ProcessedAt     *time.Time
 	Outcome         *string
 	Error           *string
+	Attempts        int32
+	ClaimedAt       time.Time
 }
 
 type PaymentIntent struct {
@@ -1180,6 +1193,8 @@ type ReapedSession struct {
 	DurationS int32
 	Query     *string
 	CreatedAt time.Time
+	Pid       *int32
+	StartedAt *time.Time
 }
 
 type RebalanceMove struct {
@@ -1402,22 +1417,23 @@ type UsageRecord struct {
 }
 
 type User struct {
-	ID              uuid.UUID
-	Email           string
-	PasswordHash    string
-	TotpSecret      []byte
-	PlatformRole    string
-	CreatedAt       time.Time
-	DisabledAt      *time.Time
-	FailedLogins    int32
-	LockedUntil     *time.Time
-	TotpLastStep    int64
-	Name            *string
-	EmailVerifiedAt *time.Time
-	ApprovedAt      *time.Time
-	RecoveryCodes   []byte
-	LastActiveAt    *time.Time
-	SignupIp        *netip.Addr
+	ID                uuid.UUID
+	Email             string
+	PasswordHash      string
+	TotpSecret        []byte
+	PlatformRole      string
+	CreatedAt         time.Time
+	DisabledAt        *time.Time
+	FailedLogins      int32
+	LockedUntil       *time.Time
+	TotpLastStep      int64
+	Name              *string
+	EmailVerifiedAt   *time.Time
+	ApprovedAt        *time.Time
+	RecoveryCodes     []byte
+	LastActiveAt      *time.Time
+	SignupIp          *netip.Addr
+	LockoutNotifiedAt *time.Time
 }
 
 type VirtualAccount struct {
