@@ -898,8 +898,26 @@ bundle share one version (spec §11.5).
   sessions opened before kept running. They are now switched off and their
   sessions ended with the project's other logins, and switched back on
   with them; the role sync keeps them recorded meanwhile.
+- **The CLI no longer sends a context's token to another server.**
+  `--server` and `XENIBASE_SERVER` replaced only the server of the selected
+  context, so `xenibase whoami --server https://staging.example` sent the
+  production token to staging, as would a CI job setting `XENIBASE_SERVER`
+  on a machine with a logged-in context. When the server named differs from
+  the context's (by scheme, host and port), the context's token, `token_cmd`
+  and CA file are now left out: the token comes from `XENIBASE_TOKEN`, or the
+  one saved context for that server, or the command stops with exit code 2.
+  `--context` with a different `--server` is refused unless `XENIBASE_TOKEN`
+  is set. And `login` accepted `http://` for any host, so a token could travel
+  and be saved for a plain-HTTP server: `http://` is now accepted only for
+  `localhost`, `127.0.0.0/8` and `::1`, and a saved token is not sent over
+  `http://` to any other host. See `docs/cli.md` ("Which server and token a
+  command uses").
 
 ### Upgrading
+- A CLI context saved for an `http://` server other than this machine stops
+  working: log in again with `https://`. A script that sets `XENIBASE_SERVER`
+  to a server other than its current context's needs `XENIBASE_TOKEN`, or a
+  context for that server.
 - Migration 00094 adds the node lifecycle `retiring`, with
   `nodes.retiring_at` and `nodes.retiring_from`: an empty node out of
   placement whose server the next sweep deletes. The API's node
