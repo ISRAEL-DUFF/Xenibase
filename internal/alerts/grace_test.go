@@ -10,17 +10,17 @@ import (
 	"github.com/israel-duff/xenibase/internal/pooler"
 )
 
-// The agent client certificate alert fires only when renewal has left it
-// with less than three days.
+// The agent client certificate alert fires only when renewal (due at
+// twelve hours left of a day) has left it with less than six hours.
 func TestClientCertCondition(t *testing.T) {
-	exp := time.Now().Add(20 * 24 * time.Hour)
+	exp := time.Now().Add(11 * time.Hour)
 	s := New(nil, nil, Config{ClientCertExpiry: func() time.Time { return exp }}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if c := s.clientCertConditions(); len(c) != 0 {
-		t.Fatalf("fired with 20 days left: %+v", c)
+		t.Fatalf("fired with 11 hours left, just after renewal was due: %+v", c)
 	}
-	exp = time.Now().Add(2 * 24 * time.Hour)
+	exp = time.Now().Add(5 * time.Hour)
 	if c := s.clientCertConditions(); len(c) != 1 || c[0].kind != KindAgentClientCert {
-		t.Fatalf("with two days left: %+v", c)
+		t.Fatalf("with five hours left: %+v", c)
 	}
 }
 

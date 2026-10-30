@@ -38,6 +38,10 @@ type Config struct {
 	MaxJobs int
 	// Instances configures Postgres containers (dedicated tier).
 	Instances InstanceConfig
+	// ClientAllow is the client certificate serials the agent accepts
+	// (LoadClientAllow). Nil accepts every xenibase-server certificate the
+	// CA signed, and the agent takes no allow list.
+	ClientAllow *ClientAllow
 }
 
 // Service implements the agent API.
@@ -97,11 +101,13 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("PUT "+agentapi.PathPoolerConfig, s.poolerConfig)
 	mux.HandleFunc("PUT "+agentapi.PathPoolerExpected, s.poolerExpected)
 	mux.HandleFunc("GET "+agentapi.PathPoolerStatus, s.poolerStatus)
-	return mux
+	mux.HandleFunc("PUT "+agentapi.PathClientSerials, s.clientSerials)
+	return s.checkSerial(mux)
 }
 
 // TLSConfig requires a client certificate from ca with xenibase-server's
-// subject.
+// subject. Which of those certificates may call the agent is then decided
+// per request by the allow list (Config.ClientAllow).
 func TLSConfig(cert tls.Certificate, ca *x509.CertPool) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},

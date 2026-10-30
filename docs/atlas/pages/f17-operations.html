@@ -122,7 +122,7 @@
     <tr><td><code>pooler_host_not_ready</code></td><td>critical</td><td>A healthy edge pooler host reports not ready for 1 min</td></tr>
     <tr><td><code>pooler_split_brain</code></td><td>critical</td><td>Two hosts in one region are keepalived <code>MASTER</code> for 1 min</td></tr>
     <tr><td><code>waker_down</code></td><td>critical</td><td>The waker refuses TCP for 1 min</td></tr>
-    <tr><td><code>agent_client_cert</code></td><td>critical</td><td>The server's client certificate for agents has under 3 days left</td></tr>
+    <tr><td><code>agent_client_cert</code></td><td>critical</td><td>The server's client certificate for agents (a day long, renewed with 12 hours left) has under 6 hours left</td></tr>
     <tr><td><code>failure_domain</code></td><td>warning</td><td>Members that must be apart share a failure domain (<x-page id="ha--domains"/>)</td></tr>
     <tr><td><code>files_share_backups</code></td><td>warning</td><td>A region with stored files has no files target of its own</td></tr>
     <tr><td><code>capacity_proposal</code></td><td>warning</td><td>A capacity proposal waits for approval</td></tr>

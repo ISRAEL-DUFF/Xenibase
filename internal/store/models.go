@@ -13,6 +13,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AgentClientCert struct {
+	Serial     string
+	ServerName string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+	RevokedBy  *uuid.UUID
+}
+
+type AgentClientCertState struct {
+	ID         bool
+	Generation int64
+}
+
 type Alert struct {
 	ID                 uuid.UUID
 	Kind               string

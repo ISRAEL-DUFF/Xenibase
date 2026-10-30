@@ -370,8 +370,10 @@ var routeRules = map[string]rule{
 	"PATCH /api/v1/nodes/{id}":                 {scope: scopePlatform, action: authz.PlatformManage},
 	"DELETE /api/v1/nodes/{id}":                {scope: scopePlatform, action: authz.PlatformManage},
 	// The Postgres version lifecycle (V4.1 §6.1).
-	"GET /api/v1/admin/pg-versions":           {scope: scopePlatform, action: authz.PlatformManage},
-	"PATCH /api/v1/admin/pg-versions/{major}": {scope: scopePlatform, action: authz.PlatformManage},
+	"GET /api/v1/admin/pg-versions":                {scope: scopePlatform, action: authz.PlatformManage},
+	"GET /api/v1/admin/agent-client-certs":         {scope: scopePlatform, action: authz.PlatformManage},
+	"POST /api/v1/admin/agent-client-certs/revoke": {scope: scopePlatform, action: authz.PlatformManage},
+	"PATCH /api/v1/admin/pg-versions/{major}":      {scope: scopePlatform, action: authz.PlatformManage},
 	// Capacity automation and cost attribution (V3 §5, §7.2).
 	"GET /api/v1/admin/capacity":                                         {scope: scopePlatform, action: authz.PlatformManage},
 	"GET /api/v1/admin/regions":                                          {scope: scopePlatform, action: authz.PlatformManage},

@@ -28,7 +28,7 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | Pooler host not ready (`pooler_host_not_ready`) | critical | A healthy edge pooler host can't serve or is stale for 1 minute ([standby edge pooler](edge-poolers.md)) |
   | Pooler split brain (`pooler_split_brain`) | critical | Two edge pooler hosts in one region say keepalived made them MASTER, for 1 minute |
   | Waker down (`waker_down`) | critical | The Free tier's waker has refused connections for 1 minute: paused projects can't resume on connect, and pausing is on hold |
-  | Agent client certificate (`agent_client_cert`) | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
+  | Agent client certificate (`agent_client_cert`) | critical | xenibase-server's certificate for talking to agents (24 hours, renewed with 12 left) has under 6 hours left: renewing it, or recording its serial in the metadata database, keeps failing (see the server's log) |
   | Failure domain (`failure_domain`) | warning | HA members, etcd members or pooler hosts that must be apart share a failure domain |
   | Files share backups (`files_share_backups`) | warning | A region with stored files has no files target of its own, so its edges hold credentials that can delete its backups |
   | Capacity proposal (`capacity_proposal`) | warning | A capacity proposal waits for approval (Platform → Capacity) |

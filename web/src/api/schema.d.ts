@@ -1312,6 +1312,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/agent-client-certs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The client certificates xenibase-servers issued themselves for agents
+         * @description Each xenibase-server issues itself a client certificate for its
+         *     agents, a day long and renewed at half-life, and records its
+         *     serial. The live ones (unexpired, unrevoked) are the allow list
+         *     every agent is given; an agent that has a list accepts no other.
+         *     Listed: live certificates, and those expired or revoked in the
+         *     last week.
+         */
+        get: operations["listAgentClientCerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agent-client-certs/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke a server's agent client certificate, by serial or every live one of a server
+         * @description Removes the certificates from the allow list and pushes the new
+         *     list to every agent at once, so a copied certificate stops working
+         *     (agents that do not answer get it at their next health check). A
+         *     server whose own certificate is revoked issues and registers a new
+         *     one and keeps its agents.
+         */
+        post: operations["revokeAgentClientCerts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agent/register": {
         parameters: {
             query?: never;
@@ -7158,6 +7207,30 @@ export interface components {
             expires_at: string;
             /** @description A ready-to-run registration command for the node. */
             command: string;
+        };
+        AgentClientCert: {
+            /** @description The certificate's serial, lower-case hex. */
+            serial: string;
+            /** @description The xenibase-server it was issued to (its host name). */
+            server: string;
+            /** Format: date-time */
+            issued_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            revoked_at?: string;
+            /** @description The certificate the answering server is using. */
+            current: boolean;
+        };
+        /** @description Exactly one of serial and server. */
+        AgentClientCertRevoke: {
+            serial?: string;
+            server?: string;
+        };
+        AgentClientCertRevoked: {
+            revoked: components["schemas"]["AgentClientCert"][];
+            /** @description Agents the new list did not reach now; each gets it at its next health check. */
+            not_pushed: string[];
         };
         AgentRegisterRequest: {
             token: string;
@@ -13518,6 +13591,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RegistrationToken"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    listAgentClientCerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The certificates, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["AgentClientCert"][];
+                    };
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    revokeAgentClientCerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentClientCertRevoke"];
+            };
+        };
+        responses: {
+            /** @description Revoked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentClientCertRevoked"];
                 };
             };
             default: components["responses"]["Error"];

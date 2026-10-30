@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,9 @@ type State struct {
 	NodeID string
 	Cert   tls.Certificate
 	CA     *x509.CertPool
+	// CACert is the pinned agent CA, which signs the client certificate
+	// allow list (LoadClientAllow).
+	CACert *x509.Certificate
 }
 
 const (
@@ -54,11 +58,17 @@ func LoadState(dir string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
+	b, _ := pem.Decode(caPEM)
+	if b == nil {
 		return nil, errors.New("agent state: bad CA certificate")
 	}
-	return &State{Dir: dir, NodeID: meta.NodeID, Cert: cert, CA: pool}, nil
+	caCert, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("agent state: bad CA certificate: %w", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	return &State{Dir: dir, NodeID: meta.NodeID, Cert: cert, CA: pool, CACert: caCert}, nil
 }
 
 // RegisterOptions configures Register.

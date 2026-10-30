@@ -1,8 +1,9 @@
 // Package agentca is the control plane's private CA for agent mTLS (spec
 // §3.3): it signs each agent's certificate at registration and a client
-// certificate for xenibase-server itself. Agents accept only that client
-// certificate; the server accepts only agents whose certificate it signed
-// and whose fingerprint it pinned.
+// short-lived client certificate for each xenibase-server. Agents accept
+// only those client certificates, and once given an allow list (signed
+// here) only the serials on it; the server accepts only agents whose
+// certificate it signed and whose fingerprint it pinned.
 package agentca
 
 import (
@@ -21,12 +22,14 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -98,6 +101,9 @@ func loadOrCreate(ctx context.Context, db *pgxpool.Pool, keyring *crypto.Keyring
 	})
 	return ca, err
 }
+
+// New creates a CA held only in memory, for tests.
+func New() (*CA, error) { return generate() }
 
 func generate() (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -194,18 +200,33 @@ func (ca *CA) SignAgent(csrPEM []byte, nodeID string, hosts []string) (certPEM [
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), Fingerprint(der), nil
 }
 
-// ServerClientCertValidity is how long xenibase-server's client certificate
-// is valid. The server renews it well before then (nodes.Service).
-const ServerClientCertValidity = 30 * 24 * time.Hour
+// ServerClientCertValidity is how long a xenibase-server client
+// certificate is valid. It is short so that a copied certificate is worth
+// little; the server renews it at half-life (nodes.Service), and agents
+// that have been given an allow list accept only the serials on it.
+const ServerClientCertValidity = 24 * time.Hour
 
-// ServerClientCert issues xenibase-server's client certificate, valid for
-// ServerClientCertValidity from now.
+// ServerURIPrefix starts the URI SAN that names the server a client
+// certificate was issued to: "xenibase://server/<name>".
+const ServerURIPrefix = "xenibase://server/"
+
+// ServerClientCert issues an unnamed xenibase-server client certificate,
+// valid for ServerClientCertValidity from now.
 func (ca *CA) ServerClientCert() (tls.Certificate, error) {
-	return ca.ServerClientCertAt(time.Now())
+	return ca.ServerClientCertFor("", time.Now())
 }
 
 // ServerClientCertAt is ServerClientCert issued as at now.
 func (ca *CA) ServerClientCertAt(now time.Time) (tls.Certificate, error) {
+	return ca.ServerClientCertFor("", now)
+}
+
+// ServerClientCertFor issues a client certificate, with its own new key,
+// to the server called name, valid for ServerClientCertValidity from now.
+// The subject stays ServerCN, which agents of every version check; the
+// server's name is the subject's OU and a URI SAN (ServerURIPrefix), and
+// the serial is what agents' allow lists hold.
+func (ca *CA) ServerClientCertFor(name string, now time.Time) (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -218,12 +239,70 @@ func (ca *CA) ServerClientCertAt(now time.Time) (tls.Certificate, error) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
+	if name != "" {
+		u, err := url.Parse(ServerURIPrefix + url.PathEscape(name))
+		if err != nil {
+			return tls.Certificate{}, fmt.Errorf("agent CA: server name %q: %w", name, err)
+		}
+		tmpl.Subject.OrganizationalUnit = []string{name}
+		tmpl.URIs = []*url.URL{u}
+	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
 	leaf, _ := x509.ParseCertificate(der)
 	return tls.Certificate{Certificate: [][]byte{der, ca.cert.Raw}, PrivateKey: key, Leaf: leaf}, nil
+}
+
+// Serial is a certificate's serial as allow lists hold it: lower-case hex.
+func Serial(c *x509.Certificate) string { return c.SerialNumber.Text(16) }
+
+// ServerNameFromCert is the server a client certificate was issued to, from
+// its URI SAN, or false for one issued before servers were named.
+func ServerNameFromCert(c *x509.Certificate) (string, bool) {
+	for _, u := range c.URIs {
+		if s := u.String(); strings.HasPrefix(s, ServerURIPrefix) {
+			name, err := url.PathUnescape(strings.TrimPrefix(s, ServerURIPrefix))
+			return name, err == nil && name != ""
+		}
+	}
+	return "", false
+}
+
+// SignList signs an agent allow list with the CA key.
+func (ca *CA) SignList(list agentapi.ClientSerialList) (agentapi.ClientSerials, error) {
+	raw, err := json.Marshal(list)
+	if err != nil {
+		return agentapi.ClientSerials{}, err
+	}
+	sum := sha256.Sum256(raw)
+	sig, err := ecdsa.SignASN1(rand.Reader, ca.key, sum[:])
+	if err != nil {
+		return agentapi.ClientSerials{}, err
+	}
+	return agentapi.ClientSerials{List: raw, Signature: sig}, nil
+}
+
+// Cert is the CA certificate.
+func (ca *CA) Cert() *x509.Certificate { return ca.cert }
+
+// VerifyList checks an allow list's signature against the CA certificate an
+// agent pinned and returns its content.
+func VerifyList(caCert *x509.Certificate, cs agentapi.ClientSerials) (agentapi.ClientSerialList, error) {
+	pub, ok := caCert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return agentapi.ClientSerialList{}, errors.New("agent CA: unexpected key type")
+	}
+	sum := sha256.Sum256(cs.List)
+	if !ecdsa.VerifyASN1(pub, sum[:], cs.Signature) {
+		return agentapi.ClientSerialList{}, errors.New("allow list: the agent CA did not sign it")
+	}
+	var list agentapi.ClientSerialList
+	if err := json.Unmarshal(cs.List, &list); err != nil {
+		return agentapi.ClientSerialList{}, fmt.Errorf("allow list: %w", err)
+	}
+	return list, nil
 }
 
 // Fingerprint is the SHA-256 of a DER certificate, as pinned in

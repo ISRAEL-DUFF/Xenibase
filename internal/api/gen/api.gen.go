@@ -4268,6 +4268,34 @@ type AdvisorFindings struct {
 	Items []AdvisorFinding `json:"items"`
 }
 
+// AgentClientCert defines model for AgentClientCert.
+type AgentClientCert struct {
+	// Current The certificate the answering server is using.
+	Current   bool       `json:"current"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	IssuedAt  time.Time  `json:"issued_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+
+	// Serial The certificate's serial, lower-case hex.
+	Serial string `json:"serial"`
+
+	// Server The xenibase-server it was issued to (its host name).
+	Server string `json:"server"`
+}
+
+// AgentClientCertRevoke Exactly one of serial and server.
+type AgentClientCertRevoke struct {
+	Serial *string `json:"serial,omitempty"`
+	Server *string `json:"server,omitempty"`
+}
+
+// AgentClientCertRevoked defines model for AgentClientCertRevoked.
+type AgentClientCertRevoked struct {
+	// NotPushed Agents the new list did not reach now; each gets it at its next health check.
+	NotPushed []string          `json:"not_pushed"`
+	Revoked   []AgentClientCert `json:"revoked"`
+}
+
 // AgentRegisterRequest defines model for AgentRegisterRequest.
 type AgentRegisterRequest struct {
 	AdvertiseHost *string `json:"advertise_host,omitempty"`
@@ -10997,6 +11025,9 @@ type SupportWhatsAppVerifyParams struct {
 // SupportWhatsAppWebhookJSONBody defines parameters for SupportWhatsAppWebhook.
 type SupportWhatsAppWebhookJSONBody map[string]interface{}
 
+// RevokeAgentClientCertsJSONRequestBody defines body for RevokeAgentClientCerts for application/json ContentType.
+type RevokeAgentClientCertsJSONRequestBody = AgentClientCertRevoke
+
 // PutBillingSettingsJSONRequestBody defines body for PutBillingSettings for application/json ContentType.
 type PutBillingSettingsJSONRequestBody = BillingSettings
 
@@ -11545,6 +11576,12 @@ type CreateTokenJSONRequestBody = CreateTokenRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+	// (GET /api/v1/admin/agent-client-certs)
+	ListAgentClientCerts(w http.ResponseWriter, r *http.Request)
+	// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+	// (POST /api/v1/admin/agent-client-certs/revoke)
+	RevokeAgentClientCerts(w http.ResponseWriter, r *http.Request)
 	// ListPlatformAudit The platform audit log, newest first (platform admin)
 	// (GET /api/v1/admin/audit)
 	ListPlatformAudit(w http.ResponseWriter, r *http.Request, params ListPlatformAuditParams)
@@ -12801,6 +12838,18 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+// (GET /api/v1/admin/agent-client-certs)
+func (_ Unimplemented) ListAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+// (POST /api/v1/admin/agent-client-certs/revoke)
+func (_ Unimplemented) RevokeAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // ListPlatformAudit The platform audit log, newest first (platform admin)
 // (GET /api/v1/admin/audit)
@@ -15312,6 +15361,34 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListAgentClientCerts operation middleware
+func (siw *ServerInterfaceWrapper) ListAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListAgentClientCerts(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RevokeAgentClientCerts operation middleware
+func (siw *ServerInterfaceWrapper) RevokeAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeAgentClientCerts(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // ListPlatformAudit operation middleware
 func (siw *ServerInterfaceWrapper) ListPlatformAudit(w http.ResponseWriter, r *http.Request) {
@@ -27143,6 +27220,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/nodes/{id}/registration-token", wrapper.CreateNodeRegistrationToken)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/admin/agent-client-certs", wrapper.ListAgentClientCerts)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/admin/agent-client-certs/revoke", wrapper.RevokeAgentClientCerts)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/agent/register", wrapper.RegisterAgent)

@@ -635,7 +635,7 @@ var specMatrix = map[authz.Action][]string{
 		"POST /api/v1/nodes", "GET /api/v1/nodes/{id}", "PATCH /api/v1/nodes/{id}", "DELETE /api/v1/nodes/{id}",
 		// V3 §5 capacity automation, §5.4 and §7.2 costs and margins
 		// V3 §6.1 regions
-		"GET /api/v1/admin/pg-versions", "PATCH /api/v1/admin/pg-versions/{major}", "GET /api/v1/admin/regions", "PUT /api/v1/admin/regions/{region_id}", "GET /api/v1/admin/regions/{region_id}/readiness",
+		"GET /api/v1/admin/pg-versions", "GET /api/v1/admin/agent-client-certs", "POST /api/v1/admin/agent-client-certs/revoke", "PATCH /api/v1/admin/pg-versions/{major}", "GET /api/v1/admin/regions", "PUT /api/v1/admin/regions/{region_id}", "GET /api/v1/admin/regions/{region_id}/readiness",
 		"GET /api/v1/admin/capacity", "PUT /api/v1/admin/capacity/settings", "POST /api/v1/admin/capacity/evaluate", "POST /api/v1/admin/capacity/proposals/{proposal_id}/approve", "POST /api/v1/admin/capacity/proposals/{proposal_id}/reject", "POST /api/v1/admin/capacity/rebalance", "POST /api/v1/admin/capacity/batches/{batch_id}", "GET /api/v1/admin/cloud/catalog", "POST /api/v1/nodes/{id}/drain", "DELETE /api/v1/nodes/{id}/drain", "PUT /api/v1/nodes/{id}/cost", "GET /api/v1/admin/costs", "POST /api/v1/admin/costs/attribute", "GET /api/v1/admin/costs/settings", "PUT /api/v1/admin/costs/settings", "GET /api/v1/admin/fx-rates", "POST /api/v1/admin/fx-rates",
 		"POST /api/v1/nodes/{id}/shared-cluster", "POST /api/v1/nodes/{id}/registration-token", "GET /api/v1/nodes/{id}/metrics",
 		"GET /api/v1/security/isolation-checks", "POST /api/v1/security/isolation-checks", "GET /api/v1/alerts",
