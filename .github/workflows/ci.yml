@@ -30,6 +30,12 @@ jobs:
           --health-retries 30
     env:
       XENIBASE_TEST_DATABASE_URL: postgres://xenibase:xenibase@127.0.0.1:5432/xenibase?sslmode=disable
+      # TestDumpRestoreCopy: the agent's real pg_dump and pg_restore, from the
+      # client tools installed below (the same major as the service).
+      XENIBASE_TEST_PG_BIN: /usr/lib/postgresql/18/bin
+      # docker.TestAgainstDaemon: the runner's Docker, with the postgres:18
+      # image the service above pulled.
+      XENIBASE_TEST_DOCKER: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,7 +60,19 @@ jobs:
         with:
           version: v2.14
 
+      - name: Postgres 18 client tools (pg_dump, pg_restore) from PGDG
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -q --no-install-recommends postgresql-client-18
+          "$XENIBASE_TEST_PG_BIN/pg_dump" --version
+
+      # make test-go prints every skipped test with its reason; these two
+      # must not be among them here, where their environment exists.
       - name: Go tests (including Postgres-backed)
+        env:
+          XENIBASE_TEST_MUST_RUN: TestDumpRestoreCopy,TestAgainstDaemon
         run: make test-go
 
       - name: Deploy scripts (upgrade.sh, deploy-ssh.sh, enable-services.sh)
@@ -98,6 +116,9 @@ jobs:
         env:
           # M18's move under load, at 1 GB (make test-move runs 20).
           XENIBASE_TEST_MOVE_GB: "1"
+          # Each skips without part of the test environment; here that is
+          # a broken environment, not a reason to pass.
+          XENIBASE_TEST_MUST_RUN: TestDedicatedResize,TestMoveUnderLoad,TestTenantIsolation,TestSDKs,TestPoolerHostFailover
         run: |
           set -o pipefail
           make test-integration 2>&1 | tee "$RUNNER_TEMP/integration.log"

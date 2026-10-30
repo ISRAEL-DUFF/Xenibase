@@ -125,35 +125,41 @@ func TestDedicatedResize(t *testing.T) {
 	}
 
 	// ---- A size the node can't hold moves the project -------------------------
-	// Fill node "test": a placeholder instance holding all but this
-	// project's 2 vCPU of its reported CPUs.
-	var hostCPUs float64
-	if err := e.DB.QueryRow(ctx, `SELECT (capacity->>'cpus')::float8 FROM nodes WHERE id = $1`, ns[0].Id).Scan(&hostCPUs); err != nil || hostCPUs < 3 {
-		t.Skipf("node test reports %g CPUs (%v); the move needs at least 3", hostCPUs, err)
+	// Fill node "test" by memory: a placeholder instance (no CPUs) holding
+	// all but 256 MB of what the node reports and its instances leave, so
+	// 512 MB more doesn't fit there. Memory, not CPUs, so the test needs
+	// no particular number of cores: the nodes share this host, and Docker
+	// refuses a CPU limit above the host's cores but not a memory limit.
+	var freeMB int64
+	if err := e.DB.QueryRow(ctx, `SELECT ((capacity->>'mem_total_bytes')::bigint >> 20)
+		  - (SELECT coalesce(sum(mem_limit_mb), 0) FROM instances WHERE node_id = $1 AND deleted_at IS NULL)
+		FROM nodes WHERE id = $1`, ns[0].Id).Scan(&freeMB); err != nil {
+		t.Fatalf("node test's free memory: %v", err)
 	}
 	filler := uuid.New()
 	if _, err := e.DB.Exec(ctx, `INSERT INTO instances (id, node_id, kind, pg_version, port, status, cpu_limit, mem_limit_mb, volume_gb)
-		VALUES ($1, $2, 'dedicated', 17, 0, 'stopped', $3, 256, 1)`, filler, ns[0].Id, hostCPUs-2); err != nil {
+		VALUES ($1, $2, 'dedicated', 17, 0, 'stopped', 0, $3, 1)`, filler, ns[0].Id, max(freeMB-256, 0)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = e.DB.Exec(context.Background(), `DELETE FROM instances WHERE id = $1`, filler) })
-	three, yes := float32(3), true
+	bigger, yes := 2560, true
 	var dry gen.InstanceUpdated
-	if code := e.Do("PATCH", "/api/v1/projects/"+pid.String()+"/instance", gen.InstanceUpdate{Cpus: &three, DryRun: &yes}, &dry); code != http.StatusOK ||
+	if code := e.Do("PATCH", "/api/v1/projects/"+pid.String()+"/instance", gen.InstanceUpdate{MemoryMb: &bigger, DryRun: &yes}, &dry); code != http.StatusOK ||
 		dry.Plan == nil || dry.Plan.MoveTo == nil || dry.Operation != nil {
 		t.Fatalf("dry run that doesn't fit: %d %+v", code, dry)
 	}
 	moveTo := *dry.Plan.MoveTo
-	_, op = resize(t, e, pid, gen.InstanceUpdate{Cpus: &three})
+	_, op = resize(t, e, pid, gen.InstanceUpdate{MemoryMb: &bigger})
 	if op.Kind != dedicated.KindMove {
 		t.Fatalf("a resize that doesn't fit queued %s", op.Kind)
 	}
 	e.Do("GET", "/api/v1/projects/"+pid.String(), nil, &gp)
-	if gp.Instance == nil || gp.Instance.NodeName != moveTo || gp.Instance.Cpus == nil || *gp.Instance.Cpus != 3 ||
+	if gp.Instance == nil || gp.Instance.NodeName != moveTo || gp.Instance.Cpus == nil || *gp.Instance.Cpus != 2 ||
+		gp.Instance.MemoryMb == nil || *gp.Instance.MemoryMb != 2560 ||
 		gp.Instance.VolumeGb == nil || *gp.Instance.VolumeGb != 10 || gp.Settings.DiskWarnBytes != dedicated.DefaultDiskWarn(10) {
 		t.Fatalf("after the moving resize: %+v warn %d", gp.Instance, gp.Settings.DiskWarnBytes)
 	}
-	if got := limits(t, gp.Instance.Id); got != "3000000000 2147483648" {
+	if got := limits(t, gp.Instance.Id); got != "2000000000 2684354560" {
 		t.Fatalf("container limits after the move: %s", got)
 	}
 	conn = e.MustConnect(c.Connection.PooledUrl)

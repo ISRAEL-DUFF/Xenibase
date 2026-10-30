@@ -919,6 +919,20 @@ bundle share one version (spec §11.5).
   `docs-install`, `audit` and `upgrade` to pass first; it alone can write to
   the repository, and `release.yml` is gone. See `docs/deploying.md` ("Where
   a release comes from").
+- **Tests that never ran in CI now run, and skips are counted.**
+  `TestDumpRestoreCopy` (the agent's real `pg_dump` and `pg_restore`) and
+  `docker.TestAgainstDaemon` skipped in every run because nothing set
+  `XENIBASE_TEST_PG_BIN` or `XENIBASE_TEST_DOCKER`; the `ci` job now installs
+  the Postgres 18 client tools and sets both, and `TestAgainstDaemon` fails
+  rather than skips when it is asked to run without a daemon or image. The
+  second half of `TestDedicatedResize` (a size its node can't hold moves the
+  project) skipped on a runner with fewer than three CPUs; it now fills the
+  node by memory, so it runs on any runner. `make test-go` and
+  `make test-integration` pipe `go test -json` through
+  `internal/tools/testsummary`, which prints each package's result, the
+  output of failing tests, the counts, and every skipped test with its
+  reason, and fails when a test named in `XENIBASE_TEST_MUST_RUN` skipped;
+  CI names the tests its environment is there for.
 
 ### Upgrading
 - A CLI context saved for an `http://` server other than this machine stops

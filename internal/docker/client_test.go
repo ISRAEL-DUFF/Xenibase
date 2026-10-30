@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// TestAgainstDaemon runs when XENIBASE_TEST_DOCKER=1 and a daemon is reachable.
+// TestAgainstDaemon runs when XENIBASE_TEST_DOCKER=1, and then fails without a
+// daemon or the image (postgres:18, or XENIBASE_TEST_DOCKER_IMAGE).
 func TestAgainstDaemon(t *testing.T) {
 	if os.Getenv("XENIBASE_TEST_DOCKER") == "" {
 		t.Skip("XENIBASE_TEST_DOCKER not set")
@@ -24,10 +25,10 @@ func TestAgainstDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := c.Ping(ctx); err != nil {
-		t.Skipf("no docker daemon: %v", err)
+		t.Fatalf("XENIBASE_TEST_DOCKER is set but there is no docker daemon: %v", err)
 	}
 	if ok, err := c.ImageExists(ctx, image); err != nil || !ok {
-		t.Skipf("image %s not present: %v", image, err)
+		t.Fatalf("image %s not present (docker pull it, or set XENIBASE_TEST_DOCKER_IMAGE): %v", image, err)
 	}
 	if ok, _ := c.ImageExists(ctx, "xenibase/definitely-missing:0"); ok {
 		t.Fatal("missing image reported present")
