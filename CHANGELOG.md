@@ -945,6 +945,12 @@ bundle share one version (spec §11.5).
   or HIGH vulnerability. And `.github/dependabot.yml` proposes weekly,
   grouped updates for the Go modules, the npm trees, the Dockerfiles and
   compose images, and the workflows' actions.
+- **The upgrade rehearsal starts from the latest release.** `make
+  test-upgrade` installed v4.1.0, which its comment called the previous
+  release four releases later. It now finds the newest `vX.Y.Z` tag
+  reachable from the commit (not one on the commit itself, so CI on a
+  release tag upgrades from the release before), falling back to v4.1.0;
+  `UPGRADE_FROM` still overrides it.
 
 ### Upgrading
 - Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
