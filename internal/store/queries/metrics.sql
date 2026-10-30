@@ -43,3 +43,24 @@ ORDER BY scope, scope_id, metric, ts DESC;
 -- tenant: system - the metrics collector, or a project the request already authorized.
 UPDATE projects SET extensions = (SELECT array_agg(DISTINCT e ORDER BY e) FROM unnest(extensions || @name::text) AS e)
 WHERE id = @id;
+
+-- name: UpsertPoolerReading :exec
+-- tenant: system - a server's reading of its own poolers, for the metrics collector.
+INSERT INTO pooler_readings (source, pools, sampled_at) VALUES (@source, @pools, now())
+ON CONFLICT (source) DO UPDATE SET pools = EXCLUDED.pools, sampled_at = now();
+
+-- name: FreshPoolerReadings :many
+-- tenant: system - the metrics collector sums every server's pooler readings.
+SELECT source, pools FROM pooler_readings
+WHERE sampled_at > now() - make_interval(secs => @max_age_s::float8)
+ORDER BY source;
+
+-- name: PrunePoolerReadings :execrows
+-- tenant: system - the metrics collector drops readings of servers that stopped.
+DELETE FROM pooler_readings WHERE sampled_at < now() - interval '1 hour';
+
+-- name: ListInstanceLabels :many
+-- tenant: system - /metrics labels the series of instances (shared clusters and dedicated), not tenants.
+SELECT i.id, i.kind, i.node_id, n.name AS node FROM instances i
+JOIN nodes n ON n.id = i.node_id
+ORDER BY i.id;

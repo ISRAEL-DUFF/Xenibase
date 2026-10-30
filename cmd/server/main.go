@@ -535,7 +535,14 @@ func run() error {
 		if servicesSvc != nil {
 			servicesSvc.Outbound = outboundSvc
 		}
-		webhookSvc = webhooks.New(pool, keyring, projects, outboundSvc, tenancySvc, mailSvc, webhooks.Config{PublicURL: cfg.Insight.PublicURL}, log)
+		listenMax := cfg.Insight.WebhookListenMax
+		if listenMax == 0 {
+			listenMax = -1 // none: every project is polled
+		}
+		webhookSvc = webhooks.New(pool, keyring, projects, outboundSvc, tenancySvc, mailSvc, webhooks.Config{
+			PublicURL: cfg.Insight.PublicURL, ListenMax: listenMax,
+			IdleAfter: cfg.Insight.WebhookIdleAfter, IdlePoll: cfg.Insight.WebhookIdlePoll,
+		}, log)
 		// SQL jobs run through the console's login (it holds no privileges
 		// of its own), whether or not the console itself is turned off.
 		jobConsole := console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)

@@ -1100,8 +1100,48 @@ bundle share one version (spec §11.5).
   and `error` (warning: delete the project once the cause is fixed). The
   repair loop still thaws only the move-like statuses, the ones with a
   safe automatic repair.
+- **One server collects metrics.** Every xenibase-server, every minute,
+  listed every active project, opened a fresh admin connection to every
+  instance, read every PgBouncer and upserted `metric_points`, so each
+  added server repeated the work and multiplied the instance connections.
+  Now one server collects at a time, under an advisory lock held on a
+  connection of its own, and another takes over on its next round when
+  it stops. It keeps one admin connection per instance between rounds,
+  opened again after the instance closes it or its address or
+  credentials change, and closed when idle or when the instance has no
+  active project left. Each server still reads its own local PgBouncers,
+  which only it reaches, and leaves the counts in `pooler_readings` for
+  the collecting server, so `pooler_clients`, `pooler_waiting` and the
+  Free tier's activity cover every server's poolers. Every server still
+  serves `/metrics` from the stored points.
+- **Webhook `LISTEN` connections are capped and released when idle.** The
+  delivering server held a direct admin connection, outside the poolers,
+  for every project with webhooks, and nothing counted them against the
+  cluster's `max_connections` (500 in the bundle). Now an instance gets at
+  most `XENIBASE_WEBHOOK_LISTEN_MAX` (50) of them, a project gives its own
+  back once its outbox has had nothing to send for
+  `XENIBASE_WEBHOOK_IDLE_AFTER` (10 minutes), and the other projects are
+  polled every `XENIBASE_WEBHOOK_IDLE_POLL` (30 seconds), every 5 seconds
+  while events are going out, taking a connection again when one is free.
+  Order and at-least-once delivery are unchanged. `/metrics` shows the
+  number held as `xenibase_instance_webhook_listen_connections`, labelled
+  by instance, kind and node.
 
 ### Upgrading
+- Migration 00102 adds `pooler_readings`, where each server leaves its
+  local PgBouncers' counts for the server collecting metrics. Nothing to
+  set. With several servers, the first to start after the upgrade
+  collects; points from older servers still running the previous release
+  are upserted alongside until they are upgraded.
+- New settings, passed through by the bundle's `compose.yaml`:
+  `XENIBASE_WEBHOOK_LISTEN_MAX` (default 50; `0` polls every project),
+  `XENIBASE_WEBHOOK_IDLE_AFTER` (10m) and `XENIBASE_WEBHOOK_IDLE_POLL`
+  (30s). A project with webhooks that has been quiet for 10 minutes, or
+  past the cap on its instance, can now take up to 30 seconds to send its
+  first event; lower `XENIBASE_WEBHOOK_IDLE_POLL` or raise the cap if that
+  matters more than the connections. An instance with more than 50 busy
+  webhook projects has the rest polled; leave room in its
+  `max_connections` before raising the cap.
 - Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
   up`. An install with backend services on keeps the Caddy image
   `enable-services.sh` built until it is run again, which rebuilds it pinned.

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/israel-duff/xenibase/internal/metrics"
 	"github.com/israel-duff/xenibase/internal/outbound"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -83,8 +84,9 @@ type outboxRow struct {
 }
 
 // Run delivers events until ctx ends: one loop per project with webhooks,
-// woken by LISTEN and polled every Poll, while this server holds the
-// delivery lock.
+// while this server holds the delivery lock. A loop LISTENs on its
+// project's database while the project is busy and the instance has a
+// LISTEN connection to spare (ListenMax), and polls the outbox otherwise.
 func (s *Service) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		conn, err := s.db.Acquire(ctx)
@@ -119,11 +121,16 @@ func (s *Service) supervise(ctx context.Context) {
 			c()
 		}
 	}()
-	lastSweep := time.Time{}
+	lastSweep, lastRecord := time.Time{}, time.Time{}
+	instances := map[uuid.UUID]bool{} // with LISTEN points recorded
 	for ctx.Err() == nil {
 		projects, err := store.New(s.db).WebhookProjects(ctx)
 		if err != nil {
 			s.log.Warn("webhook projects", "err", err)
+		}
+		if bucket := time.Now().Truncate(time.Minute); bucket.After(lastRecord) {
+			s.recordListening(ctx, projects, instances)
+			lastRecord = bucket
 		}
 		live := map[uuid.UUID]bool{}
 		for _, p := range projects {
@@ -158,8 +165,17 @@ func (s *Service) sweep(ctx context.Context) {
 	}
 }
 
-// projectLoop listens on the project's database and delivers its events,
-// reconnecting when the project moves to another instance.
+// projectLoop delivers a project's events, one pass at a time, so its
+// events go out in order and no two passes send the same one.
+//
+// While the project's outbox has had events in the last IdleAfter, the
+// loop holds a connection to the project's database with LISTEN, which
+// wakes it on each commit (and polls every Poll), if the instance has one
+// of its ListenMax LISTEN connections free. Otherwise it reads the outbox
+// every IdlePoll over a connection opened for that read, every Poll while
+// events are waiting, and tries for a LISTEN connection again once there
+// are. A replay kicks it in either mode. The connection is opened again
+// when the project moves to another instance.
 func (s *Service) projectLoop(ctx context.Context, projectID uuid.UUID) {
 	kick := make(chan struct{}, 1)
 	s.mu.Lock()
@@ -172,9 +188,10 @@ func (s *Service) projectLoop(ctx context.Context, projectID uuid.UUID) {
 		}
 		s.mu.Unlock()
 	}()
-	lastCheck := time.Time{}
+	var lastCheck time.Time
+	lastBusy := time.Now() // a new loop LISTENs, as before the cap
 	for ctx.Err() == nil {
-		p, err := store.New(s.db).GetProject(ctx, projectID)
+		p, err := s.loop.project(ctx, projectID)
 		if err != nil || p.DeletedAt != nil {
 			return
 		}
@@ -183,46 +200,177 @@ func (s *Service) projectLoop(ctx context.Context, projectID uuid.UUID) {
 			sleep(ctx, s.cfg.Poll)
 			continue
 		}
-		conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
-		if err != nil {
-			sleep(ctx, s.cfg.Poll)
+		if time.Since(lastBusy) < s.cfg.IdleAfter && s.takeListen(p.ID, p.InstanceID) {
+			lastBusy = s.listen(ctx, p, kick, &lastCheck, lastBusy)
+			s.releaseListen(p.ID)
 			continue
 		}
-		if _, err := conn.Exec(ctx, "LISTEN "+OutboxChannel); err != nil {
-			_ = conn.Close(context.Background())
-			sleep(ctx, s.cfg.Poll)
-			continue
+		busy, err := s.poll(ctx, p, &lastCheck)
+		if err != nil && ctx.Err() == nil {
+			s.log.Warn("deliver webhooks", "project_id", projectID, "err", err)
 		}
-		for ctx.Err() == nil {
-			cur, err := store.New(s.db).GetProject(ctx, projectID)
-			if err != nil || cur.InstanceID != p.InstanceID || cur.Status != provision.StatusActive || cur.DeletedAt != nil {
-				break
-			}
-			if time.Since(lastCheck) > time.Minute {
-				s.health(ctx, conn, cur)
-				lastCheck = time.Now()
-			}
-			if err := s.deliverProject(ctx, conn, cur); err != nil && ctx.Err() == nil {
-				s.log.Warn("deliver webhooks", "project_id", projectID, "err", err)
-				if conn.IsClosed() {
-					break
-				}
-			}
-			wctx, cancel := context.WithTimeout(ctx, s.cfg.Poll)
-			go func() {
-				select {
-				case <-kick:
-					cancel()
-				case <-wctx.Done():
-				}
-			}()
-			_, err = conn.WaitForNotification(wctx)
-			cancel()
-			if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && conn.IsClosed() {
-				break
+		wait := s.cfg.IdlePoll
+		if busy {
+			lastBusy, wait = time.Now(), s.cfg.Poll
+		}
+		select {
+		case <-ctx.Done():
+		case <-kick:
+			lastBusy = time.Now()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// listen delivers p's events over a connection with LISTEN until the
+// project moves, stops being active, the connection breaks, or its outbox
+// has been empty for IdleAfter. It returns when the outbox last had events.
+func (s *Service) listen(ctx context.Context, p store.Project, kick chan struct{}, lastCheck *time.Time, lastBusy time.Time) time.Time {
+	conn, err := s.loop.connect(ctx, p)
+	if err != nil {
+		sleep(ctx, s.cfg.Poll)
+		return lastBusy
+	}
+	defer conn.Close(context.Background())
+	if _, err := conn.Exec(ctx, "LISTEN "+OutboxChannel); err != nil {
+		sleep(ctx, s.cfg.Poll)
+		return lastBusy
+	}
+	for ctx.Err() == nil {
+		cur, err := s.loop.project(ctx, p.ID)
+		if err != nil || cur.InstanceID != p.InstanceID || cur.Status != provision.StatusActive || cur.DeletedAt != nil {
+			return lastBusy
+		}
+		if time.Since(*lastCheck) > time.Minute {
+			s.loop.health(ctx, conn, cur)
+			*lastCheck = time.Now()
+		}
+		busy, err := s.loop.pass(ctx, conn, cur)
+		if busy {
+			lastBusy = time.Now()
+		}
+		if err != nil && ctx.Err() == nil {
+			s.log.Warn("deliver webhooks", "project_id", p.ID, "err", err)
+			if conn.IsClosed() {
+				return lastBusy
 			}
 		}
-		_ = conn.Close(context.Background())
+		if time.Since(lastBusy) >= s.cfg.IdleAfter {
+			return lastBusy // idle: the connection goes back
+		}
+		wctx, cancel := context.WithTimeout(ctx, s.cfg.Poll)
+		go func() {
+			select {
+			case <-kick:
+				cancel()
+			case <-wctx.Done():
+			}
+		}()
+		_, err = conn.WaitForNotification(wctx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && conn.IsClosed() {
+			return lastBusy
+		}
+	}
+	return lastBusy
+}
+
+// poll runs one pass for p over a connection opened for it.
+func (s *Service) poll(ctx context.Context, p store.Project, lastCheck *time.Time) (bool, error) {
+	conn, err := s.loop.connect(ctx, p)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(context.Background())
+	if time.Since(*lastCheck) > time.Minute {
+		s.loop.health(ctx, conn, p)
+		*lastCheck = time.Now()
+	}
+	return s.loop.pass(ctx, conn, p)
+}
+
+// takeListen takes one of the instance's LISTEN connections for a
+// project, if one is free.
+func (s *Service) takeListen(project, instance uuid.UUID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.ListenMax < 0 || s.held[instance] >= s.cfg.ListenMax {
+		return false
+	}
+	s.held[instance]++
+	s.listening[project] = instance
+	return true
+}
+
+func (s *Service) releaseListen(project uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	instance, ok := s.listening[project]
+	if !ok {
+		return
+	}
+	delete(s.listening, project)
+	if s.held[instance]--; s.held[instance] <= 0 {
+		delete(s.held, instance)
+	}
+}
+
+// ListenConnections is how many LISTEN connections this server holds to
+// each instance (none unless it is the deliverer).
+func (s *Service) ListenConnections() map[uuid.UUID]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[uuid.UUID]int, len(s.held))
+	for id, n := range s.held {
+		out[id] = n
+	}
+	return out
+}
+
+// Listening reports whether the deliverer holds a LISTEN connection for a
+// project.
+func (s *Service) Listening(project uuid.UUID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.listening[project]
+	return ok
+}
+
+// recordListening writes the LISTEN connections held per instance to
+// metric_points (instance webhook_listen_connections on /metrics), for
+// every instance with a webhook project, and a last 0 for one that no
+// longer has any. seen carries the instances recorded last time.
+func (s *Service) recordListening(ctx context.Context, projects []store.Project, seen map[uuid.UUID]bool) {
+	held := s.ListenConnections()
+	now := map[uuid.UUID]bool{}
+	for _, p := range projects {
+		now[p.InstanceID] = true
+	}
+	for id := range held {
+		now[id] = true
+	}
+	var ids []uuid.UUID
+	var names []string
+	var vals []float64
+	for id := range now {
+		ids, names, vals = append(ids, id), append(names, metrics.WebhookListenConnections), append(vals, float64(held[id]))
+	}
+	for id := range seen {
+		if !now[id] {
+			ids, names, vals = append(ids, id), append(names, metrics.WebhookListenConnections), append(vals, 0)
+			delete(seen, id)
+		}
+	}
+	for id := range now {
+		seen[id] = true
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if err := store.New(s.db).UpsertMetricPoints(ctx, store.UpsertMetricPointsParams{
+		Scope: metrics.ScopeInstance, ScopeIds: ids, Metrics: names, Ts: time.Now().UTC().Truncate(time.Minute), Vals: vals,
+	}); err != nil && ctx.Err() == nil {
+		s.log.Warn("record webhook LISTEN connections", "err", err)
 	}
 }
 
@@ -258,7 +406,8 @@ func (s *Service) DeliverNow(ctx context.Context, p store.Project) error {
 		return err
 	}
 	defer conn.Close(context.Background())
-	return s.deliverProject(ctx, conn, p)
+	_, err = s.deliverProject(ctx, conn, p)
+	return err
 }
 
 // errQueued stops a pass: the organisation is over its rate or its
@@ -266,34 +415,33 @@ func (s *Service) DeliverNow(ctx context.Context, p store.Project) error {
 var errQueued = errors.New("queued")
 
 // deliverProject sends what is due in the project's outbox, in order per
-// webhook.
-func (s *Service) deliverProject(ctx context.Context, conn *pgx.Conn, p store.Project) error {
+// webhook. busy says it sent (or tried to send) an event: events waiting
+// for a retry, behind a paused webhook, or held back by the organisation's
+// rate, outbound switch or spend cap don't keep a LISTEN connection.
+func (s *Service) deliverProject(ctx context.Context, conn *pgx.Conn, p store.Project) (busy bool, err error) {
 	if ok, err := outboxExists(ctx, conn); err != nil || !ok {
-		return err
-	}
-	if err := s.out.Gate(ctx, p.OrgID); err != nil {
-		if errors.Is(err, outbound.ErrDisabled) {
-			return nil // queued until outbound traffic is back
-		}
-		return err
-	}
-	if capped, err := store.New(s.db).OrgSpendCapped(ctx, p.OrgID); err != nil || capped {
-		return err // at the spend cap, deliveries queue (V3 §3.10)
+		return false, err
 	}
 	rows, err := conn.Query(ctx, `SELECT DISTINCT webhook_id FROM xenibase.webhook_outbox`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-	if err != nil {
-		return err
+	if err != nil || len(ids) == 0 {
+		return false, err
 	}
-	if len(ids) == 0 {
-		return nil
+	if err := s.out.Gate(ctx, p.OrgID); err != nil {
+		if errors.Is(err, outbound.ErrDisabled) {
+			return false, nil // queued until outbound traffic is back
+		}
+		return false, err
+	}
+	if capped, err := store.New(s.db).OrgSpendCapped(ctx, p.OrgID); err != nil || capped {
+		return false, err // at the spend cap, deliveries queue (V3 §3.10)
 	}
 	hooks, err := store.New(s.db).ListWebhooks(ctx, p.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	byID := map[uuid.UUID]store.Webhook{}
 	for _, w := range hooks {
@@ -305,26 +453,27 @@ func (s *Service) deliverProject(ctx context.Context, conn *pgx.Conn, p store.Pr
 			limit, _ = l.Get(store.LimitWebhookPerMin)
 		}
 	}
+	sent := 0
 	for _, id := range ids {
 		w, ok := byID[id]
 		if !ok {
 			// Events of a deleted webhook.
 			if _, err := conn.Exec(ctx, `DELETE FROM xenibase.webhook_outbox WHERE webhook_id = $1`, id); err != nil {
-				return err
+				return sent > 0, err
 			}
 			continue
 		}
 		if !w.Enabled {
 			continue // paused: its queue waits
 		}
-		if err := s.deliverWebhook(ctx, conn, p, w, limit); err != nil {
+		if err := s.deliverWebhook(ctx, conn, p, w, limit, &sent); err != nil {
 			if errors.Is(err, errQueued) {
-				return nil
+				return sent > 0, nil
 			}
-			return err
+			return sent > 0, err
 		}
 	}
-	return nil
+	return sent > 0, nil
 }
 
 func (s *Service) head(ctx context.Context, conn *pgx.Conn, webhook uuid.UUID, n int) ([]outboxRow, error) {
@@ -341,7 +490,8 @@ func (s *Service) head(ctx context.Context, conn *pgx.Conn, webhook uuid.UUID, n
 
 // deliverWebhook sends w's due events in order; a failing event blocks
 // the ones behind it until it succeeds or is dead-lettered.
-func (s *Service) deliverWebhook(ctx context.Context, conn *pgx.Conn, p store.Project, w store.Webhook, limit int64) error {
+// sent counts the attempts.
+func (s *Service) deliverWebhook(ctx context.Context, conn *pgx.Conn, p store.Project, w store.Webhook, limit int64, sent *int) error {
 	secret, err := s.Secret(w)
 	if err != nil {
 		return err
@@ -388,6 +538,7 @@ func (s *Service) deliverWebhook(ctx context.Context, conn *pgx.Conn, p store.Pr
 		h := header(static)
 		h.Set("Xenibase-Event-Id", eventID)
 		h.Set("Xenibase-Webhook", w.Name)
+		*sent++
 		resp, derr := outbound.Response{}, perr
 		if derr == nil {
 			resp, derr = s.out.Send(ctx, target, outbound.Request{OrgID: p.OrgID, URL: w.Url, Header: h, Body: body, Timeout: Timeout,
