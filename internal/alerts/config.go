@@ -101,7 +101,23 @@ type smtpConfig struct {
 	to                                  []string
 }
 
-func (c channels) any() bool { return c.webhookURL != "" || c.smtp != nil }
+// Channel names, as alert_deliveries records them.
+const (
+	channelWebhook = "webhook"
+	channelEmail   = "email"
+)
+
+// names lists the configured channels.
+func (c channels) names() []string {
+	var out []string
+	if c.webhookURL != "" {
+		out = append(out, channelWebhook)
+	}
+	if c.smtp != nil {
+		out = append(out, channelEmail)
+	}
+	return out
+}
 
 func (s *Service) load(ctx context.Context) (stored, error) {
 	var st stored

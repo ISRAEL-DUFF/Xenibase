@@ -13,23 +13,65 @@ import (
 	"github.com/google/uuid"
 )
 
+const alertDeliveries = `-- name: AlertDeliveries :many
+SELECT alert_id, event, channel, sent_at, attempts, error, next_at FROM alert_deliveries WHERE alert_id = $1 AND event = $2
+`
+
+type AlertDeliveriesParams struct {
+	AlertID uuid.UUID
+	Event   string
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// Each channel's record of one event of an alert.
+func (q *Queries) AlertDeliveries(ctx context.Context, arg AlertDeliveriesParams) ([]AlertDelivery, error) {
+	rows, err := q.db.Query(ctx, alertDeliveries, arg.AlertID, arg.Event)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AlertDelivery
+	for rows.Next() {
+		var i AlertDelivery
+		if err := rows.Scan(
+			&i.AlertID,
+			&i.Event,
+			&i.Channel,
+			&i.SentAt,
+			&i.Attempts,
+			&i.Error,
+			&i.NextAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimUndelivered = `-- name: ClaimUndelivered :many
 UPDATE alerts SET delivery_lock = now() + interval '1 minute'
 WHERE id IN (
   SELECT id FROM alerts
-  WHERE ((status = 'firing' AND notified_at IS NULL) OR (status = 'resolved' AND notified_at IS NOT NULL AND resolved_notified_at IS NULL))
+  WHERE ((status = 'firing' AND notified_at IS NULL AND started_at > now() - interval '7 days')
+      OR (status = 'resolved' AND resolved_notified_at IS NULL AND resolved_at > now() - interval '7 days'))
     AND (delivery_lock IS NULL OR delivery_lock < now())
-    AND started_at > now() - interval '7 days'
   ORDER BY started_at
   LIMIT 50
   FOR UPDATE SKIP LOCKED
 )
-RETURNING id, kind, key, severity, target_type, target_id, target_name, summary, detail, status, started_at, last_seen_at, resolved_at, notified_at, resolved_notified_at, delivery_attempts, delivery_error, delivery_lock
+RETURNING id, kind, key, severity, target_type, target_id, target_name, summary, detail, status, started_at, last_seen_at, resolved_at, notified_at, resolved_notified_at, delivery_attempts, delivery_error, delivery_lock, clear_count, cleared_since
 `
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
-// Alerts with a notification not yet delivered, locked for a minute so
-// only one server sends each.
+// Alerts with a notification not yet delivered on every channel, locked
+// for a minute so only one server sends each. A resolved alert is
+// claimed whether or not its firing was delivered: one that resolved
+// before that is announced by its resolution. Each event is retried for
+// 7 days from when it happened.
 func (q *Queries) ClaimUndelivered(ctx context.Context) ([]Alert, error) {
 	rows, err := q.db.Query(ctx, claimUndelivered)
 	if err != nil {
@@ -58,6 +100,8 @@ func (q *Queries) ClaimUndelivered(ctx context.Context) ([]Alert, error) {
 			&i.DeliveryAttempts,
 			&i.DeliveryError,
 			&i.DeliveryLock,
+			&i.ClearCount,
+			&i.ClearedSince,
 		); err != nil {
 			return nil, err
 		}
@@ -67,6 +111,36 @@ func (q *Queries) ClaimUndelivered(ctx context.Context) ([]Alert, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const clearAlert = `-- name: ClearAlert :one
+UPDATE alerts SET
+  clear_count = clear_count + 1,
+  cleared_since = COALESCE(cleared_since, now()),
+  status = CASE WHEN clear_count + 1 >= $1::int AND COALESCE(cleared_since, now()) <= now() - make_interval(secs => $2::float8)
+    THEN 'resolved' ELSE status END,
+  resolved_at = CASE WHEN clear_count + 1 >= $1::int AND COALESCE(cleared_since, now()) <= now() - make_interval(secs => $2::float8)
+    THEN now() ELSE resolved_at END
+WHERE id = $3 AND status = 'firing'
+RETURNING (status = 'resolved')::bool AS resolved
+`
+
+type ClearAlertParams struct {
+	ResolveAfter int32
+	SpanSeconds  float64
+	ID           uuid.UUID
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// One evaluation found a firing alert's condition clear: count it, and
+// resolve the alert once @resolve_after evaluations in a row did, the
+// first at least @span_seconds ago (several servers evaluate, so the
+// count alone would come sooner). resolved tells the caller it resolved.
+func (q *Queries) ClearAlert(ctx context.Context, arg ClearAlertParams) (bool, error) {
+	row := q.db.QueryRow(ctx, clearAlert, arg.ResolveAfter, arg.SpanSeconds, arg.ID)
+	var resolved bool
+	err := row.Scan(&resolved)
+	return resolved, err
 }
 
 const countFiringAlerts = `-- name: CountFiringAlerts :one
@@ -194,7 +268,8 @@ const fireAlert = `-- name: FireAlert :one
 INSERT INTO alerts (kind, key, severity, target_type, target_id, target_name, summary, detail)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (key) WHERE status = 'firing'
-DO UPDATE SET last_seen_at = now(), summary = EXCLUDED.summary, detail = EXCLUDED.detail, severity = EXCLUDED.severity
+DO UPDATE SET last_seen_at = now(), summary = EXCLUDED.summary, detail = EXCLUDED.detail, severity = EXCLUDED.severity,
+  clear_count = 0, cleared_since = NULL
 RETURNING id, (xmax = 0) AS inserted
 `
 
@@ -215,8 +290,9 @@ type FireAlertRow struct {
 }
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
-// Inserts a firing alert, or refreshes the one already firing for key.
-// inserted tells the caller a notification is due.
+// Inserts a firing alert, or refreshes the one already firing for key
+// (and forgets the clear evaluations it had: hysteresis counts them in a
+// row). inserted tells the caller a notification is due.
 func (q *Queries) FireAlert(ctx context.Context, arg FireAlertParams) (FireAlertRow, error) {
 	row := q.db.QueryRow(ctx, fireAlert,
 		arg.Kind,
@@ -234,7 +310,7 @@ func (q *Queries) FireAlert(ctx context.Context, arg FireAlertParams) (FireAlert
 }
 
 const firingAlerts = `-- name: FiringAlerts :many
-SELECT id, kind, key, severity, target_type, target_id, target_name, summary, detail, status, started_at, last_seen_at, resolved_at, notified_at, resolved_notified_at, delivery_attempts, delivery_error, delivery_lock FROM alerts WHERE status = 'firing' ORDER BY started_at
+SELECT id, kind, key, severity, target_type, target_id, target_name, summary, detail, status, started_at, last_seen_at, resolved_at, notified_at, resolved_notified_at, delivery_attempts, delivery_error, delivery_lock, clear_count, cleared_since FROM alerts WHERE status = 'firing' ORDER BY started_at
 `
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
@@ -266,6 +342,8 @@ func (q *Queries) FiringAlerts(ctx context.Context) ([]Alert, error) {
 			&i.DeliveryAttempts,
 			&i.DeliveryError,
 			&i.DeliveryLock,
+			&i.ClearCount,
+			&i.ClearedSince,
 		); err != nil {
 			return nil, err
 		}
@@ -277,8 +355,58 @@ func (q *Queries) FiringAlerts(ctx context.Context) ([]Alert, error) {
 	return items, nil
 }
 
+const graceClear = `-- name: GraceClear :exec
+DELETE FROM alert_grace WHERE key = ANY($1::text[])
+`
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+func (q *Queries) GraceClear(ctx context.Context, keys []string) error {
+	_, err := q.db.Exec(ctx, graceClear, keys)
+	return err
+}
+
+const graceClearPrefix = `-- name: GraceClearPrefix :exec
+DELETE FROM alert_grace WHERE starts_with(key, $1::text) AND NOT (key = ANY($2::text[]))
+`
+
+type GraceClearPrefixParams struct {
+	Prefix string
+	Keep   []string
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// Forgets keys with @prefix except @keep.
+func (q *Queries) GraceClearPrefix(ctx context.Context, arg GraceClearPrefixParams) error {
+	_, err := q.db.Exec(ctx, graceClearPrefix, arg.Prefix, arg.Keep)
+	return err
+}
+
+const graceFailing = `-- name: GraceFailing :one
+INSERT INTO alert_grace (key) VALUES ($1)
+ON CONFLICT (key) DO UPDATE SET
+  since = CASE WHEN alert_grace.seen_at < now() - make_interval(secs => $2::float8) THEN now() ELSE alert_grace.since END,
+  seen_at = now()
+RETURNING EXTRACT(EPOCH FROM now() - since)::float8 AS failing_seconds
+`
+
+type GraceFailingParams struct {
+	Key          string
+	StaleSeconds float64
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// key is failing now: returns for how many seconds, by the database's
+// clock and shared by every server. A row no server refreshed for
+// @stale_seconds starts over.
+func (q *Queries) GraceFailing(ctx context.Context, arg GraceFailingParams) (float64, error) {
+	row := q.db.QueryRow(ctx, graceFailing, arg.Key, arg.StaleSeconds)
+	var failing_seconds float64
+	err := row.Scan(&failing_seconds)
+	return failing_seconds, err
+}
+
 const listAlerts = `-- name: ListAlerts :many
-SELECT id, kind, key, severity, target_type, target_id, target_name, summary, detail, status, started_at, last_seen_at, resolved_at, notified_at, resolved_notified_at, delivery_attempts, delivery_error, delivery_lock FROM alerts
+SELECT id, kind, key, severity, target_type, target_id, target_name, summary, detail, status, started_at, last_seen_at, resolved_at, notified_at, resolved_notified_at, delivery_attempts, delivery_error, delivery_lock, clear_count, cleared_since FROM alerts
 WHERE ($1::text IS NULL OR status = $1)
 ORDER BY (status = 'firing') DESC, started_at DESC
 LIMIT $2
@@ -318,6 +446,8 @@ func (q *Queries) ListAlerts(ctx context.Context, arg ListAlertsParams) ([]Alert
 			&i.DeliveryAttempts,
 			&i.DeliveryError,
 			&i.DeliveryLock,
+			&i.ClearCount,
+			&i.ClearedSince,
 		); err != nil {
 			return nil, err
 		}
@@ -327,6 +457,55 @@ func (q *Queries) ListAlerts(ctx context.Context, arg ListAlertsParams) ([]Alert
 		return nil, err
 	}
 	return items, nil
+}
+
+const markChannelFailed = `-- name: MarkChannelFailed :one
+INSERT INTO alert_deliveries (alert_id, event, channel, attempts, error, next_at)
+VALUES ($1, $2, $3, 1, $4, now() + interval '1 minute')
+ON CONFLICT (alert_id, event, channel) DO UPDATE SET attempts = alert_deliveries.attempts + 1, error = EXCLUDED.error,
+  next_at = now() + LEAST(interval '1 minute' * power(2, alert_deliveries.attempts), interval '30 minutes')
+RETURNING next_at::timestamptz
+`
+
+type MarkChannelFailedParams struct {
+	AlertID uuid.UUID
+	Event   string
+	Channel string
+	Error   *string
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// A channel failed: it is retried alone after 1 minute × 2^attempts,
+// capped at 30 minutes. Returns when.
+func (q *Queries) MarkChannelFailed(ctx context.Context, arg MarkChannelFailedParams) (time.Time, error) {
+	row := q.db.QueryRow(ctx, markChannelFailed,
+		arg.AlertID,
+		arg.Event,
+		arg.Channel,
+		arg.Error,
+	)
+	var next_at time.Time
+	err := row.Scan(&next_at)
+	return next_at, err
+}
+
+const markChannelSent = `-- name: MarkChannelSent :exec
+INSERT INTO alert_deliveries (alert_id, event, channel, sent_at, attempts)
+VALUES ($1, $2, $3, now(), 1)
+ON CONFLICT (alert_id, event, channel) DO UPDATE SET sent_at = now(), attempts = alert_deliveries.attempts + 1,
+  error = NULL, next_at = NULL
+`
+
+type MarkChannelSentParams struct {
+	AlertID uuid.UUID
+	Event   string
+	Channel string
+}
+
+// tenant: system - the platform alert evaluator; alerts are the platform admin's.
+func (q *Queries) MarkChannelSent(ctx context.Context, arg MarkChannelSentParams) error {
+	_, err := q.db.Exec(ctx, markChannelSent, arg.AlertID, arg.Event, arg.Channel)
+	return err
 }
 
 const markDelivered = `-- name: MarkDelivered :exec
@@ -343,25 +522,28 @@ type MarkDeliveredParams struct {
 }
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// Every configured channel has the event.
 func (q *Queries) MarkDelivered(ctx context.Context, arg MarkDeliveredParams) error {
 	_, err := q.db.Exec(ctx, markDelivered, arg.Resolved, arg.ID)
 	return err
 }
 
 const markDeliveryFailed = `-- name: MarkDeliveryFailed :exec
-UPDATE alerts SET delivery_attempts = delivery_attempts + 1, delivery_error = $1,
-  delivery_lock = now() + LEAST(interval '1 minute' * power(2, delivery_attempts), interval '30 minutes')
-WHERE id = $2
+UPDATE alerts SET delivery_attempts = delivery_attempts + 1, delivery_error = $1, delivery_lock = $2
+WHERE id = $3
 `
 
 type MarkDeliveryFailedParams struct {
-	Error *string
-	ID    uuid.UUID
+	Error   *string
+	RetryAt *time.Time
+	ID      uuid.UUID
 }
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
+// Some channel still lacks the event: claim the alert again when the
+// earliest such channel's backoff ends.
 func (q *Queries) MarkDeliveryFailed(ctx context.Context, arg MarkDeliveryFailedParams) error {
-	_, err := q.db.Exec(ctx, markDeliveryFailed, arg.Error, arg.ID)
+	_, err := q.db.Exec(ctx, markDeliveryFailed, arg.Error, arg.RetryAt, arg.ID)
 	return err
 }
 
@@ -477,13 +659,14 @@ func (q *Queries) ProjectSizes(ctx context.Context, since time.Time) ([]ProjectS
 	return items, nil
 }
 
-const resolveAlert = `-- name: ResolveAlert :execrows
-UPDATE alerts SET status = 'resolved', resolved_at = now() WHERE id = $1 AND status = 'firing'
+const pruneResolvedAlerts = `-- name: PruneResolvedAlerts :execrows
+DELETE FROM alerts WHERE status = 'resolved' AND resolved_at < $1::timestamptz
 `
 
 // tenant: system - the platform alert evaluator; alerts are the platform admin's.
-func (q *Queries) ResolveAlert(ctx context.Context, id uuid.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, resolveAlert, id)
+// Resolved alerts (and, by cascade, their deliveries) older than @before.
+func (q *Queries) PruneResolvedAlerts(ctx context.Context, before time.Time) (int64, error) {
+	result, err := q.db.Exec(ctx, pruneResolvedAlerts, before)
 	if err != nil {
 		return 0, err
 	}
