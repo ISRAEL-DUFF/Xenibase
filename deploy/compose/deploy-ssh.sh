@@ -32,9 +32,11 @@ upgrade)
 	--dry-run) flags=--dry-run ;;
 	*) echo "deploy: unknown option '$opt'" >&2; exit 64 ;;
 	esac
-	mkdir -p "$dir"
+	# Owner only, like the dumps upgrade.sh keeps next to it.
+	(umask 077 && mkdir -p "$dir")
 	log=$dir/last-deploy.log
 	rm -f "$rc_file"
+	(umask 077 && : > "$log")
 	# Detached: ignores the hangup of a dropped connection, writes to a file.
 	RC_FILE=$rc_file nohup sh -c 'rc=0; ./upgrade.sh "$1" "$2" || rc=$?; echo "$rc" > "$RC_FILE"' deploy "$tag" "$flags" > "$log" 2>&1 < /dev/null &
 	pid=$!

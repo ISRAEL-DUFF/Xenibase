@@ -429,7 +429,11 @@ organisations allows the host.
 
 ## Secrets
 
-- `.env` holds `XENIBASE_MASTER_KEY`; keep a copy off the server.
+- `.env` holds `XENIBASE_MASTER_KEY`; keep a copy off the server. Only its
+  owner may read it: `install.sh` writes it mode 600, and on every run sets
+  an existing one (for example copied by hand from `.env.example`) back to
+  600, with a warning. `upgrade.sh` writes its metadata dumps mode 600 in a
+  mode-700 `upgrade-backups/`.
 - **Rotate the master key**: generate a new one, run the rotation, then
   switch over:
 

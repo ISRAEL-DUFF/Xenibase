@@ -199,9 +199,10 @@ test-e2e: e2e-images
 	@$(E2E_INSTANCES)
 	$(E2E_COMPOSE) down -v --remove-orphans
 
-## test-deploy: upgrade.sh and deploy-ssh.sh against a fake docker (no Docker).
+## test-deploy: upgrade.sh, deploy-ssh.sh and install.sh against a fake docker (no Docker).
 test-deploy:
 	sh test/deploy/upgrade_test.sh
+	sh test/deploy/install_test.sh
 	sh test/deploy/enable_services_test.sh
 
 ## test-acmedns: what Caddy's acme-dns plugin does with the config enable-services.sh

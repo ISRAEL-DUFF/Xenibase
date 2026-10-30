@@ -905,6 +905,33 @@ bundle share one version (spec §11.5).
   pooler hosts' compose files now uses `json-file` with `max-size: 50m` and
   `max-file: 5`, at most 250 MB per container. Existing containers pick it
   up when they are next recreated (`./install.sh` does it).
+- **An upgrade's rollback no longer loses what was written while the images
+  built.** `upgrade.sh` took its metadata backup before `git checkout` and
+  `install.sh`, whose image build takes minutes while the old server keeps
+  writing, so a rollback after a migration restored a backup that missed
+  everything done in that time (projects created or deleted, password
+  changes, payment webhooks), besides what the new server wrote during the
+  checks. It now checks out the tag and builds its images first
+  (`install.sh --build-only`, new) while the old version serves, then stops
+  xenibase-server and the agent, takes and verifies the backup, and starts
+  the new version (`install.sh --no-build`, new). A failed build rolls back
+  with the old version still serving and nothing restored; a failed backup
+  starts the old version again. What the new version writes before a
+  failed check is still lost when the rollback restores; `docs/deploying.md`
+  ("What a rollback keeps") says what that means. A tag whose `install.sh`
+  lacks `--build-only` is upgraded the old way, backup first. Exit statuses,
+  the `.meta` file and `deploy-ssh.sh` are unchanged, except that a failed
+  backup is now exit 2 (rolled back) rather than 1, since the tag is
+  checked out and built by then.
+- **Upgrade backups and `.env` are readable by their owner only.**
+  `upgrade.sh` created its dump (password hashes, every sealed secret) under
+  the shell's umask, usually 644, in a 755 folder, and `chmod 600`ed it only
+  after `pg_dump` finished; its `.meta` file and log stayed 644. It now
+  creates each file mode 600 before writing to it and makes
+  `upgrade-backups/` mode 700 (`deploy-ssh.sh` creates it so too), without
+  changing the umask of what `git checkout` writes. An `.env` copied by hand
+  from `.env.example` kept the copy's mode; `install.sh` now sets an
+  existing `.env` to 600 on every run and warns when it had to.
 
 ### Upgrading
 - Migration 00094 adds the node lifecycle `retiring`, with
