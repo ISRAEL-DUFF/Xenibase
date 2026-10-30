@@ -126,7 +126,8 @@ func TestAllowListNoListAcceptsByCN(t *testing.T) {
 	}
 	// The CA check still applies with no list.
 	rogue, _ := agentca.New()
-	if _, err := a.client(issue(t, rogue, "a")).Get(a.url + agentapi.PathHealth); err == nil {
+	if resp, err := a.client(issue(t, rogue, "a")).Get(a.url + agentapi.PathHealth); err == nil {
+		_ = resp.Body.Close()
 		t.Fatal("a certificate from another CA was accepted")
 	}
 }

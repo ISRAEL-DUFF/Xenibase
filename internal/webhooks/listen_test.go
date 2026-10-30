@@ -233,8 +233,10 @@ func TestRecordListening(t *testing.T) {
 	ctx := context.Background()
 	s := New(db, nil, nil, nil, nil, nil, Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	busy, quiet := uuid.New(), uuid.New()
-	if !s.takeListen(uuid.New(), busy) || !s.takeListen(uuid.New(), busy) {
-		t.Fatal("no LISTEN connection to take")
+	for range 2 {
+		if !s.takeListen(uuid.New(), busy) {
+			t.Fatal("no LISTEN connection to take")
+		}
 	}
 	value := func(inst uuid.UUID) float64 {
 		t.Helper()
