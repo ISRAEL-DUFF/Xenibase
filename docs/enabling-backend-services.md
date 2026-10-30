@@ -259,7 +259,7 @@ How to use the data API, auth, storage and realtime from there is in
 | Where | What |
 | --- | --- |
 | `.env` | Adds, only if missing: `XENIBASE_API_DOMAIN`, a generated `XENIBASE_EDGE_SECRET` (40 random characters; the server and the edge must share it), `DNS_PROVIDER`, `CADDY_IMAGE` (`xenibase-caddy-<provider>:local`), `COMPOSE_PROFILES=services`, and for acme-dns `ACMEDNS_SERVER_URL` (default `https://auth.acme-dns.io`). It never writes your tokens or passwords. |
-| Docker images | Builds `xenibase-caddy-<provider>:local`: Caddy with the chosen DNS plugin (`deploy/compose/caddy-dns/Dockerfile`, built with `xcaddy`). The stock `caddy:2` image stays the default for installs that don't use backend services. |
+| Docker images | Builds `xenibase-caddy-<provider>:local`: Caddy with the chosen DNS plugin (`deploy/compose/caddy-dns/Dockerfile`, built with `xcaddy`). The stock `caddy:2.10.0` image (the same version) stays the default for installs that don't use backend services. |
 | `deploy/compose/caddy.d/api.caddy` | Written by the script, git-ignored. The wildcard site: `*.<api-domain>`, its DNS challenge settings, and `reverse_proxy xenibase-edge:8443` with buffering off (realtime and large downloads stream). The Caddyfile imports `caddy.d/*.caddy`; with no file there, nothing changes. |
 | Containers | `docker compose up -d --build` starts `xenibase-edge` (a compose *profile*, off until `COMPOSE_PROFILES=services` is set) with a 1 GB memory limit, and recreates Caddy with the new image. |
 

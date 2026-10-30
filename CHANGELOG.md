@@ -1010,7 +1010,68 @@ bundle share one version (spec §11.5).
   (a badge and a warning in the support console); it never joins a
   thread, and its acknowledgement says only the ticket's reference.
 
+- **The CLI no longer sends a context's token to another server.**
+  `--server` and `XENIBASE_SERVER` replaced only the server of the selected
+  context, so `xenibase whoami --server https://staging.example` sent the
+  production token to staging, as would a CI job setting `XENIBASE_SERVER`
+  on a machine with a logged-in context. When the server named differs from
+  the context's (by scheme, host and port), the context's token, `token_cmd`
+  and CA file are now left out: the token comes from `XENIBASE_TOKEN`, or the
+  one saved context for that server, or the command stops with exit code 2.
+  `--context` with a different `--server` is refused unless `XENIBASE_TOKEN`
+  is set. And `login` accepted `http://` for any host, so a token could travel
+  and be saved for a plain-HTTP server: `http://` is now accepted only for
+  `localhost`, `127.0.0.0/8` and `::1`, and a saved token is not sent over
+  `http://` to any other host. See `docs/cli.md` ("Which server and token a
+  command uses").
+- **A release is published only after CI passed on its tag.** The release
+  workflow started on the same tag push as CI and did not wait for it, so a
+  tag whose tests then failed still got a public GitHub release. Publishing
+  is now the `release` job of `ci.yml`, which needs `ci`, `e2e`,
+  `docs-install`, `audit` and `upgrade` to pass first; it alone can write to
+  the repository, and `release.yml` is gone. See `docs/deploying.md` ("Where
+  a release comes from").
+- **Tests that never ran in CI now run, and skips are counted.**
+  `TestDumpRestoreCopy` (the agent's real `pg_dump` and `pg_restore`) and
+  `docker.TestAgainstDaemon` skipped in every run because nothing set
+  `XENIBASE_TEST_PG_BIN` or `XENIBASE_TEST_DOCKER`; the `ci` job now installs
+  the Postgres 18 client tools and sets both, and `TestAgainstDaemon` fails
+  rather than skips when it is asked to run without a daemon or image. The
+  second half of `TestDedicatedResize` (a size its node can't hold moves the
+  project) skipped on a runner with fewer than three CPUs; it now fills the
+  node by memory, so it runs on any runner. `make test-go` and
+  `make test-integration` pipe `go test -json` through
+  `internal/tools/testsummary`, which prints each package's result, the
+  output of failing tests, the counts, and every skipped test with its
+  reason, and fails when a test named in `XENIBASE_TEST_MUST_RUN` skipped;
+  CI names the tests its environment is there for.
+- **Caddy is pinned, the images are scanned, and dependency updates are
+  proposed.** Caddy ran from the floating `caddy:2`, so two installs of one
+  release could run different Caddy, and the DNS plugins were built at
+  whatever version was latest. Caddy is now `caddy:2.10.0` in the bundle,
+  the status page and the DNS-plugin build (`xcaddy build v2.10.0`, the
+  version `test/acmedns` checks), and the cloudflare (v0.2.4) and desec
+  (v1.0.1) plugins are pinned to versions built for it. A weekly
+  `image-scan` job (and on demand) builds the images the install runs, pulls
+  Caddy and PgBouncer, and scans each with Trivy, failing on a fixed CRITICAL
+  or HIGH vulnerability. And `.github/dependabot.yml` proposes weekly,
+  grouped updates for the Go modules, the npm trees, the Dockerfiles and
+  compose images, and the workflows' actions.
+- **The upgrade rehearsal starts from the latest release.** `make
+  test-upgrade` installed v4.1.0, which its comment called the previous
+  release four releases later. It now finds the newest `vX.Y.Z` tag
+  reachable from the commit (not one on the commit itself, so CI on a
+  release tag upgrades from the release before), falling back to v4.1.0;
+  `UPGRADE_FROM` still overrides it.
+
 ### Upgrading
+- Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
+  up`. An install with backend services on keeps the Caddy image
+  `enable-services.sh` built until it is run again, which rebuilds it pinned.
+- A CLI context saved for an `http://` server other than this machine stops
+  working: log in again with `https://`. A script that sets `XENIBASE_SERVER`
+  to a server other than its current context's needs `XENIBASE_TOKEN`, or a
+  context for that server.
 - Migration 00097 adds billing contacts' `verified_at` and confirmation
   token, and lets several organisations hold a WhatsApp number pending
   (`org_support_phones` is keyed by organisation and number, with

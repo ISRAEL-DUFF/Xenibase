@@ -98,6 +98,17 @@ XENIBASE_DIR=$PWD sh /tmp/upgrade.sh v4.1.0
 From then on it is in the checkout. The script runs from a private copy of
 itself, because `git checkout` replaces the file while it runs.
 
+## Where a release comes from
+
+Pushing a tag like `v4.3.0` runs CI on it, and the `release` job at the end
+of `.github/workflows/ci.yml` builds the binaries, source bundle and
+checksums (`make release`) and publishes the GitHub release, with the tag's
+section of `CHANGELOG.md` as its notes. It runs only after `ci`, `e2e`,
+`docs-install`, `audit` and `upgrade` have all passed on the tag, so a tag
+whose tests fail gets no release; fix the problem, and tag again with the
+next version. Re-running the failed jobs from the Actions page also re-runs
+the release job once they pass.
+
 ## Deploying from GitHub Actions
 
 The **Deploy** workflow (Actions → Deploy → Run workflow) upgrades the server

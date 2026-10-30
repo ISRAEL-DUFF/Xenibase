@@ -44,10 +44,12 @@ ui=$(env_get XENIBASE_UI_DOMAIN)
 
 provider=${2:-$(env_get DNS_PROVIDER)}
 provider=${provider:-cloudflare}
+# Each plugin is pinned to a version whose go.mod needs no newer Caddy than
+# caddy-dns/Dockerfile's (2.10.0), so the build doesn't move Caddy;
+# test/acmedns checks what acmedns v0.7.0 does with the config below.
 case "$provider" in
-cloudflare) plugin=github.com/caddy-dns/cloudflare tokenvar=CLOUDFLARE_API_TOKEN ;;
-desec) plugin=github.com/caddy-dns/desec tokenvar=DESEC_TOKEN ;;
-# Pinned: test/acmedns checks what this version does with the config below.
+cloudflare) plugin=github.com/caddy-dns/cloudflare@v0.2.4 tokenvar=CLOUDFLARE_API_TOKEN ;;
+desec) plugin=github.com/caddy-dns/desec@v1.0.1 tokenvar=DESEC_TOKEN ;;
 acmedns) plugin=github.com/caddy-dns/acmedns@v0.7.0 tokenvar=ACMEDNS_USERNAME ;;
 *) die "unknown DNS provider '$provider': use cloudflare, desec or acmedns" ;;
 esac

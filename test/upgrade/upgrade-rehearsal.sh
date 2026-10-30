@@ -1,7 +1,8 @@
 #!/bin/sh
 # A real upgrade with the compose bundle, using deploy/compose/upgrade.sh:
 #
-#   1. install an older release (UPGRADE_FROM, default v4.1.0) as a user would;
+#   1. install an older release (UPGRADE_FROM, default the latest release
+#      before this commit) as a user would;
 #   2. try a "release" whose migration is broken: upgrade.sh must fail, restore
 #      the metadata backup and bring the older release back, healthy;
 #   3. upgrade to this commit: it must come up healthy at the new version and
@@ -14,11 +15,26 @@
 #   make test-upgrade
 set -eu
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-# The release to upgrade from: the previous Xenibase release, which is what a
-# real install does next. v2.1.0 and earlier are PGDock (PGDOCK_* settings,
-# pgdock containers and database user): an upgrade across the rename is not
+# The release to upgrade from: by default the latest release before this
+# commit, which is what a real install does next. That is the newest tag of
+# the form vX.Y.Z (no -rc, -test or -broken) reachable from HEAD and not on
+# HEAD itself (CI on a release tag upgrades from the one before), found at
+# run time so it moves on with each release; v4.1.0 when the clone has no
+# such tag. v2.1.0 and earlier are PGDock (PGDOCK_* settings, pgdock
+# containers and database user): an upgrade across the rename is not
 # supported (install fresh and move the projects).
-from=${UPGRADE_FROM:-v4.1.0}
+previous_release() {
+	head=$(git -C "$repo" rev-parse HEAD)
+	git -C "$repo" tag --merged HEAD --list 'v[0-9]*' --sort=-v:refname | while read -r t; do
+		case "$t" in v*[!0-9.]* | v*..* | v.* | v*.) continue ;; esac
+		[ "$(git -C "$repo" rev-parse "$t^{commit}")" != "$head" ] || continue
+		echo "$t"
+		break
+	done
+}
+from=${UPGRADE_FROM:-$(previous_release)}
+from=${from:-v4.1.0}
+echo "upgrading from $from"
 work=$(mktemp -d)
 cleanup() { cd "$work/deploy/compose" 2>/dev/null && docker compose down -v --remove-orphans >/dev/null 2>&1; cd /; rm -rf "$work"; }
 trap cleanup EXIT

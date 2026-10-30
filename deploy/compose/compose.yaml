@@ -35,7 +35,7 @@ services:
   caddy:
     # The stock image, unless backend services are on: enable-services.sh builds
     # one with the Cloudflare DNS plugin for the wildcard certificate.
-    image: ${CADDY_IMAGE:-caddy:2}
+    image: ${CADDY_IMAGE:-caddy:2.10.0}
     restart: unless-stopped
     logging: *logging
     ports:
