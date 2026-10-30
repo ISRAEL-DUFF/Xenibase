@@ -51,7 +51,19 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
 - **Operations** shows every long action with its step log.
 - **Metrics** (per project and per node) charts size, connections, TPS,
   cache hit ratio, CPU, memory, disk, and I/O; `/metrics` serves them to
-  Prometheus.
+  Prometheus. With several xenibase-servers, one samples at a time (an
+  advisory lock; another takes over within a `XENIBASE_METRICS_INTERVAL`
+  of it stopping), over one admin connection per instance that it keeps
+  between samples. Each server still reads its own local PgBouncers and
+  leaves the counts in the metadata database for the sampling server, so
+  pooler clients and Free-tier activity cover every server's poolers.
+  Every server serves `/metrics` from the stored points, so it does not
+  matter which one Prometheus reaches.
+- `xenibase_instance_webhook_listen_connections` is how many direct
+  `LISTEN` connections webhook delivery holds to each instance, outside
+  the poolers. They count against the instance's `max_connections`, at
+  most `XENIBASE_WEBHOOK_LISTEN_MAX` (50) per instance; see "Outbound
+  traffic" below.
 - `docker compose ps` and `docker compose logs <service>` for the
   containers themselves. Their logs are rotated: every service in the
   compose files (here, the status page's and the pooler hosts') uses
@@ -439,6 +451,25 @@ On an organisation's admin page you can:
 Only one xenibase-server delivers webhooks and runs the scheduler at a time
 (advisory locks), so more servers can be added later without double
 deliveries.
+
+To wake on each commit, the delivering server holds a direct admin
+connection with `LISTEN` to a project's database. These bypass the poolers
+and count against the instance's `max_connections` (500 on the bundle's
+shared cluster), so they are bounded:
+
+- at most `XENIBASE_WEBHOOK_LISTEN_MAX` (default 50) per instance; `0`
+  holds none;
+- a project gives its connection back once its outbox has had nothing to
+  send for `XENIBASE_WEBHOOK_IDLE_AFTER` (default 10 minutes);
+- a project without one is polled every `XENIBASE_WEBHOOK_IDLE_POLL`
+  (default 30 seconds) over a connection opened for the read, every 5
+  seconds while it has events going out, and takes a `LISTEN` connection
+  again when one is free. Its first event after a quiet spell can wait up
+  to the poll interval.
+
+`xenibase_instance_webhook_listen_connections` on `/metrics` shows how many
+are held per instance. Leave room for them in `max_connections` when you
+size a cluster, or lower the cap.
 
 Imports and Supabase migrations connect to a database the tenant names, from
 xenibase-server and an agent, whose addresses every cluster trusts. Their
