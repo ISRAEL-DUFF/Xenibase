@@ -5287,6 +5287,11 @@ paths:
     post:
       operationId: addBillingContact
       summary: Add a billing contact
+      description: >-
+        Unless the address is a member's verified address, a confirmation link
+        is emailed to it (again on a repeat request, at most every ten
+        minutes); until it is confirmed it gets billing email but its support
+        email isn't routed to the organisation.
       tags: [billing]
       parameters:
         - $ref: "#/components/parameters/OrgID"
@@ -5303,6 +5308,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BillingContact"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/billing/contacts/confirm:
+    post:
+      operationId: confirmBillingContact
+      summary: Confirm a billing contact from the emailed link (public)
+      description: >-
+        An address an organisation adds as a billing contact gets invoices at
+        once, but support routes its email to the organisation only once it is
+        verified: it is a member's verified address, or its owner confirms it
+        here with the link's token.
+      tags: [billing]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "200":
+          description: Confirmed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [email, org_name]
+                properties:
+                  email:
+                    type: string
+                  org_name:
+                    type: string
         default:
           $ref: "#/components/responses/Error"
   /api/v1/orgs/{org}/billing/contacts/{email}:
@@ -7138,6 +7174,11 @@ paths:
     post:
       operationId: addSupportPhone
       summary: Register a WhatsApp number (E.164) for the organisation's support
+      description: >-
+        The number is pending until its code is sent from it to the support
+        WhatsApp number; only then do its messages open tickets for the
+        organisation. Registering a pending number again gives a new code. 409
+        when the organisation or another one has the number verified.
       tags: [support]
       parameters:
         - $ref: "#/components/parameters/OrgID"
@@ -7185,6 +7226,12 @@ paths:
         Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
         password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
         inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+        The sender is trusted only on the provider's verdicts: DMARC pass, or
+        DKIM and SPF passes aligned with From's domain, read from the
+        Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+        API's `authentication_results` (the provider's Authentication-Results
+        value, a string or an array). Other mail opens a ticket with no
+        organisation, flagged unverified_sender, that never joins a thread.
       tags: [support]
       security: []
       requestBody:
@@ -16202,7 +16249,7 @@ components:
               $ref: "#/components/schemas/Prices"
     Ticket:
       type: object
-      required: [id, number, ref, requester, channel, subject, status, priority, created_at, updated_at]
+      required: [id, number, ref, requester, channel, subject, status, priority, created_at, updated_at, unverified_sender]
       properties:
         id:
           type: string
@@ -16261,6 +16308,12 @@ components:
           format: date-time
           nullable: true
           description: The plan's response target; null is best effort.
+        unverified_sender:
+          type: boolean
+          description: >-
+            An email whose sender the provider didn't authenticate (no DMARC
+            pass, nor aligned DKIM and SPF passes): the From address may be
+            forged, so the ticket has no organisation.
     TicketList:
       type: object
       required: [items]
@@ -16445,13 +16498,24 @@ components:
           format: uuid
     SupportPhone:
       type: object
-      required: [phone, created_at]
+      required: [phone, created_at, verified]
       properties:
         phone:
           type: string
         created_at:
           type: string
           format: date-time
+        verified:
+          type: boolean
+          description: The code was sent from the number; only then do its messages open tickets.
+        code:
+          type: string
+          nullable: true
+          description: While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678.
+        code_expires_at:
+          type: string
+          format: date-time
+          nullable: true
     RevenueMonth:
       type: object
       required: [month, mrr_minor, arr_minor, new_minor, expansion_minor, contraction_minor, churned_minor, paying_orgs, arpa_minor,
@@ -16946,6 +17010,13 @@ components:
         status_emails:
           type: boolean
           description: Gets the status page's incident emails while the organisation is on a paid plan (default true).
+        verified:
+          type: boolean
+          readOnly: true
+          description: >-
+            A member's verified address, or confirmed from the emailed link.
+            Only a verified contact's email to support opens tickets for the
+            organisation; billing email goes to every contact.
     LegalDocument:
       type: object
       required: [id, kind, version, title, body_md, published_at]

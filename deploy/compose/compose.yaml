@@ -10,9 +10,18 @@
 
 name: xenibase
 
+# Every container's log: Docker's json-file driver, rotated, so a chatty or
+# crash-looping service can't fill the disk (at most 5 x 50 MB per container).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 x-pooler: &pooler
   image: edoburu/pgbouncer:v1.25.1-p0
   restart: unless-stopped
+  logging: *logging
   depends_on:
     xenibase-server:
       condition: service_healthy
@@ -26,8 +35,9 @@ services:
   caddy:
     # The stock image, unless backend services are on: enable-services.sh builds
     # one with the Cloudflare DNS plugin for the wildcard certificate.
-    image: ${CADDY_IMAGE:-caddy:2}
+    image: ${CADDY_IMAGE:-caddy:2.10.0}
     restart: unless-stopped
+    logging: *logging
     ports:
       - "${XENIBASE_HTTP_PORT:-80}:80"
       - "${XENIBASE_HTTPS_PORT:-443}:443"
@@ -57,6 +67,7 @@ services:
     build:
       context: ../..
     restart: unless-stopped
+    logging: *logging
     depends_on:
       metadata-db:
         condition: service_healthy
@@ -115,6 +126,7 @@ services:
       # provider's inbound webhook secret, and WhatsApp's Cloud API.
       XENIBASE_SUPPORT_EMAIL: ${XENIBASE_SUPPORT_EMAIL:-}
       XENIBASE_SUPPORT_INBOUND_SECRET: ${XENIBASE_SUPPORT_INBOUND_SECRET:-}
+      XENIBASE_SUPPORT_AUTHSERV_ID: ${XENIBASE_SUPPORT_AUTHSERV_ID:-}
       XENIBASE_WHATSAPP_PHONE_NUMBER_ID: ${XENIBASE_WHATSAPP_PHONE_NUMBER_ID:-}
       XENIBASE_WHATSAPP_ACCESS_TOKEN: ${XENIBASE_WHATSAPP_ACCESS_TOKEN:-}
       XENIBASE_WHATSAPP_APP_SECRET: ${XENIBASE_WHATSAPP_APP_SECRET:-}
@@ -208,6 +220,7 @@ services:
       context: ../..
       dockerfile: deploy/edge/Dockerfile
     restart: unless-stopped
+    logging: *logging
     depends_on:
       xenibase-server:
         condition: service_healthy
@@ -233,6 +246,7 @@ services:
       context: ../..
       target: agent
     restart: unless-stopped
+    logging: *logging
     depends_on:
       xenibase-server:
         condition: service_healthy
@@ -263,6 +277,7 @@ services:
   metadata-db:
     image: postgres:18
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: xenibase
       POSTGRES_PASSWORD: ${METADATA_DB_PASSWORD:?}
@@ -279,6 +294,7 @@ services:
   shared-pg:
     image: postgres:18
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: xenibase_admin
       POSTGRES_PASSWORD: ${SHARED_ADMIN_PASSWORD:?}

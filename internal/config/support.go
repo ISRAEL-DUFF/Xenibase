@@ -14,6 +14,10 @@ type Support struct {
 	// InboundSecret authenticates the email provider's inbound webhook
 	// (XENIBASE_SUPPORT_INBOUND_SECRET or _FILE).
 	InboundSecret string
+	// AuthservID is the authserv-id of the provider's Authentication-Results
+	// header (XENIBASE_SUPPORT_AUTHSERV_ID), so a sender's own copy of the
+	// header is ignored.
+	AuthservID string
 
 	// WhatsApp Business Platform (Cloud API): XENIBASE_WHATSAPP_PHONE_NUMBER_ID,
 	// _ACCESS_TOKEN, _APP_SECRET and _VERIFY_TOKEN (each also _FILE but the
@@ -29,7 +33,7 @@ type Support struct {
 func (s Support) WhatsAppOn() bool { return s.WhatsAppPhoneNumberID != "" }
 
 func loadSupport(getenv func(string) string, readFile func(string) ([]byte, error), cfg *Config) []error {
-	s := Support{Email: strings.TrimSpace(getenv("XENIBASE_SUPPORT_EMAIL")), WhatsAppPhoneNumberID: getenv("XENIBASE_WHATSAPP_PHONE_NUMBER_ID"),
+	s := Support{Email: strings.TrimSpace(getenv("XENIBASE_SUPPORT_EMAIL")), AuthservID: strings.TrimSpace(getenv("XENIBASE_SUPPORT_AUTHSERV_ID")), WhatsAppPhoneNumberID: getenv("XENIBASE_WHATSAPP_PHONE_NUMBER_ID"),
 		WhatsAppGraphURL: strings.TrimRight(getenv("XENIBASE_WHATSAPP_GRAPH_URL"), "/")}
 	var errs []error
 	for name, dst := range map[string]*string{

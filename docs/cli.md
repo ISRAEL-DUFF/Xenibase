@@ -37,6 +37,27 @@ whose certificate isn't publicly trusted, add `--ca-file ca.pem`.
 
 `xenibase logout` revokes the context's token and forgets it.
 
+### Which server and token a command uses
+
+A command uses `--context`, `XENIBASE_CONTEXT` or the current context.
+`--server` or `XENIBASE_SERVER` names a server instead, and a context's
+token (and CA file) is only ever sent to that context's own server. When
+the server you name is a different one (compared by scheme, host and
+port, ignoring a trailing slash), the CLI uses `XENIBASE_TOKEN` if it is
+set, or else the saved context for that server; with neither, or with
+two contexts for it, it stops with exit code 2 and says what to do.
+Naming a context and a different server together (`--context prod
+--server https://staging.example`) is refused the same way unless
+`XENIBASE_TOKEN` is set.
+
+The server must use `https://`. Plain `http://` is accepted only for
+this machine (`localhost`, `127.0.0.0/8` and `::1`), for a local
+development server; `login` refuses any other `http://` server, and a
+saved token is not sent to one. On a development or private network
+without TLS (a server on a Docker network, say), `XENIBASE_ALLOW_HTTP=1`
+allows `http://` to any host, and every command then warns on stderr that
+the token travels unencrypted.
+
 ## Tokens
 
 A token belongs to you and acts in **one organisation**:

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Upgrade Xenibase on this host to a release tag: back up the metadata database,
-# check out the tag, run install.sh, check the result, and put the old version
-# back if the checks fail. (docs/deploying.md)
+# Upgrade Xenibase on this host to a release tag: check out the tag and build
+# its images while the old version serves, stop xenibase-server and the agent,
+# back up the metadata database, start the new version, check the result, and
+# put the old version back if the checks fail. (docs/deploying.md)
 #
 #   cd deploy/compose
 #   ./upgrade.sh v4.1.0              # asks before it starts
@@ -25,8 +26,11 @@
 # UPGRADE_POLL (seconds between checks, default 5), UPGRADE_MIN_FREE_GB
 # (default 10).
 #
-# It needs a few minutes of downtime for the dashboard and API: databases
-# stay up and clients reconnect through the poolers in a second or two.
+# It needs a few minutes of downtime for the dashboard and API, from the
+# backup until the new version is up: databases stay up and clients reconnect
+# through the poolers in a second or two. A rollback after a migration
+# restores the backup, so what the new version wrote before it failed its
+# checks is lost; nothing written before the backup is.
 # Exit status: 0 upgraded (or already there), 1 refused before changing
 # anything, 2 failed and rolled back, 3 failed and could not be rolled back.
 set -eu
@@ -73,7 +77,12 @@ backup_dir=${UPGRADE_BACKUP_DIR:-./upgrade-backups}
 wait_s=${UPGRADE_WAIT:-300}
 min_free=${UPGRADE_MIN_FREE_GB:-10}
 stamp=$(date +%Y%m%dT%H%M%S)
-mkdir -p "$backup_dir"
+# The dumps hold password hashes and every sealed secret: what this script
+# writes there is for its owner only. (Only there: a umask for the whole script
+# would reach the files git checkout writes, which containers read.)
+private() { (umask 077 && : > "$1"); }
+[ -d "$backup_dir" ] || (umask 077 && mkdir -p "$backup_dir")
+chmod 700 "$backup_dir"
 log_file="$backup_dir/upgrade-$stamp.log"
 
 # --- helpers -----------------------------------------------------------------
@@ -147,11 +156,23 @@ want_schema=$(git -C "$root" ls-tree --name-only "$target" internal/store/migrat
 if [ "$want_schema" -lt "$cur_schema" ]; then
 	die "$tag's last migration is $want_schema but the database is at $cur_schema: that is a downgrade, which can't be done by checking out (restore a metadata backup instead; docs/upgrade.md, Rolling back)"
 fi
+# The tag's install.sh builds without starting (--build-only), so the backup
+# can wait until the build is done and nothing writes. One from before that
+# would start the new version as it builds: then back up first, as releases
+# before this one did.
+if git show "$target:./install.sh" 2>/dev/null | grep -q -- '--build-only'; then
+	early_backup=0
+	steps="build the images (the old version serves), stop xenibase-server and xenibase-agent, back up, start $tag"
+else
+	early_backup=1
+	steps="back up, then $tag's install.sh builds and starts (it can't build alone, so the backup comes first: a rollback loses what is written during the build)"
+fi
 
 echo
 echo "Upgrade Xenibase on this host"
 echo "  from  ${cur_version:-unknown} ($prev_name)   schema $cur_schema"
 echo "  to    $tag   schema $want_schema ($((want_schema - cur_schema)) new migrations)"
+echo "  steps: $steps"
 echo "  backup to  $backup_dir (a copy of the metadata database, kept)"
 echo "  on failure: $( [ "$rollback" -eq 1 ] && echo 'restore it and start the previous version' || echo 'stop, leaving things as they are (--no-rollback)')"
 echo
@@ -168,32 +189,51 @@ fi
 perform() {
 log "log: $log_file"
 
-# --- 1. back up the metadata database ------------------------------------------
-
 dump="$backup_dir/metadata-$stamp-before-$tag.dump"
-log "backing up the metadata database to $dump"
-docker compose exec -T metadata-db pg_dump -U xenibase -Fc xenibase > "$dump" || { rm -f "$dump"; die "the backup failed; nothing was changed"; }
-chmod 600 "$dump"
-[ -s "$dump" ] || die "the backup is empty; nothing was changed"
-docker compose exec -T metadata-db pg_restore -l < "$dump" 2>/dev/null | grep -q 'goose_db_version' || die "the backup doesn't look like a Xenibase metadata dump; nothing was changed"
-printf 'from=%s\ncommit=%s\nschema=%s\nversion=%s\nto=%s\n' "$prev_name" "$prev" "$cur_schema" "$cur_version" "$tag" > "$dump.meta"
-log "backup verified ($(wc -c < "$dump" | tr -d ' ') bytes). Copy it off this server too."
+dumped=0      # $dump is taken and verified
+old_stopped=0 # the old xenibase-server is no longer serving: stopped, or replaced
+restored=0    # a rollback put the backup back
+
+# --- 1. the backup of the metadata database -------------------------------------
+
+# backup dumps the metadata database to $dump (owner-only, like everything in
+# $backup_dir) and checks it; on a failure it says why and returns 1.
+backup() {
+	log "backing up the metadata database to $dump"
+	{ private "$dump" && docker compose exec -T metadata-db pg_dump -U xenibase -Fc xenibase > "$dump"; } || { rm -f "$dump"; log "pg_dump failed"; return 1; }
+	[ -s "$dump" ] || { log "the backup is empty"; return 1; }
+	docker compose exec -T metadata-db pg_restore -l < "$dump" 2>/dev/null | grep -q 'goose_db_version' || { log "the backup doesn't look like a Xenibase metadata dump"; return 1; }
+	private "$dump.meta"
+	printf 'from=%s\ncommit=%s\nschema=%s\nversion=%s\nto=%s\n' "$prev_name" "$prev" "$cur_schema" "$cur_version" "$tag" > "$dump.meta"
+	dumped=1
+	log "backup verified ($(wc -c < "$dump" | tr -d ' ') bytes). Copy it off this server too."
+}
 
 # --- 2. rollback ----------------------------------------------------------------
 
+# rollback_now puts the previous release back. While the old version still
+# serves (the build failed), that is a checkout and an install, and the
+# database is not touched. Once it was stopped: keep the server and agent
+# stopped, restore the backup if a migration ran, then check out and install.
 rollback_now() {
 	log "ROLLING BACK to $prev_name"
-	docker compose stop xenibase-server xenibase-agent >/dev/null 2>&1 || true
+	if [ "$old_stopped" -eq 1 ]; then
+		docker compose stop xenibase-server xenibase-agent >/dev/null 2>&1 || true
+	fi
 	now_schema=$(schema_version || true)
 	if [ -n "$now_schema" ] && [ "$now_schema" != "$cur_schema" ]; then
+		[ "$dumped" -eq 1 ] || { log "the database was migrated ($cur_schema -> $now_schema) and there is no backup to restore"; return 1; }
 		log "the database was migrated ($cur_schema -> $now_schema): restoring the backup"
 		docker compose exec -T metadata-db psql -U xenibase -d postgres -Atc "drop database xenibase with (force)" -c "create database xenibase owner xenibase" >/dev/null || return 1
 		docker compose exec -T metadata-db pg_restore -U xenibase -d xenibase --no-owner < "$dump" >/dev/null || return 1
 		[ "$(schema_version)" = "$cur_schema" ] || { log "the restored schema isn't $cur_schema"; return 1; }
+		restored=1
 	else
 		log "the database wasn't migrated: no restore needed"
 	fi
 	git checkout --quiet "${prev_ref:-$prev}" || return 1
+	# The previous release's own install.sh, whatever options it knows: it
+	# rebuilds that release's images (normally from Docker's cache) and starts it.
 	./install.sh || return 1
 	gates "${cur_version:-}" "$cur_schema" || return 1
 	return 0
@@ -202,25 +242,57 @@ rollback_now() {
 fail() {
 	log "UPGRADE FAILED: $1"
 	if [ "$rollback" -eq 0 ]; then
-		log "--no-rollback: stopping here. The backup is $dump; to go back: stop xenibase-server, restore it (docs/upgrade.md, Rolling back), git checkout $prev_name, ./install.sh"
+		if [ "$old_stopped" -eq 0 ]; then
+			log "--no-rollback: stopping here. $prev_name is still serving and the database wasn't touched; to go back: git checkout $prev_name, ./install.sh"
+		elif [ "$dumped" -eq 0 ]; then
+			log "--no-rollback: stopping here, with xenibase-server and xenibase-agent stopped; the database wasn't touched. To go back: git checkout $prev_name, ./install.sh"
+		else
+			log "--no-rollback: stopping here. The backup is $dump; to go back: stop xenibase-server, restore it (docs/upgrade.md, Rolling back), git checkout $prev_name, ./install.sh"
+		fi
 		exit 2
 	fi
 	if rollback_now; then
-		log "rolled back: Xenibase is running $prev_name again. Nothing from the failed upgrade was kept. See $log_file"
+		if [ "$restored" -eq 1 ]; then
+			log "rolled back: Xenibase is running $prev_name again, with the metadata database as it was at the backup: what $tag wrote after it started is gone. See $log_file"
+		else
+			log "rolled back: Xenibase is running $prev_name again. The metadata database wasn't restored: nothing written to it was lost. See $log_file"
+		fi
 		exit 2
 	fi
-	log "THE ROLLBACK FAILED. The metadata backup is $dump (schema $cur_schema, from $prev_name)."
-	log "By hand: docker compose stop xenibase-server; restore the backup (docs/upgrade.md, Rolling back); git checkout $prev_name; ./install.sh"
+	if [ "$dumped" -eq 1 ]; then
+		log "THE ROLLBACK FAILED. The metadata backup is $dump (schema $cur_schema, from $prev_name)."
+		log "By hand: docker compose stop xenibase-server; restore the backup (docs/upgrade.md, Rolling back); git checkout $prev_name; ./install.sh"
+	else
+		log "THE ROLLBACK FAILED. No backup was taken: the upgrade failed before it, with the database at schema $cur_schema."
+		log "By hand: git checkout $prev_name; ./install.sh"
+	fi
 	exit 3
 }
 
 # --- 3. upgrade --------------------------------------------------------------------
 
 started=$(date +%s)
+if [ "$early_backup" -eq 1 ]; then
+	backup || die "the backup failed; nothing was changed"
+fi
 log "checking out $tag"
 git checkout --quiet "$target" || fail "git checkout $tag failed"
-log "running install.sh (builds the images; the old version keeps serving until it restarts)"
-./install.sh || fail "install.sh failed"
+if [ "$early_backup" -eq 1 ]; then
+	log "running install.sh (builds the images; the old version keeps serving until it restarts)"
+	old_stopped=1
+	./install.sh || fail "install.sh failed"
+else
+	log "building the images (the old version keeps serving)"
+	./install.sh --build-only || fail "building $tag's images failed"
+	# From here until the new version is up, nothing writes to the metadata
+	# database, so the backup holds everything up to the start of the new one.
+	log "stopping xenibase-server and xenibase-agent for the backup (the dashboard and API are down from here)"
+	old_stopped=1
+	docker compose stop xenibase-server xenibase-agent >/dev/null || fail "couldn't stop xenibase-server and xenibase-agent"
+	backup || fail "the backup failed"
+	log "starting $tag (xenibase-server runs the migrations as it starts)"
+	./install.sh --no-build || fail "install.sh failed"
+fi
 
 # --- 4. check ----------------------------------------------------------------------
 
@@ -236,6 +308,7 @@ log "Next: open the dashboard, check Nodes, Operations and Alerts, and run a bac
 
 # Run it with its output also going to the log file, and keep its exit status.
 rc_file=$(mktemp)
+private "$log_file"
 ( trap 'echo $? > "$rc_file"' EXIT; perform ) 2>&1 | tee -a "$log_file"
 rc=$(cat "$rc_file"); rm -f "$rc_file"
 exit "${rc:-3}"

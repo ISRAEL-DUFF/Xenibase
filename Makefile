@@ -29,7 +29,7 @@ DEV_ENV := deploy/dev/server.env
 # Loads $(DEV_ENV); XENIBASE_* variables already set by the caller win.
 LOAD_DEV_ENV := saved="$$(export -p | grep ' XENIBASE_' || true)"; set -a; . ./$(DEV_ENV); set +a; eval "$$saved"
 
-.PHONY: all dev run-dev dev-up dev-down dev-key pooler-seed test-db test-integration test-move test-agent-bin pg-image pooler-host-images status-image edge-image test-acme test-e2e test-docs test-deploy test-acmedns test-upgrade test-load test-payments-sandbox e2e-images generate check-generated build build-ui build-go test test-go test-web test-sdk docs-site atlas atlas-stale lint release-check release clean clean-ui
+.PHONY: testsummary all dev run-dev dev-up dev-down dev-key pooler-seed test-db test-integration test-move test-agent-bin pg-image pooler-host-images status-image edge-image test-acme test-e2e test-docs test-deploy test-acmedns test-upgrade test-load test-payments-sandbox e2e-images generate check-generated build build-ui build-go test test-go test-web test-sdk docs-site atlas atlas-stale lint release-check release clean clean-ui
 
 all: build
 
@@ -137,9 +137,16 @@ release: build-ui
 test: test-go test-web
 
 # Tests that need Postgres run when XENIBASE_TEST_DATABASE_URL is set and
-# skip otherwise; `make test-db` points them at the dev environment.
-test-go:
-	go test -race ./...
+# skip otherwise; `make test-db` points them at the dev environment. The
+# summary lists every skipped test with its reason, prints the output of
+# failing ones, and fails when a test in XENIBASE_TEST_MUST_RUN didn't run.
+test-go: testsummary
+	go test -json -race ./... | $(TEST_SUMMARY)
+
+# testsummary turns `go test -json` into results, failures and a skip list.
+TEST_SUMMARY := tmp/testsummary
+testsummary:
+	@go build -o $(TEST_SUMMARY) ./internal/tools/testsummary
 
 ## test-payments-sandbox: Xenibase's wallet provider client against the real
 ## sandbox; needs XENIBASE_ISWALLET_BASE_URL, _API_KEY and XENIBASE_TEST_SANDBOX_BVN.
@@ -199,9 +206,10 @@ test-e2e: e2e-images
 	@$(E2E_INSTANCES)
 	$(E2E_COMPOSE) down -v --remove-orphans
 
-## test-deploy: upgrade.sh and deploy-ssh.sh against a fake docker (no Docker).
+## test-deploy: upgrade.sh, deploy-ssh.sh and install.sh against a fake docker (no Docker).
 test-deploy:
 	sh test/deploy/upgrade_test.sh
+	sh test/deploy/install_test.sh
 	sh test/deploy/enable_services_test.sh
 
 ## test-acmedns: what Caddy's acme-dns plugin does with the config enable-services.sh
@@ -231,9 +239,9 @@ e2e-images:
 
 ## test-integration: provisioning end to end and the tenant-isolation suite,
 ## against real Postgres 18 and PgBouncer (the dev env plus test poolers).
-test-integration: pooler-seed test-agent-bin pg-image pooler-host-images status-image
+test-integration: pooler-seed test-agent-bin pg-image pooler-host-images status-image testsummary
 	$(COMPOSE) --profile test up -d --wait
-	@set -a; . ./deploy/dev/test.env; set +a; go test -race -count=1 -p 1 -timeout 60m ./test/...
+	@set -a; . ./deploy/dev/test.env; set +a; go test -json -race -count=1 -p 1 -timeout 60m ./test/... | $(TEST_SUMMARY)
 
 ## test-move: M18's done-when at full size: a 20 GB dedicated project moves
 ## nodes under continuous writes (XENIBASE_TEST_MOVE_GB=n for another size;

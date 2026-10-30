@@ -7,10 +7,19 @@
 
 name: xenibase-status
 
+# Every container's log: Docker's json-file driver, rotated, so a chatty or
+# crash-looping service can't fill the disk (at most 5 x 50 MB per container).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   status:
     image: ${XENIBASE_STATUS_IMAGE:-xenibase-status:local}
     restart: unless-stopped
+    logging: *logging
     volumes:
       - ./status.toml:/etc/xenibase-status/status.toml:ro
       - ./secrets:/run/secrets:ro
@@ -19,8 +28,9 @@ services:
       XENIBASE_STATUS_LOG_FORMAT: json
 
   caddy:
-    image: caddy:2
+    image: caddy:2.10.0
     restart: unless-stopped
+    logging: *logging
     ports: ["80:80", "443:443"]
     command: ["caddy", "reverse-proxy", "--from", "${STATUS_DOMAIN:?set STATUS_DOMAIN}", "--to", "status:8080"]
     volumes:

@@ -32,6 +32,24 @@ type Alert struct {
 	DeliveryAttempts   int32
 	DeliveryError      *string
 	DeliveryLock       *time.Time
+	ClearCount         int32
+	ClearedSince       *time.Time
+}
+
+type AlertDelivery struct {
+	AlertID  uuid.UUID
+	Event    string
+	Channel  string
+	SentAt   *time.Time
+	Attempts int32
+	Error    *string
+	NextAt   *time.Time
+}
+
+type AlertGrace struct {
+	Key    string
+	Since  time.Time
+	SeenAt time.Time
 }
 
 type ApiRequestLog struct {
@@ -227,11 +245,15 @@ type BillingAccount struct {
 }
 
 type BillingContact struct {
-	OrgID        uuid.UUID
-	Email        string
-	Name         *string
-	CreatedAt    time.Time
-	StatusEmails bool
+	OrgID           uuid.UUID
+	Email           string
+	Name            *string
+	CreatedAt       time.Time
+	StatusEmails    bool
+	VerifiedAt      *time.Time
+	VerifyTokenHash []byte
+	VerifyExpiresAt *time.Time
+	VerifySentAt    *time.Time
 }
 
 type BillingPlanChange struct {
@@ -798,10 +820,13 @@ type OrgMember struct {
 }
 
 type OrgSupportPhone struct {
-	Phone     string
-	OrgID     uuid.UUID
-	AddedBy   *uuid.UUID
-	CreatedAt time.Time
+	Phone         string
+	OrgID         uuid.UUID
+	AddedBy       *uuid.UUID
+	CreatedAt     time.Time
+	VerifiedAt    *time.Time
+	Code          *string
+	CodeExpiresAt *time.Time
 }
 
 type Organization struct {
@@ -1376,22 +1401,23 @@ type TermsVersion struct {
 }
 
 type Ticket struct {
-	ID              uuid.UUID
-	Number          int64
-	OrgID           *uuid.UUID
-	Requester       string
-	RequesterName   *string
-	RequesterUserID *uuid.UUID
-	Channel         string
-	Subject         string
-	Status          string
-	Priority        string
-	Plan            *string
-	Assignee        *uuid.UUID
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	FirstResponseAt *time.Time
-	RespondBy       *time.Time
+	ID               uuid.UUID
+	Number           int64
+	OrgID            *uuid.UUID
+	Requester        string
+	RequesterName    *string
+	RequesterUserID  *uuid.UUID
+	Channel          string
+	Subject          string
+	Status           string
+	Priority         string
+	Plan             *string
+	Assignee         *uuid.UUID
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	FirstResponseAt  *time.Time
+	RespondBy        *time.Time
+	UnverifiedSender bool
 }
 
 type TicketMessage struct {

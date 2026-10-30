@@ -56,7 +56,7 @@ func TestWALArchiveAlert(t *testing.T) {
 	sample(recovered, 10*time.Minute, 7, 0, 0)
 	sample(recovered, time.Minute, 7, 0, 0)
 
-	s := New(db, nil, Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := New(db, nil, Config{ResolveAfter: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := s.Evaluate(ctx); err != nil {
 		t.Fatal(err)
 	}

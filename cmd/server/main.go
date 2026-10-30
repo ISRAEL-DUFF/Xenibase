@@ -469,6 +469,7 @@ func run() error {
 	// Support (V3 §7.1): tickets from the dashboard, email and WhatsApp.
 	supportSvc := support.New(pool, mailSvc, support.Config{
 		Address: cfg.Support.Email, PublicURL: cfg.Insight.PublicURL, InboundSecret: cfg.Support.InboundSecret,
+		AuthservID: cfg.Support.AuthservID,
 	}, log)
 	if cfg.Support.WhatsAppOn() {
 		supportSvc.SetWhatsApp(support.CloudAPI{
@@ -605,11 +606,7 @@ func run() error {
 	if backups != nil && backups.Dedicated != nil {
 		backups.Dedicated.SetProposer(incidentSvc)
 	}
-	if cfg.Status.URL != "" {
-		log.Info("pushing heartbeats and incidents to the status page", "url", cfg.Status.URL)
-		bg.Add(1)
-		go func() { defer bg.Done(); incidentSvc.Run(bgCtx, time.Minute) }()
-	}
+	startIncidents(bgCtx, &bg, incidentSvc.Run, cfg.Status.URL, log)
 	// SLA probes of HA projects, from here and, through the status page,
 	// from outside (V3 §2.7).
 	if backups != nil && backups.Dedicated != nil {
@@ -1146,4 +1143,16 @@ func platformPhone(cfg config.Config, log *slog.Logger) services.PlatformPhone {
 			AccessToken: cfg.Support.WhatsAppAccessToken, Template: a.WhatsAppTemplate, Language: a.WhatsAppLanguage}
 	}
 	return p
+}
+
+// startIncidents starts the incidents loop whether or not there is a status
+// page: with one it pushes incidents, heartbeats and subscribers; without
+// one it still ends announced maintenance whose window is over and lapses
+// unconfirmed drafts.
+func startIncidents(ctx context.Context, bg *sync.WaitGroup, run func(context.Context, time.Duration), statusURL string, log *slog.Logger) {
+	if statusURL != "" {
+		log.Info("pushing heartbeats and incidents to the status page", "url", statusURL)
+	}
+	bg.Add(1)
+	go func() { defer bg.Done(); run(ctx, time.Minute) }()
 }

@@ -180,6 +180,7 @@ var auditActions = map[string]string{
 	"POST /api/v1/orgs/{org}/support/tickets":                      "support.ticket_open",
 	"POST /api/v1/orgs/{org}/support/tickets/{ticket_id}/messages": "support.ticket_reply",
 	"POST /api/v1/orgs/{org}/support/phones":                       "support.phone_add",
+	"POST /api/v1/billing/contacts/confirm":                        "billing.contact_confirm",
 	"DELETE /api/v1/orgs/{org}/support/phones/{phone}":             "support.phone_remove",
 	"PATCH /api/v1/admin/support/tickets/{ticket_id}":              "support.ticket_update",
 	"POST /api/v1/admin/support/tickets/{ticket_id}/messages":      "support.staff_reply",

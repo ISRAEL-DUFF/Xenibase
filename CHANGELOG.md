@@ -39,6 +39,50 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A status page push is bound to its endpoint.** The push signature
+  covered the timestamp and body only, so a signed heartbeat replayed to
+  `PUT /api/v1/subscribers/managed` decoded as an empty list and deleted
+  every managed subscriber, and to `/api/v1/sla/targets` removed every SLA
+  target; a heartbeat replayed within five minutes also overwrote a newer
+  one. xenibase-server now adds `v2` to `Xenibase-Signature`, an HMAC of
+  `<t>.<METHOD> <path>\n<body>`, which xenibase-status requires, and the
+  status page refuses (409) a heartbeat sent before the newest it accepted.
+  Customer webhook signatures are unchanged.
+- **The public status page no longer quotes probe errors.** An automatic
+  incident and a degraded component's line showed the probes' error text,
+  and a postgres probe's names the probe's user, database and the address
+  it reached. The page now says only the class (connection refused,
+  timeout, authentication failed, query failed, HTTP 503, …); the full
+  error is in xenibase-status's log.
+- **One broken alert channel no longer resends to the working one.** A
+  failure on either the webhook or SMTP retried the whole notification on
+  both, so with email misconfigured the webhook got each firing again every
+  30 minutes for 7 days (about 340 times). Delivery is now recorded per
+  channel, and only the failing one is retried, with its own backoff.
+- **An alert that resolves before its first delivery is announced.** While
+  delivery failed, an alert shorter than the backoff vanished unsent; it is
+  now sent as `alert.resolved` (with `started_at` and `resolved_at`) on
+  each channel that never got its firing. A long-running alert's resolution
+  is retried for 7 days from when it resolved, not from when it fired.
+- **Alerts have hysteresis and survive several servers.** One good
+  evaluation resolved an alert, so a disk hovering at its threshold fired
+  and resolved at every crossing, and with several servers the grace
+  clocks (pooler, waker, pooler hosts, split brain) were per process, so
+  one server resolved what another fired. An alert now resolves after 3
+  clear evaluations in a row, counted in the database; the grace clocks
+  are shared there too; and resolved alerts are deleted after 90 days.
+- **One failing source no longer silences every alert.** When any
+  condition query failed, nothing fired or resolved. What was read now
+  fires; nothing resolves that round.
+- **A failed restore test of a deleted project no longer alerts for
+  good.** It fired `restore_test_failed` forever and kept the public status
+  page's Backups component degraded; only live projects' on-demand tests
+  count now.
+- **Announced maintenance ends without a status page.** Without
+  `XENIBASE_STATUS_URL` the incidents loop never ran, so a maintenance
+  window was never resolved and an unconfirmed draft never lapsed: every
+  covered organisation's dashboard showed finished maintenance as in
+  progress. The loop now always runs.
 - **The empty-node sweep no longer deletes a server something was just
   placed on.** It read what was on each node once, then deleted the
   server, retired its clusters and removed the node, while placement still
@@ -898,8 +942,169 @@ bundle share one version (spec §11.5).
   sessions opened before kept running. They are now switched off and their
   sessions ended with the project's other logins, and switched back on
   with them; the role sync keeps them recorded meanwhile.
+- **Container logs are rotated.** No service in the compose files set
+  `logging:`, so Docker's default `json-file` driver kept every line (one
+  per API request, and the text of every slow tenant statement) until the
+  disk filled. Every service in `deploy/compose`, the status page's and the
+  pooler hosts' compose files now uses `json-file` with `max-size: 50m` and
+  `max-file: 5`, at most 250 MB per container. Existing containers pick it
+  up when they are next recreated (`./install.sh` does it).
+- **An upgrade's rollback no longer loses what was written while the images
+  built.** `upgrade.sh` took its metadata backup before `git checkout` and
+  `install.sh`, whose image build takes minutes while the old server keeps
+  writing, so a rollback after a migration restored a backup that missed
+  everything done in that time (projects created or deleted, password
+  changes, payment webhooks), besides what the new server wrote during the
+  checks. It now checks out the tag and builds its images first
+  (`install.sh --build-only`, new) while the old version serves, then stops
+  xenibase-server and the agent, takes and verifies the backup, and starts
+  the new version (`install.sh --no-build`, new). A failed build rolls back
+  with the old version still serving and nothing restored; a failed backup
+  starts the old version again. What the new version writes before a
+  failed check is still lost when the rollback restores; `docs/deploying.md`
+  ("What a rollback keeps") says what that means. A tag whose `install.sh`
+  lacks `--build-only` is upgraded the old way, backup first. Exit statuses,
+  the `.meta` file and `deploy-ssh.sh` are unchanged, except that a failed
+  backup is now exit 2 (rolled back) rather than 1, since the tag is
+  checked out and built by then.
+- **Upgrade backups and `.env` are readable by their owner only.**
+  `upgrade.sh` created its dump (password hashes, every sealed secret) under
+  the shell's umask, usually 644, in a 755 folder, and `chmod 600`ed it only
+  after `pg_dump` finished; its `.meta` file and log stayed 644. It now
+  creates each file mode 600 before writing to it and makes
+  `upgrade-backups/` mode 700 (`deploy-ssh.sh` creates it so too), without
+  changing the umask of what `git checkout` writes. An `.env` copied by hand
+  from `.env.example` kept the copy's mode; `install.sh` now sets an
+  existing `.env` to 600 on every run and warns when it had to.
+
+- **Another organisation can no longer capture a customer's support
+  tickets.** Billing contacts and WhatsApp numbers were whatever an
+  organisation's owners and admins typed, and a billing contact ranked
+  first when routing inbound email: an organisation that added
+  `victim@b.example` as a billing contact got every ticket the victim
+  emailed, its owners and admins read them and the replies, and its
+  members could reply into them by email; a WhatsApp number did the same,
+  and its real owner's organisation could no longer register it. Now an
+  address or number routes tickets only once verified. A billing contact
+  is verified at once when it is the verified address of one of the
+  organisation's members; any other address is emailed a confirmation
+  link (`POST /api/v1/billing/contacts/confirm`, the `/confirm-contact`
+  page) and gets billing email meanwhile, as before. A WhatsApp number
+  stays pending until the code the dashboard shows (`XB-12345678`) is sent
+  from it to the support number; pending registrations don't route and
+  don't stop another organisation registering the number, and the one
+  that verifies drops the others. An inbound email joins a ticket only
+  from its requester or a member of the ticket's organisation whose
+  address is verified, never from a billing contact alone. The API's
+  `BillingContact` gains `verified`, and `SupportPhone` gains `verified`,
+  `code` and `code_expires_at`.
+- **An inbound email's sender is no longer taken on trust.** The
+  inbound webhook read `From` and ignored the provider's verdicts, so mail
+  forged as an owner opened a ticket under the owner's organisation, or
+  joined the owner's thread with its `[T-n]`. The sender is now trusted
+  only on a DMARC pass, or DKIM and SPF passes aligned with `From`'s
+  domain, from Postmark's `Received-SPF` and `X-Spam-Tests` headers,
+  `Authentication-Results` naming `XENIBASE_SUPPORT_AUTHSERV_ID`, or the
+  plain body's new `authentication_results`. Other mail still opens a
+  ticket, with no organisation or user, flagged `unverified_sender`
+  (a badge and a warning in the support console); it never joins a
+  thread, and its acknowledgement says only the ticket's reference.
+
+- **The CLI no longer sends a context's token to another server.**
+  `--server` and `XENIBASE_SERVER` replaced only the server of the selected
+  context, so `xenibase whoami --server https://staging.example` sent the
+  production token to staging, as would a CI job setting `XENIBASE_SERVER`
+  on a machine with a logged-in context. When the server named differs from
+  the context's (by scheme, host and port), the context's token, `token_cmd`
+  and CA file are now left out: the token comes from `XENIBASE_TOKEN`, or the
+  one saved context for that server, or the command stops with exit code 2.
+  `--context` with a different `--server` is refused unless `XENIBASE_TOKEN`
+  is set. And `login` accepted `http://` for any host, so a token could travel
+  and be saved for a plain-HTTP server: `http://` is now accepted only for
+  `localhost`, `127.0.0.0/8` and `::1`, and a saved token is not sent over
+  `http://` to any other host. See `docs/cli.md` ("Which server and token a
+  command uses").
+- **A release is published only after CI passed on its tag.** The release
+  workflow started on the same tag push as CI and did not wait for it, so a
+  tag whose tests then failed still got a public GitHub release. Publishing
+  is now the `release` job of `ci.yml`, which needs `ci`, `e2e`,
+  `docs-install`, `audit` and `upgrade` to pass first; it alone can write to
+  the repository, and `release.yml` is gone. See `docs/deploying.md` ("Where
+  a release comes from").
+- **Tests that never ran in CI now run, and skips are counted.**
+  `TestDumpRestoreCopy` (the agent's real `pg_dump` and `pg_restore`) and
+  `docker.TestAgainstDaemon` skipped in every run because nothing set
+  `XENIBASE_TEST_PG_BIN` or `XENIBASE_TEST_DOCKER`; the `ci` job now installs
+  the Postgres 18 client tools and sets both, and `TestAgainstDaemon` fails
+  rather than skips when it is asked to run without a daemon or image. The
+  second half of `TestDedicatedResize` (a size its node can't hold moves the
+  project) skipped on a runner with fewer than three CPUs; it now fills the
+  node by memory, so it runs on any runner. `make test-go` and
+  `make test-integration` pipe `go test -json` through
+  `internal/tools/testsummary`, which prints each package's result, the
+  output of failing tests, the counts, and every skipped test with its
+  reason, and fails when a test named in `XENIBASE_TEST_MUST_RUN` skipped;
+  CI names the tests its environment is there for.
+- **Caddy is pinned, the images are scanned, and dependency updates are
+  proposed.** Caddy ran from the floating `caddy:2`, so two installs of one
+  release could run different Caddy, and the DNS plugins were built at
+  whatever version was latest. Caddy is now `caddy:2.10.0` in the bundle,
+  the status page and the DNS-plugin build (`xcaddy build v2.10.0`, the
+  version `test/acmedns` checks), and the cloudflare (v0.2.4) and desec
+  (v1.0.1) plugins are pinned to versions built for it. A weekly
+  `image-scan` job (and on demand) builds the images the install runs, pulls
+  Caddy and PgBouncer, and scans each with Trivy, failing on a fixed CRITICAL
+  or HIGH vulnerability. And `.github/dependabot.yml` proposes weekly,
+  grouped updates for the Go modules, the npm trees, the Dockerfiles and
+  compose images, and the workflows' actions.
+- **The upgrade rehearsal starts from the latest release.** `make
+  test-upgrade` installed v4.1.0, which its comment called the previous
+  release four releases later. It now finds the newest `vX.Y.Z` tag
+  reachable from the commit (not one on the commit itself, so CI on a
+  release tag upgrades from the release before), falling back to v4.1.0;
+  `UPGRADE_FROM` still overrides it.
 
 ### Upgrading
+- Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
+  up`. An install with backend services on keeps the Caddy image
+  `enable-services.sh` built until it is run again, which rebuilds it pinned.
+- A CLI context saved for an `http://` server other than this machine stops
+  working: log in again with `https://`, or, on a network you trust
+  without TLS, set `XENIBASE_ALLOW_HTTP=1` (each command warns). A script that sets `XENIBASE_SERVER`
+  to a server other than its current context's needs `XENIBASE_TOKEN`, or a
+  context for that server.
+- Migration 00097 adds billing contacts' `verified_at` and confirmation
+  token, and lets several organisations hold a WhatsApp number pending
+  (`org_support_phones` is keyed by organisation and number, with
+  `verified_at` and a `code`). Billing contacts that are a member's
+  verified address count as verified. The others keep getting invoices,
+  billing and status page email, but their email to support opens tickets
+  without an organisation until they are confirmed: **Send the link
+  again** under Billing → Billing contacts emails each one the link. Every WhatsApp
+  number registered before the upgrade is pending, with a code good for
+  30 days shown under Organisation → Support; its messages get the "how to
+  reach support" reply until the code is sent from it.
+- Migration 00098 adds `tickets.unverified_sender`. Inbound email that
+  isn't authenticated no longer threads or reaches an organisation. With
+  Postmark nothing needs setting. With another provider, have it pass its
+  verdict in `authentication_results`, or set
+  `XENIBASE_SUPPORT_AUTHSERV_ID` to the authserv-id of the
+  `Authentication-Results` header it adds; otherwise every inbound email
+  is unverified (`docs/support.md`, "Inbound email").
+- **Upgrade xenibase-server before xenibase-status.** A status page of this
+  release requires the `v2` push signature and refuses (401, logged as "no
+  v2 signature") heartbeats, incidents, SLA and subscriber pushes from an
+  older server. A new server still sends `v1` too, so an older status page
+  keeps working with it until upgraded. Something else that pushes to the
+  status page must sign with `statusapi.SignPush`.
+- Migration 00095 adds `alert_deliveries` (each alert event's delivery per
+  channel), `alert_grace` (the grace clocks), and `alerts.clear_count` and
+  `cleared_since`. Alerts now resolve about a minute later (3 clear
+  evaluations). Resolved alerts older than 90 days, and their deliveries,
+  are deleted within an hour of the upgrade. Resolved alerts of the last 7
+  days whose firing was never delivered are sent as `alert.resolved` once
+  a channel works. Monitoring that keys on the status page's probe error
+  text gets the class only; the full error is in xenibase-status's log.
 - Migration 00094 adds the node lifecycle `retiring`, with
   `nodes.retiring_at` and `nodes.retiring_from`: an empty node out of
   placement whose server the next sweep deletes. The API's node

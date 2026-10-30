@@ -43,6 +43,7 @@ func TestMonthWithMidMonthUpgrade(t *testing.T) {
 	if _, err := s.AddContact(ctx, org, "ap@acme.example", nil); err != nil {
 		t.Fatal(err)
 	}
+	sent.reset() // the contact's confirmation link
 	legal := "Acme Nigeria Ltd"
 	if _, err := s.UpdateDetails(ctx, org, billing.Details{LegalName: &legal, DeductsWHT: true, VATRegistered: true}); err != nil {
 		t.Fatal(err)

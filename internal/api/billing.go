@@ -258,7 +258,7 @@ func (s *Server) ListBillingContacts(w http.ResponseWriter, r *http.Request, org
 	}{Items: []gen.BillingContact{}}
 	for _, c := range rows {
 		on := c.StatusEmails
-		out.Items = append(out.Items, gen.BillingContact{Email: c.Email, Name: c.Name, StatusEmails: &on})
+		out.Items = append(out.Items, gen.BillingContact{Email: c.Email, Name: c.Name, StatusEmails: &on, Verified: ptrTo(c.VerifiedAt != nil)})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -279,7 +279,36 @@ func (s *Server) AddBillingContact(w http.ResponseWriter, r *http.Request, org g
 		return
 	}
 	auditFrom(r.Context()).target("billing_contact", c.Email)
-	writeJSON(w, http.StatusCreated, gen.BillingContact{Email: c.Email, Name: c.Name})
+	verified := c.VerifiedAt != nil
+	on := c.StatusEmails
+	writeJSON(w, http.StatusCreated, gen.BillingContact{Email: c.Email, Name: c.Name, StatusEmails: &on, Verified: &verified})
+}
+
+// ConfirmBillingContact implements POST /api/v1/billing/contacts/confirm.
+func (s *Server) ConfirmBillingContact(w http.ResponseWriter, r *http.Request) {
+	bs := s.billingSvc(w)
+	if bs == nil {
+		return
+	}
+	var req gen.TokenRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if s.auth != nil {
+		if err := s.auth.AllowToken(ipString(r.Context())); err != nil {
+			s.authError(w, "billing contact", err)
+			return
+		}
+	}
+	c, org, err := bs.ConfirmContact(r.Context(), req.Token)
+	if err != nil {
+		s.billingError(w, "billing contact", err)
+		return
+	}
+	a := auditFrom(r.Context())
+	a.orgID = c.OrgID
+	a.target("billing_contact", c.Email)
+	writeJSON(w, http.StatusOK, map[string]string{"email": c.Email, "org_name": org})
 }
 
 // RemoveBillingContact implements DELETE /api/v1/orgs/{org}/billing/contacts/{email}.

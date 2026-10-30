@@ -140,3 +140,36 @@ func TestNobodyInvitesThemselves(t *testing.T) {
 		t.Fatalf("inviting someone else: %v", err)
 	}
 }
+
+// TestLeavingUnverifiesTheirBillingContact: a billing contact counts as
+// verified while it is a member's own address, so when the member leaves
+// it stops routing support tickets to the organisation until confirmed by
+// link, and the same address in another organisation is left alone.
+func TestLeavingUnverifiesTheirBillingContact(t *testing.T) {
+	ctx := context.Background()
+	db := storetest.New(t)
+	owner, dev := uuid.New(), uuid.New()
+	org, other := uuid.New(), uuid.New()
+	exec(t, db, `INSERT INTO users (id, email, password_hash, email_verified_at) VALUES ($1, 'owner@example.com', 'x', now()), ($2, 'dev@example.com', 'x', now())`, owner, dev)
+	exec(t, db, `INSERT INTO organizations (id, name, slug, plan_id) SELECT $1, 'Org', 'org', id FROM quota_plans ORDER BY name LIMIT 1`, org)
+	exec(t, db, `INSERT INTO organizations (id, name, slug, plan_id) SELECT $1, 'Other', 'other', id FROM quota_plans ORDER BY name LIMIT 1`, other)
+	exec(t, db, `INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'member'), ($4, $3, 'owner')`, org, owner, dev, other)
+	exec(t, db, `INSERT INTO billing_contacts (org_id, email, verified_at) VALUES ($1, 'dev@example.com', now()), ($2, 'dev@example.com', now())`, org, other)
+
+	svc := orgs.New(db, nil, nil, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := svc.Leave(ctx, org, dev); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		org  uuid.UUID
+		want bool
+	}{{org, false}, {other, true}} {
+		var verified bool
+		if err := db.QueryRow(ctx, `SELECT verified_at IS NOT NULL FROM billing_contacts WHERE org_id = $1 AND email = 'dev@example.com'`, c.org).Scan(&verified); err != nil {
+			t.Fatal(err)
+		}
+		if verified != c.want {
+			t.Errorf("org %s: contact verified %v, want %v", c.org, verified, c.want)
+		}
+	}
+}

@@ -33,8 +33,8 @@ func (a *App) login(args []string) error {
 	if server == "" {
 		return usageErrorf("usage: xenibase login --server https://xenibase.example.com")
 	}
-	if u, err := url.Parse(server); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return usageErrorf("--server must be a URL like https://xenibase.example.com")
+	if err := a.checkServerURL(server); err != nil {
+		return err
 	}
 	ca := *caFile
 	if ca == "" {
@@ -177,12 +177,16 @@ func (a *App) logout(args []string) error {
 		return usageErrorf("not logged in")
 	}
 	if !*keep && c.TokenID != "" {
-		if err := a.connectAPI(); err == nil {
+		// Only with the context's own server and token: with --server
+		// naming another server, resolve picks a different context.
+		if err := a.connectAPI(); err == nil && a.t.Name == name {
 			cc, cancel := ctx()
 			defer cancel()
 			if r, err := a.api.RevokeMyTokenWithResponse(cc, mustUUID(c.TokenID)); check(r, err) != nil {
 				fmt.Fprintln(a.Stderr, "warning: could not revoke the token on the server")
 			}
+		} else {
+			fmt.Fprintln(a.Stderr, "warning: could not revoke the token on the server")
 		}
 	}
 	delete(cfg.Contexts, name)

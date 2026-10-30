@@ -454,6 +454,11 @@ func (s *Service) deleteMembership(ctx context.Context, q *store.Queries, orgID,
 	if _, err := q.RevokeUserOrgTokens(ctx, store.RevokeUserOrgTokensParams{OrgID: orgID, UserID: userID}); err != nil {
 		return err
 	}
+	// A billing contact at their address no longer routes support tickets
+	// to the organisation until it is confirmed by link.
+	if err := q.UnverifyLeavingMemberContact(ctx, store.UnverifyLeavingMemberContactParams{OrgID: orgID, UserID: userID}); err != nil {
+		return err
+	}
 	_, err := q.DeleteOrgMember(ctx, store.DeleteOrgMemberParams{OrgID: orgID, UserID: userID})
 	return err
 }

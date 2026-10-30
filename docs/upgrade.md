@@ -14,8 +14,9 @@ version an upgrade is "check out the new tag and run the installer".
 ## Upgrade the bundle (the control node)
 
 > **Recommended:** run `./upgrade.sh <tag>` rather than the commands in this
-> block. It backs up the metadata database, checks the result, and rolls back
-> by itself if the new version doesn't become healthy
+> block. It builds first, backs up the metadata database with nothing writing
+> to it, checks the result, and rolls back by itself if the new version
+> doesn't become healthy
 > ([deploying](deploying.md)). The list after the block says what an upgrade
 > does either way.
 

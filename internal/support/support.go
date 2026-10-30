@@ -86,7 +86,11 @@ type Config struct {
 	// InboundSecret authenticates the email provider's inbound webhook
 	// (XENIBASE_SUPPORT_INBOUND_SECRET).
 	InboundSecret string
-	Now           func() time.Time
+	// AuthservID is the email provider's authserv-id
+	// (XENIBASE_SUPPORT_AUTHSERV_ID): only Authentication-Results naming it
+	// count. Empty, the topmost one counts.
+	AuthservID string
+	Now        func() time.Time
 }
 
 // Service runs tickets.
@@ -116,6 +120,9 @@ func (s *Service) WhatsAppAPI() *CloudAPI { return s.wa }
 // InboundSecret is the inbound email webhook's secret ("" when off).
 func (s *Service) InboundSecret() string { return s.cfg.InboundSecret }
 
+// AuthservID is the provider's authserv-id ("" for the topmost header).
+func (s *Service) AuthservID() string { return s.cfg.AuthservID }
+
 // WhatsAppOn reports whether the WhatsApp channel is on.
 func (s *Service) WhatsAppOn() bool { return s.whatsapp != nil }
 
@@ -137,6 +144,9 @@ type Open struct {
 	Body       string
 	Priority   string
 	ExternalID string
+	// Unverified marks an email whose sender the provider didn't
+	// authenticate: no organisation or user, and a generic acknowledgement.
+	Unverified bool
 }
 
 // OpenTicket opens a ticket with its first message, sets its response
@@ -160,6 +170,9 @@ func (s *Service) OpenTicket(ctx context.Context, o Open) (store.Ticket, error) 
 	if !validPriority(o.Priority) {
 		return store.Ticket{}, invalid("priority is low, normal, high or urgent")
 	}
+	if o.Unverified {
+		o.OrgID, o.UserID = nil, nil
+	}
 	plan := "free"
 	q := store.New(s.db)
 	if o.OrgID != nil {
@@ -176,7 +189,7 @@ func (s *Service) OpenTicket(ctx context.Context, o Open) (store.Ticket, error) 
 		t, err = qt.InsertTicket(ctx, store.InsertTicketParams{
 			OrgID: o.OrgID, Requester: strings.ToLower(o.Requester), RequesterName: nonEmpty(o.Name), RequesterUserID: o.UserID,
 			Channel: o.Channel, Subject: o.Subject, Priority: o.Priority, Plan: &plan,
-			RespondBy: TargetFor(plan, o.Priority).RespondBy(s.cfg.Now()),
+			RespondBy: TargetFor(plan, o.Priority).RespondBy(s.cfg.Now()), UnverifiedSender: o.Unverified,
 		})
 		if err != nil {
 			return err
@@ -216,6 +229,10 @@ func (s *Service) acknowledge(ctx context.Context, t store.Ticket) {
 		target = "You'll hear from us by " + t.RespondBy.In(WAT).Format("Mon 2 Jan, 15:04 WAT") + "."
 	}
 	body := fmt.Sprintf("We received your request %s, %q.\n\n%s\n\nReply to this message to add to it.", Ref(t.Number), t.Subject, target)
+	if t.UnverifiedSender {
+		// The sender may be forged: nothing they wrote is echoed back.
+		body = fmt.Sprintf("We received a message to Xenibase support from this address, and it is %s. If you didn't write to us, ignore this email.", Ref(t.Number))
+	}
 	if t.Channel == ChannelWhatsApp {
 		s.sendWhatsApp(ctx, t, body)
 		return
@@ -246,7 +263,11 @@ func (s *Service) sendEmail(ctx context.Context, t store.Ticket, body string) {
 	if s.cfg.Address != "" {
 		h["Reply-To"] = s.cfg.Address
 	}
-	err := s.mail.Send(ctx, mail.Message{To: []string{t.Requester}, Subject: fmt.Sprintf("[%s] %s", Ref(t.Number), t.Subject), Body: body, Plain: true, Headers: h})
+	subject := t.Subject
+	if t.UnverifiedSender {
+		subject = "Xenibase support" // the sender may be forged: don't echo what they wrote
+	}
+	err := s.mail.Send(ctx, mail.Message{To: []string{t.Requester}, Subject: fmt.Sprintf("[%s] %s", Ref(t.Number), subject), Body: body, Plain: true, Headers: h})
 	if err != nil {
 		s.log.Warn("support email", "ticket", Ref(t.Number), "err", err)
 		return
@@ -424,13 +445,20 @@ type Email struct {
 	From, FromName, Subject, Text string
 	MessageID, InReplyTo          string
 	References                    []string
+	// Authenticated is the provider's verdict that From is genuine: DMARC
+	// passed, or SPF and DKIM both passed aligned with From's domain.
+	// Mail without it opens a ticket of its own, with no organisation,
+	// and never joins a thread.
+	Authenticated bool
 }
 
 var refInSubject = regexp.MustCompile(`\[T-(\d+)\]`)
 
 // InboundEmail threads e into its ticket (by the ticket reference in the
 // subject, or the message it replies to) or opens a new one for the
-// sender's organisation. A message seen before changes nothing.
+// sender's organisation. A message seen before changes nothing. Mail whose
+// sender isn't authenticated opens a new ticket with no organisation,
+// flagged for the console.
 func (s *Service) InboundEmail(ctx context.Context, e Email) (store.Ticket, bool, error) {
 	from := strings.ToLower(strings.TrimSpace(e.From))
 	if !strings.Contains(from, "@") {
@@ -444,9 +472,11 @@ func (s *Service) InboundEmail(ctx context.Context, e Email) (store.Ticket, bool
 		body = "(no text)"
 	}
 	q := store.New(s.db)
-	if t, ok := s.threadOf(ctx, e); ok {
-		// Only the requester (or someone in its org) continues a thread.
-		if strings.EqualFold(t.Requester, from) || s.sameOrg(ctx, t, from) {
+	// Unauthenticated mail may be forged: it never joins a thread.
+	if t, ok := s.threadOf(ctx, e); ok && e.Authenticated {
+		// Only the requester (or a verified member of its org) continues a
+		// thread.
+		if strings.EqualFold(t.Requester, from) || s.memberOf(ctx, t, from) {
 			added, err := s.CustomerReply(ctx, t, from, nil, body, e.MessageID)
 			return t, added, err
 		}
@@ -456,13 +486,16 @@ func (s *Service) InboundEmail(ctx context.Context, e Email) (store.Ticket, bool
 			return t, false, nil // seen before
 		}
 	}
-	org := s.orgForEmail(ctx, from)
+	var org *uuid.UUID
+	if e.Authenticated {
+		org = s.orgForEmail(ctx, from)
+	}
 	subject := refInSubject.ReplaceAllString(strings.TrimSpace(e.Subject), "")
 	subject = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(subject, "Re:"), "RE:"))
 	if subject == "" {
 		subject = "(no subject)"
 	}
-	t, err := s.OpenTicket(ctx, Open{OrgID: org, Requester: from, Name: e.FromName, Channel: ChannelEmail, Subject: subject, Body: body, ExternalID: e.MessageID})
+	t, err := s.OpenTicket(ctx, Open{OrgID: org, Requester: from, Name: e.FromName, Channel: ChannelEmail, Subject: subject, Body: body, ExternalID: e.MessageID, Unverified: !e.Authenticated})
 	return t, err == nil, err
 }
 
@@ -486,7 +519,10 @@ func (s *Service) threadOf(ctx context.Context, e Email) (store.Ticket, bool) {
 	return store.Ticket{}, false
 }
 
-func (s *Service) sameOrg(ctx context.Context, t store.Ticket, from string) bool {
+// memberOf reports whether from is the verified address of a member of
+// t's organisation. A billing contact alone doesn't continue someone
+// else's thread.
+func (s *Service) memberOf(ctx context.Context, t store.Ticket, from string) bool {
 	if t.OrgID == nil {
 		return false
 	}
@@ -495,15 +531,16 @@ func (s *Service) sameOrg(ctx context.Context, t store.Ticket, from string) bool
 		return false
 	}
 	for _, o := range orgs {
-		if o.OrgID == *t.OrgID {
+		if o.Rank == 1 && o.OrgID == *t.OrgID {
 			return true
 		}
 	}
 	return false
 }
 
-// orgForEmail is the sender's organisation: the one it is a billing contact
-// of, else the only one it belongs to. Ambiguous senders are left for the
+// orgForEmail is the sender's organisation: the one it is a verified
+// billing contact of, else the only one it belongs to by its verified
+// address. Ambiguous senders are left for the
 // support console to assign.
 func (s *Service) orgForEmail(ctx context.Context, from string) *uuid.UUID {
 	orgs, err := store.New(s.db).OrgsForEmail(ctx, from)
