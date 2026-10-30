@@ -91,8 +91,19 @@ xenibase-server then:
   "on status page", or the error if a push fails; failed pushes are retried
   every 10 seconds.
 
-Both directions are signed with the `Xenibase-Signature` HMAC scheme webhooks
-use, and refused if they are more than 5 minutes old.
+Every push is signed in the `Xenibase-Signature` header and refused if it
+is more than 5 minutes old. The status page checks its `v2` value: an
+HMAC-SHA256 of `<t>.<METHOD> <path>\n<body>` with the push secret, so a
+signed request is accepted only by the endpoint it was made for. The header
+also carries the webhooks' body-only `v1`, which older status pages check;
+this page ignores it. A heartbeat sent before the newest one accepted is
+refused (409). Upgrade xenibase-server before xenibase-status: a status
+page of this release refuses pushes from an older server.
+
+A failing probe shows on the page as its error class only (connection
+refused, timeout, authentication failed, query failed, HTTP 503, name not
+resolved, TLS error, or check failed); the full error, which can name a
+probe's user, database and address, is in xenibase-status's log.
 
 ## Incidents
 

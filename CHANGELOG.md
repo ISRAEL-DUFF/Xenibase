@@ -39,6 +39,50 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A status page push is bound to its endpoint.** The push signature
+  covered the timestamp and body only, so a signed heartbeat replayed to
+  `PUT /api/v1/subscribers/managed` decoded as an empty list and deleted
+  every managed subscriber, and to `/api/v1/sla/targets` removed every SLA
+  target; a heartbeat replayed within five minutes also overwrote a newer
+  one. xenibase-server now adds `v2` to `Xenibase-Signature`, an HMAC of
+  `<t>.<METHOD> <path>\n<body>`, which xenibase-status requires, and the
+  status page refuses (409) a heartbeat sent before the newest it accepted.
+  Customer webhook signatures are unchanged.
+- **The public status page no longer quotes probe errors.** An automatic
+  incident and a degraded component's line showed the probes' error text,
+  and a postgres probe's names the probe's user, database and the address
+  it reached. The page now says only the class (connection refused,
+  timeout, authentication failed, query failed, HTTP 503, …); the full
+  error is in xenibase-status's log.
+- **One broken alert channel no longer resends to the working one.** A
+  failure on either the webhook or SMTP retried the whole notification on
+  both, so with email misconfigured the webhook got each firing again every
+  30 minutes for 7 days (about 340 times). Delivery is now recorded per
+  channel, and only the failing one is retried, with its own backoff.
+- **An alert that resolves before its first delivery is announced.** While
+  delivery failed, an alert shorter than the backoff vanished unsent; it is
+  now sent as `alert.resolved` (with `started_at` and `resolved_at`) on
+  each channel that never got its firing. A long-running alert's resolution
+  is retried for 7 days from when it resolved, not from when it fired.
+- **Alerts have hysteresis and survive several servers.** One good
+  evaluation resolved an alert, so a disk hovering at its threshold fired
+  and resolved at every crossing, and with several servers the grace
+  clocks (pooler, waker, pooler hosts, split brain) were per process, so
+  one server resolved what another fired. An alert now resolves after 3
+  clear evaluations in a row, counted in the database; the grace clocks
+  are shared there too; and resolved alerts are deleted after 90 days.
+- **One failing source no longer silences every alert.** When any
+  condition query failed, nothing fired or resolved. What was read now
+  fires; nothing resolves that round.
+- **A failed restore test of a deleted project no longer alerts for
+  good.** It fired `restore_test_failed` forever and kept the public status
+  page's Backups component degraded; only live projects' on-demand tests
+  count now.
+- **Announced maintenance ends without a status page.** Without
+  `XENIBASE_STATUS_URL` the incidents loop never ran, so a maintenance
+  window was never resolved and an unconfirmed draft never lapsed: every
+  covered organisation's dashboard showed finished maintenance as in
+  progress. The loop now always runs.
 - **The empty-node sweep no longer deletes a server something was just
   placed on.** It read what was on each node once, then deleted the
   server, retired its clusters and removed the node, while placement still
@@ -900,6 +944,20 @@ bundle share one version (spec §11.5).
   with them; the role sync keeps them recorded meanwhile.
 
 ### Upgrading
+- **Upgrade xenibase-server before xenibase-status.** A status page of this
+  release requires the `v2` push signature and refuses (401, logged as "no
+  v2 signature") heartbeats, incidents, SLA and subscriber pushes from an
+  older server. A new server still sends `v1` too, so an older status page
+  keeps working with it until upgraded. Something else that pushes to the
+  status page must sign with `statusapi.SignPush`.
+- Migration 00095 adds `alert_deliveries` (each alert event's delivery per
+  channel), `alert_grace` (the grace clocks), and `alerts.clear_count` and
+  `cleared_since`. Alerts now resolve about a minute later (3 clear
+  evaluations). Resolved alerts older than 90 days, and their deliveries,
+  are deleted within an hour of the upgrade. Resolved alerts of the last 7
+  days whose firing was never delivered are sent as `alert.resolved` once
+  a channel works. Monitoring that keys on the status page's probe error
+  text gets the class only; the full error is in xenibase-status's log.
 - Migration 00094 adds the node lifecycle `retiring`, with
   `nodes.retiring_at` and `nodes.retiring_from`: an empty node out of
   placement whose server the next sweep deletes. The API's node
