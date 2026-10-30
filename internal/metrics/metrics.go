@@ -74,7 +74,7 @@ const (
 const sizeEvery = 5 * time.Minute
 
 // lockKey makes one xenibase-server at a time the collector.
-const lockKey int64 = 0x7067646f636b06 // "xenibase\x06"
+const lockKey int64 = 0x7067646f636b0a // "xenibase\x0a"; every key must be distinct (TestAdvisoryLockKeysDistinct)
 
 // Projects lists projects and configures connections to their instances
 // (*provision.Service).
