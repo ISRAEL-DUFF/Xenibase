@@ -4,26 +4,223 @@
   "title": "The engineering system",
   "part": "F",
   "order": 2,
-  "status": "planned",
   "summary": "How the code is checked and shipped: CI, the test suites in test/, generated code, the docs site, the SDKs and the CLI, and the brand in code.",
-  "scope": [
-    "CI jobs and what each proves",
-    "Unit, integration, isolation, load, end-to-end, upgrade and docs tests",
-    "Generated code and the check that it is current",
-    "The documentation site",
-    "The JavaScript, Go and Dart SDKs, and the CLI",
-    "Brand colours shared by the web app and email"
-  ],
+  "verified": "ef67bfb3669a49d00fdf63921f3ee5f3275cec29",
   "sources": [
     ".github/workflows/",
+    ".golangci.yml",
+    "Makefile",
+    "Dockerfile",
+    "go.mod",
     "test/",
+    "deploy/dev/test.env",
+    "internal/store/storetest/storetest.go",
+    "internal/store/generate.go", "internal/api/gen/generate.go", "internal/api/client/generate.go",
+    "internal/version/version.go",
     "internal/docsite/",
     "cmd/docsite/",
     "internal/cli/",
     "cmd/cli/",
     "internal/brand/",
+    "brand/",
     "sdk/",
-    "Makefile"
+    "web/package.json",
+    "web/embed.go",
+    "docs/site.json",
+    "Xenibase — V1 Specification & Build Plan.md",
+    "Xenibase — V2 Specification & Build Plan.md",
+    "xenibase-v4-spec.md",
+    "docs/decisions.md"
   ]
 }
 -->
+<p>Xenibase is checked by one GitHub Actions workflow with seven jobs, built by one Makefile, and shipped as a GitHub release built from the tag. Most of the confidence comes from suites that run the real thing: a control plane in-process against real Postgres and PgBouncer, the install bundle in a browser, the install guide as a script. This page lists each check, what it proves and where it stops, and the CLI, SDKs, docs site and brand that the same system builds.</p>
+<x-packages names="docsite,cli,brand"/>
+
+<h2 id="engineering-system--ci">The workflows</h2>
+<p>There are <x-stat name="workflows"/> workflow files in <x-ref path=".github/workflows/"><code>.github/workflows</code></x-ref>. Only one runs by itself on every change.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Workflow</th><th>Runs on</th><th>Permissions and secrets</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path=".github/workflows/ci.yml"><code>ci.yml</code></x-ref></td><td>Every <code>push</code> (any branch or tag), every <code>pull_request</code>, Mondays 03:17 UTC, and by hand</td><td><code>contents: read</code>. No secrets.</td><td>Seven jobs, below.</td></tr>
+    <tr><td><x-ref path=".github/workflows/release.yml"><code>release.yml</code></x-ref></td><td>A pushed tag matching <code>v*</code></td><td><code>contents: write</code>, the job's own <code>GITHUB_TOKEN</code></td><td>Builds the release artefacts and publishes a GitHub release (<x-page id="engineering-system--release"/>).</td></tr>
+    <tr><td><x-ref path=".github/workflows/deploy.yml"><code>deploy.yml</code></x-ref></td><td>By hand, with a tag</td><td><code>contents: read</code>, <code>checks: read</code>; the <code>production</code> environment's <code>DEPLOY_SSH_KEY</code> and <code>DEPLOY_KNOWN_HOSTS</code></td><td>Refuses a tag whose CI is not green, waits for the environment's reviewers, then runs <code>upgrade</code> on the control server over SSH. <code>concurrency: deploy-production</code> keeps two deploys apart.</td></tr>
+    <tr><td><x-ref path=".github/workflows/move-20gb.yml"><code>move-20gb.yml</code></x-ref></td><td>By hand, on a runner the caller names</td><td><code>contents: read</code></td><td>M18's move under writes at full size (20 GB by default), after checking the runner has three times that free.</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="engineering-system--jobs">The jobs in ci.yml</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>Job</th><th>When</th><th>What it runs</th><th>What a pass proves</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  ci:"><code>ci</code></x-ref></td><td>Always</td><td>golangci-lint; <code>make test-go</code> with a <code>postgres:18</code> service; <code>test-deploy</code>, <code>test-acmedns</code>, <code>test-web</code>, <code>test-sdk</code>, <code>docs-site</code>, <code>check-generated</code>, <code>build</code>, <code>release-check</code>; then <code>test-integration</code> (with a 1 GB move) and <code>test-acme</code></td><td>Lint is clean; unit and database tests pass under <code>-race</code>; docs links resolve; generated code is current; the binaries are static and embed the real UI; the integration, isolation and SDK live suites pass against real Postgres 18 and PgBouncer; a certificate can be had over HTTP-01.</td></tr>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  e2e:"><code>e2e</code></x-ref></td><td>Always</td><td><code>make test-e2e</code>: the compose bundle with Pebble, a fake S3 and a Supabase-shaped source, driven by Playwright</td><td>A fresh install reaches a working database through the browser, and the <x-stat name="e2e-tests"/> journeys after it work end to end.</td></tr>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  docs-install:"><code>docs-install</code></x-ref></td><td>Always</td><td><code>make test-docs</code></td><td>The commands in <code>docs/install.md</code>, run as written in a clean clone, produce an install that passes the first browser journey.</td></tr>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  atlas:"><code>atlas</code></x-ref></td><td>Always; the second step on pull requests only</td><td><code>node docs/atlas/atlas.mjs check</code>, then a diff against the base branch</td><td>Every reference in this atlas resolves, and a pull request that changed its pages also rebuilt <code>site/index.html</code> (<x-page id="about"/>).</td></tr>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  upgrade:"><code>upgrade</code></x-ref></td><td>Weekly, by hand, on tags, and on branches named <code>feat/deploy…</code></td><td><code>make test-upgrade</code> (90-minute limit)</td><td>The previous release installs, a release with a broken migration is rolled back with its data, and an upgrade to this commit comes up at the new version and schema.</td></tr>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  audit:"><code>audit</code></x-ref></td><td>Always</td><td><code>govulncheck@v1.1.4</code> on the module and <code>sdk/go</code>; <code>npm audit --audit-level=high</code> in <code>web</code>, <code>test/e2e</code> and <code>sdk/js</code></td><td>No known vulnerability in Go code that is actually called, and none rated high or critical in the three npm trees.</td></tr>
+    <tr><td><x-ref path=".github/workflows/ci.yml" symbol="  load:"><code>load</code></x-ref></td><td>Weekly and by hand only</td><td><code>make test-load</code> with <code>pgbench</code> run from the <code>postgres:18</code> image; uploads <code>tmp/load-report.md</code></td><td>150 shared projects with pgbench on 10, the V2 and backend-services load, realtime load and billing rating at 1,000 organisations stay within their limits.</td></tr>
+  </tbody>
+</table></div>
+<p>The <code>ci</code> job is one long sequence on one runner. Its order matters: the Postgres-backed unit tests run first against the service container on port 5432; the dev compose environment for the integration suite comes up last, on its own ports, so the two never meet. On failure it prints the dev environment's logs and the failing lines of the integration log. The integration step pipes through <code>tee</code> under <code>set -o pipefail</code>, so the tee does not hide a failure.</p>
+<p><code>ci.yml</code> sets no <code>concurrency</code> and triggers on both <code>push</code> and <code>pull_request</code>, so a branch with an open pull request runs every job twice and a newer push does not cancel an older one: runner time, not correctness. There is no <code>pull_request_target</code> anywhere: pull requests from forks get a read-only token and no secrets.</p>
+
+<h3 id="engineering-system--actions">Actions and pinning</h3>
+<p>The <code>actions/*</code> actions are pinned to major tags (<code>@v4</code>, <code>@v5</code>) everywhere except the <code>atlas</code> job, which pins <code>checkout</code> and <code>setup-node</code> to commit SHAs. The two third-party actions, <code>golangci/golangci-lint-action@v8</code> (linter <code>v2.14</code>) and <code>dart-lang/setup-dart@v1</code> (SDK 3.9.4), are pinned to major tags too.</p>
+<p>They run in the <code>ci</code> job, which has a read-only token and no secrets, so a moved tag could break or falsify that job but could not publish or deploy. The <code>release</code> job, which can write, uses only <code>actions/*</code>; the <code>deploy</code> job, which holds the SSH key, uses none and connects with <code>StrictHostKeyChecking yes</code>. The tag input reaches the shell only through an environment variable and is checked against <code>^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$</code> and then by <code>git rev-parse</code>, so it cannot carry shell syntax.</p>
+<p>The deploy gate reads the check runs on the tag's commit. Nothing may be failed, cancelled, timed out or pending, and four jobs must have passed by name:</p>
+<x-code path=".github/workflows/deploy.yml" start="for job in ci e2e docs-install audit; do" lines="3" caption="deploy.yml: the jobs a deployable commit must have passed"/>
+
+<h2 id="engineering-system--make">The Makefile</h2>
+<p><x-ref path="Makefile"><code>Makefile</code></x-ref> is the only entry point CI uses; every CI step is a <code>make</code> target, so a contributor can run the same thing locally. It runs recipes under <code>bash -eu -o pipefail</code>, and exports <code>GOFLAGS += -tags=nodynamic</code> (<x-ref path="Makefile" symbol="export GOFLAGS += -tags=nodynamic">why</x-ref>: without it the image codecs load <code>libwebp</code> through purego and <code>xenibase-server</code> and <code>xenibase-edge</code> become dynamically linked).</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Target</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>dev-up</code>, <code>dev</code>, <code>run-dev</code>, <code>dev-down</code></td><td>The dev environment (<code>deploy/dev/compose.yaml</code>: metadata and shared Postgres, two PgBouncers), then the server under <code>air</code> with Vite, or the built binary. A throwaway master key goes to <code>tmp/dev-master.key</code> at mode 600.</td></tr>
+    <tr><td><code>generate</code>, <code>check-generated</code></td><td>Regenerate sqlc, oapi-codegen and openapi-typescript output; fail if that changed a tracked file.</td></tr>
+    <tr><td><code>build</code>, <code>release-check</code>, <code>release</code></td><td>The UI, then five static binaries in <code>bin/</code> with the version linked in; the real UI and no purego; the release artefacts in <code>dist/</code>.</td></tr>
+    <tr><td><code>test-go</code>, <code>test-web</code>, <code>test-db</code>, <code>test-sdk</code></td><td><code>go test -race ./...</code>; the UI's <code>tsc -b</code> and Vitest; the Go tests against the dev environment; the SDKs' unit tests.</td></tr>
+    <tr><td><code>test-integration</code></td><td>Builds the agent binary, the Postgres 17 and 18 images, the pooler host and status images, starts the <code>test</code> profile, sources <code>deploy/dev/test.env</code>, and runs <code>go test -race -count=1 -p 1 -timeout 60m ./test/...</code>.</td></tr>
+    <tr><td><code>test-e2e</code>, <code>test-docs</code>, <code>test-upgrade</code>, <code>test-deploy</code>, <code>test-acmedns</code>, <code>test-acme</code></td><td>The suites below.</td></tr>
+    <tr><td><code>test-load</code>, <code>test-move</code>, <code>test-payments-sandbox</code></td><td>Load, the full-size move, the wallet provider's real sandbox. None runs on a push.</td></tr>
+    <tr><td><code>docs-site</code>, <code>atlas</code>, <code>lint</code></td><td>The docs site into <code>dist/docs</code>; this atlas; <code>golangci-lint run ./...</code>.</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="engineering-system--tests">The test suites</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Suite</th><th>Size</th><th>What it needs</th><th>In CI</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path="internal/">Package tests</x-ref> in <code>internal/*</code> and <code>cmd/*</code></td><td>236 test files at the verified commit; 77 of them reach Postgres</td><td><code>XENIBASE_TEST_DATABASE_URL</code> for the database tests; they skip without it</td><td><code>ci</code>, under <code>-race</code></td></tr>
+    <tr><td><x-ref path="test/integration/"><code>test/integration</code></x-ref></td><td><x-stat name="integration-tests"/> files</td><td>The dev environment's <code>test</code> profile and every variable in <code>test.env</code></td><td><code>ci</code></td></tr>
+    <tr><td><x-ref path="test/isolation/isolation_test.go"><code>test/isolation</code></x-ref></td><td><x-stat name="isolation-tests"/> tests</td><td>As integration</td><td><code>ci</code>, in the same <code>go test</code> run</td></tr>
+    <tr><td><x-ref path="test/load/"><code>test/load</code></x-ref></td><td><x-stat name="load-test-files"/> files, plus <code>TestRatingLoad</code> in <code>internal/billing</code></td><td><code>XENIBASE_TEST_LOAD=1</code>, the <code>load</code> profile, <code>pgbench</code></td><td><code>load</code>, weekly</td></tr>
+    <tr><td><x-ref path="test/e2e/journey.spec.ts"><code>test/e2e</code></x-ref></td><td><x-stat name="e2e-tests"/> Playwright tests in one serial file</td><td>The install bundle plus <x-ref path="test/e2e/bundle/compose.e2e.yaml">an overlay</x-ref>: Pebble and a DNS stub, a fake S3, SMTP and webhook receivers, a Supabase source</td><td><code>e2e</code></td></tr>
+    <tr><td><x-ref path="test/docs/install-from-docs.sh"><code>test/docs</code></x-ref></td><td>One script, then the first e2e test</td><td>Docker; the overlay</td><td><code>docs-install</code></td></tr>
+    <tr><td><x-ref path="test/upgrade/upgrade-rehearsal.sh"><code>test/upgrade</code></x-ref></td><td>One script</td><td>The tags (<code>fetch-depth: 0</code>), Docker</td><td><code>upgrade</code></td></tr>
+    <tr><td><x-ref path="test/deploy/"><code>test/deploy</code></x-ref></td><td>Two shell suites</td><td>git and <code>sh</code>; a fake <code>docker</code> that keeps state in files</td><td><code>ci</code></td></tr>
+    <tr><td><x-ref path="test/acmedns/plugin_test.go"><code>test/acmedns</code></x-ref></td><td>One test, its own Go module</td><td>Caddy v2.10.0 and <code>caddy-dns/acmedns</code> v0.7.0, fetched</td><td><code>ci</code></td></tr>
+    <tr><td><x-ref path="internal/tlscert/tlscert_test.go" symbol="XENIBASE_TEST_PEBBLE_DIR"><code>TestACMEWithPebble</code></x-ref></td><td>One test</td><td>Pebble built from source at v2.10.1</td><td><code>ci</code> (<code>make test-acme</code>)</td></tr>
+    <tr><td><x-ref path="test/sandbox/"><code>test/sandbox</code></x-ref></td><td>Two files</td><td><code>XENIBASE_TEST_SANDBOX=1</code> and the provider's sandbox credentials</td><td>Never; by hand</td></tr>
+    <tr><td>UI (<code>web/src/**/*.test.ts*</code>)</td><td>20 files at the verified commit</td><td>Node</td><td><code>ci</code> (<code>make test-web</code>)</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="engineering-system--databases">How tests get a database</h3>
+<p>A package test that needs Postgres calls <x-ref path="internal/store/storetest/storetest.go" symbol="func New(t testing.TB) *pgxpool.Pool {"><code>storetest.New</code></x-ref>. It connects to <code>XENIBASE_TEST_DATABASE_URL</code>, creates <code>xenibase_test_</code> plus twelve random hex characters, runs every migration, and drops the database with <code>WITH (FORCE)</code> when the test ends. Without the variable the test skips. In CI the variable points at the job's <code>postgres:18</code> service as its superuser, so these tests always run there.</p>
+<p>The integration and isolation suites go further. <x-ref path="test/testenv/testenv.go" symbol="func Start(t testing.TB, opts Options) *Env {"><code>testenv.Start</code></x-ref> builds a complete <code>xenibase-server</code> in-process (API, workers, provisioning and the services, with fakes for S3, SMTP, phone providers, Hetzner and the wallet provider) on a fresh metadata database, and registers the dev environment's shared cluster and test pooler pair. The suites share one pooler pair, which is why they run with <code>-p 1</code>. Each one checks its environment first:</p>
+<x-code path="test/testenv/testenv.go" start="func need(t testing.TB, name string) string {" caption="test/testenv: a missing variable skips the test"/>
+<p>The skip is what lets <code>make test-go</code> compile and pass over <code>./test/...</code> without the dev environment, and it is also why a variable missing from <code>test.env</code> turns a suite off without failing it.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Some tests never run in CI, and skips are silent.</strong> <x-ref path="internal/nodes/nodes_test.go" symbol="func TestDumpRestoreCopy("><code>TestDumpRestoreCopy</code></x-ref> (the agent's real <code>pg_dump</code> and <code>pg_restore</code>) needs <code>XENIBASE_TEST_PG_BIN</code>, and <x-ref path="internal/docker/client_test.go" symbol="func TestAgainstDaemon("><code>docker.TestAgainstDaemon</code></x-ref> needs <code>XENIBASE_TEST_DOCKER</code>. Neither variable is set by the Makefile, <code>test.env</code> or any workflow, so both always skip. The second half of <x-ref path="test/integration/resize_test.go" symbol="the move needs at least 3"><code>TestDedicatedResize</code></x-ref> (a size the node cannot hold moves the project) skips when the test node reports fewer than three CPUs, which on a two-core runner (GitHub's standard runner for private repositories) is every run. CI runs <code>go test</code> without <code>-v</code> and does not count skips, so a green run does not say any of this happened. The integration suite covers dumps and restores through the agent, so the first two are a smaller gap than they look; the resize-by-move path has no other test. Fix: set the two variables in the <code>ci</code> job (the dev agent image has the Postgres tools), make the CPU check fail rather than skip when <code>CI</code> is set, and print a skip count from <code>go test -json</code>.</p>
+</div>
+
+<h3 id="engineering-system--integration">What the integration suite covers</h3>
+<p>The files are named for what they prove, from provisioning, backups, imports, promotion under a live writer, HA, moves (one under load, at 1 GB in CI) and branches to billing, regions, failure injection (<code>failure_test.go</code>, <code>chaos_test.go</code>), the backend services through a real edge, and the CLI. <x-ref path="test/integration/sdk_test.go" symbol="func TestSDKs("><code>TestSDKs</code></x-ref> runs each SDK's live test against a project on a real edge (below). Waiting is done by polling with a deadline (<x-ref path="test/integration/failure_test.go" symbol="func waitFor("><code>waitFor</code></x-ref>) rather than by fixed sleeps, though fixed sleeps remain in places.</p>
+<p>The isolation suite is the tenant-escape list from V1 §7.1. <code>TestLiveIsolationCheck</code> runs the same <code>internal/isocheck</code> that <code>xenibase-server</code> runs weekly per shared cluster, so CI and production share one implementation (<x-ref path="docs/decisions.md" symbol="| 5 | Isolation check |">decision M7 #5</x-ref>).</p>
+
+<h3 id="engineering-system--e2e">The browser journey and the install tests</h3>
+<p><code>make test-e2e</code> builds the server, agent, Pebble and fake-S3 images and the Postgres images, starts the bundle from <code>deploy/compose/compose.yaml</code> with <x-ref path="test/e2e/bundle/compose.e2e.yaml"><code>compose.e2e.yaml</code></x-ref> over it, and runs Playwright with Chromium mapping <code>xenibase.test</code> to the host. The first test goes from the setup wizard to a database a <code>pg</code> client reaches over TLS with a certificate issued by Pebble; it saves the session, and the rest reuse it in order (<code>mode: "serial"</code>, one worker, no retries). Every screenshot point also runs axe in both themes, and a serious or critical WCAG 2.1 AA violation fails the run (<x-ref path="test/e2e/journey.spec.ts" symbol="async function a11y("><code>a11y</code></x-ref>). On failure the job uploads Playwright traces.</p>
+<p><code>test-docs</code> clones the commit into a scratch directory, extracts the shell blocks that <code>docs/install.md</code> marks with <code>&lt;!-- docs-test --&gt;</code>, runs them as written, checks the installer printed a setup code and wrote <code>.env</code> at mode 600, then runs the first e2e test against what it installed. <code>test-upgrade</code> installs <code>UPGRADE_FROM</code> (default <code>v4.1.0</code>), commits a migration that cannot run and tags it, checks that <code>upgrade.sh</code> exits 2 with the old version, schema and a canary row intact, then upgrades to this commit under an annotated test tag and checks the reported version, the schema, the canary and the kept backup.</p>
+<div class="callout note"><span class="callout-label">Note</span>
+  <p>The rehearsal's comment calls <code>v4.1.0</code> "the previous Xenibase release", but <code>CHANGELOG.md</code> records four since. The upgrade a real install makes next is a subset of the one rehearsed, so the migrations are covered, by a longer path.</p>
+</div>
+
+<h2 id="engineering-system--lint">Lint and the race detector</h2>
+<p><x-ref path=".golangci.yml"><code>.golangci.yml</code></x-ref> is golangci-lint v2: the <code>standard</code> set (errcheck, govet, ineffassign, staticcheck, unused) plus <code>bodyclose</code>, <code>errorlint</code>, <code>gocritic</code>, <code>misspell</code>, <code>revive</code> and <code>unconvert</code>, and the <code>gofmt</code> and <code>goimports</code> formatters with the module as the local import group. Generated files are excluded strictly, as are the <code>comments</code> and <code>std-error-handling</code> presets. There are 27 <code>//nolint</code> directives, each with a reason. Lint covers the main module only: <code>sdk/go</code> gets <code>go vet</code> in <code>test-sdk</code>, and <code>test/acmedns</code> gets nothing. The UI has no ESLint; <code>tsc -b</code> is its only static check.</p>
+<p>The package tests, the integration and isolation suites and the Go SDK run under <code>-race</code>. <code>test-acme</code>, <code>test-acmedns</code>, the load test and the full move do not.</p>
+
+<h2 id="engineering-system--generated">Generated code</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Generator</th><th>From</th><th>To</th><th>Version pinned by</th></tr></thead>
+  <tbody>
+    <tr><td>oapi-codegen (server)</td><td><code>api/openapi.yaml</code></td><td><x-ref path="internal/api/gen/generate.go"><code>internal/api/gen</code></x-ref></td><td>The <code>tool</code> directive in <code>go.mod</code></td></tr>
+    <tr><td>oapi-codegen (client, used by the CLI and tests)</td><td><code>api/openapi.yaml</code></td><td><x-ref path="internal/api/client/generate.go"><code>internal/api/client</code></x-ref></td><td>The same</td></tr>
+    <tr><td>sqlc</td><td><code>internal/store/queries</code>, the migrations</td><td><x-ref path="internal/store/generate.go"><code>internal/store</code></x-ref></td><td><code>go run …/sqlc@v1.30.0</code></td></tr>
+    <tr><td>openapi-typescript</td><td><code>api/openapi.yaml</code></td><td><code>web/src/api/schema.d.ts</code></td><td><code>web/package-lock.json</code></td></tr>
+  </tbody>
+</table></div>
+<p>Generated files are committed. CI regenerates them and fails on any difference in those paths:</p>
+<x-code path="Makefile" start="check-generated: generate" lines="3"/>
+<p><code>git diff</code> sees only tracked files, so a newly generated file that was never committed would not show. The build catches that case whenever anything uses the new code, which leaves only unused output unchecked. The SDKs are written by hand; the row types an app uses with them come from the user's own schema through <code>xenibase gen types</code> (<code>internal/typegen</code>), not from this repository.</p>
+
+<h2 id="engineering-system--release">Versions and the release</h2>
+<p>Every binary carries its version, commit and build date in <x-ref path="internal/version/version.go"><code>internal/version</code></x-ref>, set at link time by <x-ref path="Makefile" symbol="LDFLAGS := -s -w"><code>LDFLAGS</code></x-ref>. The Makefile takes the version from <code>git describe --tags --always --dirty</code> and the commit from <code>git rev-parse --short HEAD</code>; the release workflow passes the tag as <code>VERSION</code>. The Dockerfile takes <code>VERSION</code> and <code>COMMIT</code> as build arguments, which <code>install.sh</code> fills from the checkout, so a bundle install reports its tag too (the upgrade rehearsal checks it).</p>
+<p>A tag starts <code>release.yml</code>. It runs <x-ref path="Makefile" symbol="release: build-ui"><code>make release</code></x-ref>: the UI, then <code>xenibase-server</code>, <code>-agent</code> and <code>-status</code> for linux amd64 and arm64, the CLI for linux, darwin and windows on both architectures, a source tarball from <code>git archive HEAD</code>, and <code>SHA256SUMS</code>. It checks that the amd64 server embeds the real UI and that the server and CLI report the tag, extracts the tag's section from <code>CHANGELOG.md</code> (failing if it is empty), and publishes with <code>gh release create --verify-tag</code>. <code>xenibase-edge</code> is not among the binaries: the edge and every other image are built from source on the host by <code>install.sh</code> and <code>enable-services.sh</code>, and no image is pushed to a registry.</p>
+<x-code path=".github/workflows/release.yml" start="on:" end="contents: write" caption="release.yml: a tag is enough"/>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A release is published whether or not CI passed on its commit.</strong> <code>release.yml</code> and <code>ci.yml</code> both start on the same tag push and do not wait for each other; the release job runs no tests, only <code>-require-ui</code> and two version checks. A tag on a commit whose <code>ci</code>, <code>e2e</code> or <code>upgrade</code> job then fails still produces a public GitHub release with binaries and checksums, typically before those jobs finish. <code>deploy.yml</code> refuses such a tag for Xenibase's own server, but anyone installing from the release page, and every CLI user, gets the untested build. The binaries are built from the tagged commit (the checkout is the tag, <code>--verify-tag</code> holds), so the gap is untested code, not foreign code. Fix: run the release as a job in <code>ci.yml</code> with <code>needs: [ci, e2e, docs-install, audit, upgrade]</code> and <code>if: startsWith(github.ref, 'refs/tags/v')</code>, or publish as a draft and promote it after the check-run test <code>deploy.yml</code> already uses.</p>
+</div>
+
+<h2 id="engineering-system--docsite">The documentation site</h2>
+<p><x-ref path="internal/docsite/docsite.go" symbol="func Build("><code>docsite.Build</code></x-ref> renders every Markdown file under <code>docs/</code> (including this atlas's README) with goldmark and GitHub-flavoured Markdown, wraps each in one template with the navigation from <x-ref path="docs/site.json"><code>docs/site.json</code></x-ref>, and writes a <code>search.json</code> index (title, section, headings to level 3, and the first 4,000 characters of text). <x-ref path="internal/docsite/docsite.go" symbol="func fixLink("><code>fixLink</code></x-ref> rewrites links: <code>.md</code> becomes <code>.html</code>, a directory becomes its <code>README</code> page, and anything that leaves <code>docs/</code>, or is a file under it that is not a page, becomes a link to the repository at <code>blob/main</code>. Every internal link must reach a page and its anchor a heading; <code>cmd/docsite</code> lists every broken one and exits 1, and <x-ref path="internal/docsite/docsite_test.go" symbol="func TestDocs("><code>TestDocs</code></x-ref> builds the real docs in <code>make test-go</code> as well.</p>
+<p>Search is a small script with no dependencies. It loads <code>search.json</code> on the first keystroke, ranks title over heading over body matches (every word must match), and builds results with <code>textContent</code>, so a title cannot inject markup. The renderer passes raw HTML in Markdown through (<code>html.WithUnsafe()</code>); the input is the repository's own docs, so that is a choice, not an exposure. The site is uploaded as a CI artefact and published nowhere by the workflows.</p>
+<div class="callout note"><span class="callout-label">What the link check does not see</span>
+  <p>Links rewritten to the repository are not checked: a guide that links <code>../deploy/compose/upgrade.sh</code> keeps building after the file moves. At the verified commit all 75 such links resolve (checked by hand for this page). Links written in raw HTML are not checked either.</p>
+</div>
+
+<h2 id="engineering-system--sdks">The SDKs</h2>
+<p>Three SDKs in <x-ref path="sdk/"><code>sdk/</code></x-ref> share one shape (<x-ref path="docs/decisions.md" symbol="| 7 | SDKs |">decision V4-M36 #7</x-ref>): a client from the project URL and a key, with <code>data</code>, <code>auth</code>, <code>storage</code> and <code>realtime</code>; a refresh a minute before expiry, one at a time; reads by URL when the URL form can express them and by the JSON query form otherwise; <code>live()</code> queries that refetch on changes, on <code>resync</code> and after a reconnect; and realtime over the Phoenix protocol the edge serves.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>SDK</th><th>Package and version</th><th>Dependencies</th><th>Unit tests (<code>make test-sdk</code>)</th></tr></thead>
+  <tbody>
+    <tr><td>JavaScript</td><td><code>@xenibase/client</code> <code>0.1.1</code>, ESM and CommonJS from one source</td><td>None at run time; TypeScript and Vitest pinned exactly</td><td><code>npm ci</code>, <code>tsc --noEmit</code>, <x-stat name="js-sdk-unit-tests"/> Vitest cases</td></tr>
+    <tr><td>Go</td><td><code>github.com/israel-duff/xenibase/sdk/go</code>, <code>Version = "0.1.0"</code>, its own module</td><td><code>coder/websocket</code></td><td><code>go vet</code>, <code>go test -race</code></td></tr>
+    <tr><td>Dart</td><td><code>xenibase</code> <code>0.1.0</code></td><td><code>http</code>, <code>web_socket_channel</code>, <code>crypto</code>; no lockfile committed (usual for a Dart library)</td><td><code>dart analyze</code>, <code>test/unit_test.dart</code>. Skipped with a message when <code>dart</code> is not on the path; CI installs it.</td></tr>
+  </tbody>
+</table></div>
+<x-code path="Makefile" start="test-sdk:" lines="5"/>
+<p>The live tests need a project. <code>TestSDKs</code> enables backend services on one, starts an edge behind a proxy that supplies the project's host name, and runs all three (sign-in and refresh, reads and writes under row-level security, a realtime change, files, errors, sign-out). Each skips, or exits 0, without <code>XENIBASE_SDK_URL</code>, which is how <code>make test-sdk</code> runs them harmlessly.</p>
+<p>A secret key (<code>xb_sec_…</code>) makes the JS client sessionless: no storage, no refresh, no reading of the URL (<x-ref path="sdk/js/src/index.ts" symbol="const secret = key.startsWith("><code>XenibaseClient</code></x-ref>). The SDK does not stop a secret key being used in a browser; the edge does, refusing a secret key on any request with an <code>Origin</code> header unless the project allows it (<x-ref path="internal/edge/gateway.go" symbol="secret_key_in_browser"><code>secret_key_in_browser</code></x-ref>). By then the key has been shipped in the app, so the guides tell developers to use the publishable key in apps.</p>
+<p>Versions are set by hand in each package. A JS test keeps <x-ref path="sdk/js/src/version.ts"><code>VERSION</code></x-ref> equal to <code>package.json</code> (<x-ref path="sdk/js/test/unit.test.ts" symbol="sends its own version as X-Client-Info">the test</x-ref>); the Go and Dart constants have no such test. Nothing in CI publishes to npm or pub.dev, and the repository has no <code>sdk/go/v*</code> tags, so <code>go get</code> of the Go SDK resolves to a pseudo-version of the default branch.</p>
+
+<h2 id="engineering-system--cli">The CLI</h2>
+<p><code>xenibase</code> is <x-ref path="cmd/cli/main.go"><code>cmd/cli</code></x-ref> calling <x-ref path="internal/cli/cli.go" symbol="func (a *App) Run("><code>cli.App.Run</code></x-ref>. It has <x-stat name="cli-commands"/> commands that call the API, plus <code>version</code>, as a tree of names (<code>xenibase backup restore</code>, <code>xenibase auth users ban</code>), each over the generated client. Every command takes <code>--json</code>; destructive ones need <code>--confirm &lt;name&gt;</code>; exit codes are 0, 1, 2 for usage, 3 for a failed operation and 4 for 401 or 403. Global flags (<code>--json</code>, <code>--context</code>, <code>--server</code>, <code>--no-wait</code>) are taken from anywhere on the line.</p>
+<p><strong>Login.</strong> <x-ref path="internal/cli/auth.go" symbol="func (a *App) login("><code>login</code></x-ref> runs the device flow (print a code, open the browser, poll at the server's interval), and the user approves in the web app, choosing the organisation and scopes; <code>--token -</code> reads a token from standard input instead. It then stores a context named after the host and the organisation's slug. <code>logout</code> revokes the token on the server unless <code>--keep-token</code>.</p>
+<p><strong>Contexts and the config file.</strong> <code>$XENIBASE_CONFIG_DIR</code>, <code>$XDG_CONFIG_HOME/xenibase</code> or <code>~/.config/xenibase</code> holds <code>config.toml</code> (contexts with server, organisation id, token or <code>token_cmd</code>, token id and CA file) and <code>credentials.toml</code> (personal database URLs, cached because the server shows a password once). Both are written at mode 600 in a directory created at 700; <x-ref path="internal/cli/config.go" symbol="func (a *App) saveConfig("><code>saveConfig</code></x-ref> writes a temporary file and renames it, and a unit test checks the mode. <code>token_cmd</code> runs through <code>sh -c</code>, so a token can live in a password manager. <code>XENIBASE_CA_FILE</code> or <code>--ca-file</code> adds a CA to the system roots for a server with a private certificate.</p>
+<p><strong>Which server and token.</strong> <x-ref path="internal/cli/config.go" symbol="func (a *App) resolve() (target, error) {"><code>resolve</code></x-ref> starts from <code>--context</code>, <code>XENIBASE_CONTEXT</code> or the current context, then lets the environment and flags override parts of it:</p>
+<x-code path="internal/cli/config.go" start="if v := a.getenv(&quot;XENIBASE_SERVER&quot;); v != &quot;&quot; {" lines="9" caption="internal/cli/config.go: the server is replaced, the stored token is kept"/>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong><code>--server</code> or <code>XENIBASE_SERVER</code> sends the current context's token to another host.</strong> When a context is selected, <code>resolve</code> takes its server and token, then replaces only the server from <code>XENIBASE_SERVER</code> or <code>--server</code>; the token is replaced only when <code>XENIBASE_TOKEN</code> is set. So <code>xenibase whoami --server https://staging.example</code>, or a CI job that sets <code>XENIBASE_SERVER</code> on a machine with a logged-in context, sends <code>Authorization: Bearer</code> with the production token to the other host. Reproduced for this page with a scratch test in <code>internal/cli</code>: a context for <code>https://prod.example</code> and <code>whoami --server &lt;test server&gt;</code> delivered <code>Bearer xb_prod_secret</code> to the test server. A typo or a hostile URL pasted from a guide is enough. Separately, <code>login</code> accepts <code>http://</code> for any host, so a token from the device flow can travel and be stored for a plain-HTTP server. Fix: when the server is overridden and differs from the context's, drop the context's token (require <code>XENIBASE_TOKEN</code> or a context for that server), and accept <code>http://</code> only for loopback addresses.</p>
+</div>
+<p>Integration tests build the real binary and run it against a real control plane: a CI-style job with a project-restricted write token that runs SQL on its project, gets not-found for another organisation's project and exit 4 deleting its own (M10's done-when); a device login approved as the user, whose saved context is then used; and <code>policies lint</code> exiting 1 while a table has no row-level security (<x-ref path="test/integration/cli_test.go" symbol="func TestCLIJobWithRestrictedWriteToken("><code>cli_test.go</code></x-ref>). The <code>e2e</code> journey approves a CLI device login in the browser.</p>
+
+<h2 id="engineering-system--brand">The brand in code</h2>
+<p><x-ref path="internal/brand/brand.go"><code>internal/brand</code></x-ref> holds the name, tagline, colours and logo paths for what the server renders itself: email (<x-ref path="internal/mail/layout.go" symbol="brand.Teal"><code>mail/layout.go</code></x-ref>) and documents. Email cannot use CSS variables, so the colours are literal <code>#rrggbb</code> strings. The web app's tokens live in <code>web/src/styles.css</code>, and <x-ref path="internal/brand/brand_test.go" symbol="func TestThemeMatchesTheEmailPalette("><code>TestThemeMatchesTheEmailPalette</code></x-ref> fails when <code>--accent</code>, <code>--accent-strong</code> or <code>--accent-text</code> stop matching <code>Teal</code>, <code>TealDeep</code> and <code>TealLight</code>, or when <code>brand/mark.svg</code> stops using <code>Glow</code>. The other four colours (mint, ink, muted, line) are not compared. <code>brand/render.mjs</code> renders the SVGs to the PNGs in <code>web/public</code> with Playwright's Chromium; it is run by hand and the PNGs are committed. The docs site has its own palette in <code>siteCSS</code> and is not checked against the brand.</p>
+
+<h2 id="engineering-system--deps">Dependencies</h2>
+<p>One Go module for everything except <code>sdk/go</code> and <code>test/acmedns</code>, at Go <x-stat name="go-version"/>, with <code>go.sum</code> committed and oapi-codegen pinned as a module tool. Three npm trees have committed lockfiles and are installed with <code>npm ci</code>: <code>web</code>, <code>test/e2e</code> and <code>sdk/js</code>. The <code>audit</code> job runs on every push (<x-ref path="docs/decisions.md" symbol="| 14 | Dependency audit |">decision M7 #14</x-ref>), so a new advisory against any of them fails every branch until it is dealt with, related to the change or not. There is no Renovate or Dependabot configuration: updates are made by hand.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>The audit stops at Go modules and npm packages; the software that faces the internet is in images nobody scans.</strong> Production runs Caddy from <code>caddy:2</code> (a floating tag), PgBouncer from <code>edoburu/pgbouncer:v1.25.1-p0</code>, Postgres on the official images, WAL-G built from a pinned commit with its own Go dependencies, and the Debian or Alpine layers under them. None is checked by <code>govulncheck</code> or <code>npm audit</code>, and nothing proposes updates, so a PgBouncer or WAL-G advisory reaches Xenibase only if someone reads it. The floating tags also mean two installs of the same release can run different Caddy and base layers. Fix: add an image scan (for example Trivy) of the images <code>make e2e-images</code> already builds to the weekly run, and a Dependabot or Renovate config for Go, npm, Docker base images and GitHub Actions.</p>
+</div>
+
+<h2 id="engineering-system--atlas">The atlas job</h2>
+<p>This atlas is checked by the <code>atlas</code> job: every <code>x-ref</code>, <code>x-code</code>, <code>x-stat</code> and <code>x-page</code> on every page must resolve at the pushed commit, and a pull request that changes the atlas's sources must also change <code>site/index.html</code>. How pages are written, checked and marked stale is on <x-page id="about"/>.</p>
+
+<h2 id="engineering-system--catches">What catches what</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>A change that…</th><th>Is caught by</th><th>Not caught when</th></tr></thead>
+  <tbody>
+    <tr><td>Breaks a unit or database test, or races</td><td><code>ci</code>: <code>make test-go</code> under <code>-race</code> with Postgres 18</td><td>The test needs a variable CI does not set (<code>XENIBASE_TEST_PG_BIN</code>, <code>XENIBASE_TEST_DOCKER</code>)</td></tr>
+    <tr><td>Breaks provisioning, isolation, HA, backups, services</td><td><code>ci</code>: the integration and isolation suites</td><td>A host condition makes a test skip (CPUs, a missing tool)</td></tr>
+    <tr><td>Breaks the UI or the install as a user meets it</td><td><code>e2e</code>, <code>docs-install</code>; axe in both themes</td><td>The journey does not visit that screen</td></tr>
+    <tr><td>Breaks an upgrade or its rollback</td><td><code>upgrade</code>; <code>test-deploy</code> with a fake Docker on every push</td><td>The branch is not <code>feat/deploy…</code>: the real rehearsal waits for the weekly run or the tag</td></tr>
+    <tr><td>Changes the API without regenerating</td><td><code>check-generated</code>; <code>TestEveryRouteDeclaresAnAction</code> for a route with no rule</td><td>The new generated file is untracked and unused</td></tr>
+    <tr><td>Breaks a docs link or anchor</td><td><code>docs-site</code> and <code>TestDocs</code></td><td>The link points outside <code>docs/</code> or is raw HTML</td></tr>
+    <tr><td>Breaks an SDK against the edge</td><td><code>TestSDKs</code> (all three, live)</td><td>A subtest skips because <code>node</code> or <code>dart</code> is missing, which does not happen in CI</td></tr>
+    <tr><td>Pulls in a known-vulnerable dependency</td><td><code>audit</code></td><td>It is in a container image, a Dart package, or rated below high on npm</td></tr>
+    <tr><td>Ships a release with failing tests</td><td>Nothing before publishing; <code>deploy.yml</code> before Xenibase's own server</td><td>Always, for anyone installing from the release page</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="engineering-system--drift">Where the specs and the code disagree</h2>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <ul>
+    <li>V1 §13 and §11.5 run the integration suites with testcontainers-go. They run against the dev compose environment (<code>deploy/dev/compose.yaml</code>, <code>--profile test</code>) started by the Makefile, with the variables in <code>deploy/dev/test.env</code>.</li>
+    <li>V1 §11.5 describes a single workflow: lint, tests, "frontend lint", the generated-code check, builds, integration, Playwright on tagged builds, and release artefacts on tags. There are four workflows; the release is a separate one that does not wait for CI; Playwright runs on every push, not only on tags; and the UI has no linter beyond <code>tsc</code>.</li>
+    <li>V1 §11.5's <code>make release</code> "builds the Postgres image, produces the Compose bundle". It builds neither: the bundle is a source tarball, and every image is built on the host at install time.</li>
+    <li>V1 §11.5's layout lists <code>test/fixtures</code>. There is none; the Supabase-shaped fixture is <code>test/e2e/supabase-fixture.sql</code> and the integration sources are containers in the dev environment.</li>
+    <li>V2 §7.1's config stores the organisation's slug as <code>org</code>; the code stores its id.</li>
+    <li>V4 §8.1's Go SDK is a separate <code>xenibase-go</code> repository; it is <code>sdk/go</code> in this one.</li>
+  </ul>
+</div>

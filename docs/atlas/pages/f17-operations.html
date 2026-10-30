@@ -4,18 +4,11 @@
   "title": "Operations",
   "part": "F",
   "order": 1,
-  "status": "planned",
   "summary": "Running Xenibase: deployment bundles, alerts, metrics, logs, the status page and incidents, and support.",
-  "scope": [
-    "The compose bundle, install and upgrade scripts, and the pooler host and edge images",
-    "Alerts and their delivery",
-    "Metrics collection, downsampling and the Prometheus endpoint",
-    "Logging",
-    "xenibase-status, heartbeats and incidents",
-    "Support tickets by dashboard, email and WhatsApp"
-  ],
+  "verified": "ef67bfb3669a49d00fdf63921f3ee5f3275cec29",
   "sources": [
     "deploy/",
+    "Dockerfile",
     "internal/alerts/",
     "internal/metrics/",
     "internal/logging/",
@@ -25,8 +18,242 @@
     "internal/support/",
     "internal/version/",
     "cmd/status/",
-    "docs/operations.md",
-    "docs/admin-runbook.md"
+    "cmd/server/main.go",
+    "internal/api/server.go", "internal/api/insight.go", "internal/api/support.go", "internal/api/orgstatus.go",
+    "internal/config/insight.go", "internal/config/status.go",
+    "internal/store/queries/alerts.sql", "internal/store/queries/metrics.sql", "internal/store/queries/support.sql",
+    "internal/store/queries/incidents.sql", "internal/store/queries/status.sql",
+    ".github/workflows/deploy.yml",
+    "test/deploy/",
+    "docs/operations.md", "docs/admin-runbook.md", "docs/install.md", "docs/upgrade.md", "docs/deploying.md",
+    "docs/support.md", "docs/status-page.md", "docs/decisions.md",
+    "Xenibase — V1 Specification & Build Plan.md",
+    "Xenibase — V3 Specification & Build Plan.md"
   ]
 }
 -->
+<p>This page is how Xenibase is installed, upgraded and watched once it runs: the Docker Compose bundle and its scripts, the images for the other machines, what an operator must keep off the server, the alerts and how they reach someone, the metrics, the logs, the separately hosted status page with its incidents, and the support desk. The services these watch are on their own pages and are linked, not repeated.</p>
+<x-packages names="alerts,metrics,logging,statuspage,statusapi,incidents,support,version"/>
+
+<h2 id="operations--bundle">The compose bundle</h2>
+<p>A single-host install is <x-ref path="deploy/compose/compose.yaml"><code>deploy/compose/compose.yaml</code></x-ref> (V1 §11.1), project name <code>xenibase</code>. Everything is on one bridge network, <code>172.31.250.0/24</code>, named after <code>XENIBASE_NETWORK</code> (default <code>xenibase</code>) so the agent can attach dedicated instances to it. The services that other configuration names by address have fixed ones below <code>.20</code>; Docker hands out the rest from <code>.128/25</code>.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Service</th><th>Image</th><th>Address and ports</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>caddy</code></td><td><code>caddy:2</code>, or a build with a DNS plugin</td><td><code>.10</code>; 80 and 443 published</td><td>TLS for the web UI and, with backend services on, the wildcard API domain. Forwards other hosts' ACME challenges to the server.</td></tr>
+    <tr><td><code>xenibase-server</code></td><td><code>xenibase:local</code></td><td><code>.11</code>; 8080 inside, the waker on 6435</td><td>The control plane. Trusts <code>X-Forwarded-For</code> from Caddy's address only (<x-ref path="deploy/compose/compose.yaml" symbol="XENIBASE_TRUSTED_PROXIES: 172.31.250.10"><code>XENIBASE_TRUSTED_PROXIES</code></x-ref>). Health check: <code>xenibase-server -healthcheck</code>, a GET of <code>/healthz</code>.</td></tr>
+    <tr><td><code>pooler-session</code>, <code>pooler-tx</code></td><td><code>edoburu/pgbouncer:v1.25.1-p0</code></td><td><code>.12</code>, <code>.13</code>; 5432 and 6543 published</td><td>The two PgBouncers (<x-page id="connections"/>). They read <code>deploy/pgbouncer/*.ini</code> and the files the server writes into the shared <code>pooler-config</code> volume.</td></tr>
+    <tr><td><code>xenibase-agent</code></td><td><code>xenibase-agent:local</code></td><td><code>.14</code></td><td>The local node's agent, as root with the Docker socket, because dedicated instances are its sibling containers (<x-page id="nodes-agents"/>). Registers itself with <code>AGENT_BOOTSTRAP_TOKEN</code>.</td></tr>
+    <tr><td><code>metadata-db</code></td><td><code>postgres:18</code></td><td>not published</td><td>The metadata database, SCRAM for TCP logins.</td></tr>
+    <tr><td><code>shared-pg</code></td><td><code>postgres:18</code></td><td>not published</td><td>The shared cluster, with V1 §11.2's tuning for an 8 GB host, <code>wal_level=logical</code> for moves, and <x-ref path="deploy/compose/shared-pg-hba.conf"><code>shared-pg-hba.conf</code></x-ref>: SCRAM from <code>.11</code> to <code>.14</code> only, and each move's own login from the subnet.</td></tr>
+    <tr><td><code>xenibase-edge</code></td><td><code>xenibase-edge:local</code></td><td>dynamic; 8443 inside</td><td>Backend services' gateway, in the <code>services</code> profile, off until <code>enable-services.sh</code> (<x-page id="data-api"/>).</td></tr>
+  </tbody>
+</table></div>
+<p>Seven named volumes hold the state, among them <code>pooler-config</code> (written by the server, read-only in the poolers) and <code>agent-state</code> (the agent's identity and pinned CA). The server runs as uid 70, PgBouncer's user, so the poolers can read the <code>0640</code> files it writes. Secrets are environment variables from <code>deploy/compose/.env</code>; a required one is written <code>${NAME:?message}</code>, so Compose refuses to start without it. Everything optional is passed through empty, which the server reads as off. <x-ref path="deploy/compose/Caddyfile"><code>Caddyfile</code></x-ref> serves the UI, imports <code>caddy.d/*.caddy</code> (empty until backend services are on), and on port 80 sends other hosts' <code>/.well-known/acme-challenge/*</code> to the server, which gets the database hostname's certificate itself (<x-page id="connections--tls"/>).</p>
+
+<h2 id="operations--install">install.sh</h2>
+<p><x-ref path="deploy/compose/install.sh"><code>install.sh</code></x-ref> installs and also upgrades in place. It runs from a git checkout, because the version it stamps comes from <code>git describe</code>. In order:</p>
+<ol>
+  <li>Checks for Docker and Compose v2.</li>
+  <li>If there is no <code>.env</code>: asks for the UI hostname and ACME email (or reads them from the environment), checks both by pattern, looks up the public IP from ipify, and under <x-ref path="deploy/compose/install.sh" symbol="umask 077"><code>umask 077</code></x-ref> writes <code>.env</code> with a fresh 32-byte master key and three 24-byte passwords. An existing <code>.env</code> is kept as it is.</li>
+  <li>Appends what later releases added to old files: <code>AGENT_BOOTSTRAP_TOKEN</code> and <code>XENIBASE_PUBLIC_URL</code>.</li>
+  <li>Builds the Postgres image for majors 17 and 18 (<x-ref path="deploy/images/postgres/build.sh"><code>build.sh</code></x-ref>), then the server and the agent from the repository's <x-ref path="Dockerfile"><code>Dockerfile</code></x-ref> with <code>VERSION</code> and <code>COMMIT</code> build arguments, and the edge too when <code>COMPOSE_PROFILES</code> includes <code>services</code>.</li>
+  <li><code>docker compose up -d --no-build --wait</code>, then recreates both poolers. A checkout replaces the bind-mounted <code>.ini</code> files with new inodes, and a running PgBouncer would keep reading the old one.</li>
+  <li>Prints the URL and the first-run setup code, grepped from the server's log.</li>
+</ol>
+<p>The Dockerfile builds the web app with Node 22 and both binaries with Go 1.26 without cgo, checks that the server embeds the real UI (<code>-require-ui</code>), and ships the server on distroless and the agent on <code>postgres:18</code> with CA roots for S3.</p>
+
+<h2 id="operations--upgrade">upgrade.sh, and deploying from GitHub</h2>
+<p><x-ref path="deploy/compose/upgrade.sh"><code>upgrade.sh &lt;tag&gt;</code></x-ref> wraps <code>install.sh</code> with checks, a backup and a rollback. It first copies itself to a temporary file and re-executes from there, because <code>git checkout</code> replaces the script while the shell is still reading it. Exit status 0 is upgraded, 1 refused before any change, 2 failed and rolled back (or stopped with <code>--no-rollback</code>), 3 failed and the rollback failed too.</p>
+<ol>
+  <li><strong>Checks.</strong> A release tag that exists after <code>git fetch --tags</code>; unless <code>--force</code>, a clean tree and every service healthy; 10 GB free; and the tag's newest migration file not below the database's <code>goose_db_version</code>, so a downgrade is refused.</li>
+  <li><strong>Backup.</strong> <code>pg_dump -Fc</code> of the metadata database into <code>upgrade-backups/</code>, checked to be non-empty and to list <code>goose_db_version</code>, with a <code>.meta</code> file naming the release and schema it came from.</li>
+  <li><strong>Upgrade.</strong> <code>git checkout</code> the tag and run <code>install.sh</code>. The old containers serve while the images build.</li>
+  <li><strong>Gates.</strong> For up to <code>UPGRADE_WAIT</code> seconds (300), <x-ref path="deploy/compose/upgrade.sh" symbol="gates() {"><code>gates</code></x-ref> waits for every service to be running and healthy, <code>xenibase-server -version</code> to report the tag, and the schema to be at the tag's last migration. Operations that failed since the start are reported, not counted as a failure.</li>
+  <li><strong>Rollback</strong>, on any failure in steps 3 and 4:</li>
+</ol>
+<x-code path="deploy/compose/upgrade.sh" start="rollback_now() {" end="return 0" lang="sh" caption="stop the server and agent; restore the dump only if a migration ran; check out and install the previous release; run the gates again"/>
+<p>Each migration runs in its own transaction, so one that fails leaves the schema at the last that succeeded, and the rollback sees the version moved and restores. Since 4.1 a server also refuses a schema newer than it knows (<x-ref path="internal/store/migrate.go" symbol="func refuseNewerSchema("><code>refuseNewerSchema</code></x-ref>). There are no previous-release images to switch back to: each build retags <code>xenibase:local</code>, so the rollback rebuilds the old checkout, normally from Docker's cache. Only the Postgres image keeps its predecessor, tagged by minor release (<x-ref path="deploy/images/postgres/build.sh" symbol="docker tag"><code>build.sh</code></x-ref>, <x-page id="postgres-versions--minor"/>).</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A rollback throws away more than the upgrade.</strong> The dump is taken before the image build; the old server keeps writing through the build (often minutes) and the new one through up to five minutes of gates. A rollback after a migration restores the dump, so that whole window goes, and the metadata is not the only state: a project created in it keeps its database and roles on the cluster with no row, a project deleted in it comes back as a row without a database, a password changed in it no longer matches the restored verifier, and a payment webhook processed in it is lost for good. <x-ref path="docs/deploying.md" symbol="**Undo a rollback you didn't want.**"><code>docs/deploying.md</code></x-ref>'s "project data is unaffected" undersells it. Dumping after the build, with the old server stopped, would shrink the window to the migration.</p>
+</div>
+<p><strong>From GitHub.</strong> The <x-ref path=".github/workflows/deploy.yml">Deploy workflow</x-ref> refuses a tag whose <code>ci</code>, <code>e2e</code>, <code>docs-install</code> and <code>audit</code> checks did not pass, waits for a reviewer of the <code>production</code> environment, and runs one deploy at a time (<code>concurrency: deploy-production</code>). Its key is restricted to the forced command <x-ref path="deploy/compose/deploy-ssh.sh"><code>deploy-ssh.sh</code></x-ref>, which accepts only <code>upgrade &lt;tag&gt; [--dry-run]</code>, <code>status</code> and <code>last</code>, and runs an upgrade under <x-ref path="deploy/compose/deploy-ssh.sh" symbol="nohup sh -c"><code>nohup</code></x-ref> so a dropped connection cannot kill it half-way. <code>make test-deploy</code> runs both scripts against a fake <code>docker</code> through twelve scenarios, failed migration and failed rollback among them (<x-ref path="test/deploy/upgrade_test.sh"><code>upgrade_test.sh</code></x-ref>).</p>
+
+<h2 id="operations--images">The other scripts and images</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>What</th><th>Where it runs</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path="deploy/compose/enable-services.sh"><code>enable-services.sh &lt;api-domain&gt; [provider]</code></x-ref></td><td>The bundle's host</td><td>Turns backend services on: needs the DNS provider's credentials already in <code>.env</code> (it never writes them), adds <code>XENIBASE_EDGE_SECRET</code> (40 random bytes) and <code>COMPOSE_PROFILES=services</code>, builds Caddy with the Cloudflare, deSEC or acme-dns plugin, writes <code>caddy.d/api.caddy</code> for <code>*.&lt;api-domain&gt;</code> with a DNS-01 challenge, starts the edge and reloads Caddy.</td></tr>
+    <tr><td><x-ref path="deploy/compose/preflight.sh"><code>preflight.sh</code></x-ref></td><td>A server before install</td><td>Changes nothing; PASS, WARN or FAIL for the OS, clock, DNS, ports, bucket and SMTP.</td></tr>
+    <tr><td><x-ref path="deploy/pooler-host/Dockerfile">Pooler host</x-ref></td><td>A region's two edge pooler hosts</td><td>The agent in pooler mode and both PgBouncers in one container, uid 70, host networking. <x-ref path="deploy/pooler-host/entrypoint.sh" symbol="xenibase-agent pooler-seed"><code>entrypoint.sh</code></x-ref> seeds placeholder routes, renders <code>keepalived.conf</code> and the <code>.ini</code> files, and exits when any process exits, so the peer takes the floating IP. keepalived is a second container, the only one with <code>NET_ADMIN</code> (<x-page id="connections--pooler-hosts"/>).</td></tr>
+    <tr><td><x-ref path="deploy/edge/Dockerfile">Edge</x-ref>, <x-ref path="deploy/status/Dockerfile">status</x-ref></td><td>A region's nodes; another provider</td><td>Distroless, uid 65532. The status page's <x-ref path="deploy/status/compose.yaml">compose file</x-ref> puts Caddy in front and mounts <code>status.toml</code> and <code>secrets/</code> read-only.</td></tr>
+    <tr><td><x-ref path="deploy/images/postgres/Dockerfile">Postgres</x-ref></td><td>Every node with instances</td><td>The official image at a pinned minor (17.11, 18.6), WAL-G v3.0.9 from a pinned commit, Patroni 4.1.5, hypopg and CA roots. An init script writes <code>pg_hba.conf</code>: SCRAM from <code>XENIBASE_HBA_ALLOW</code> only.</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="operations--keep">What the operator must keep off the server</h2>
+<p>Three things, and the server cannot recover any of them:</p>
+<ul>
+  <li><strong><code>.env</code></strong>, for <code>XENIBASE_MASTER_KEY</code>. It seals every stored credential and the derive seed (<x-page id="security--master-key"/>). The generated file says so in its first line.</li>
+  <li><strong>The backup key</strong> (Settings → Backup key). It decrypts every backup on platform targets, the metadata self-backups included, and never changes.</li>
+  <li><strong>The bucket credentials</strong> of the default storage target, where <code>metadata/</code> lives.</li>
+</ul>
+<p>With those, <x-ref path="docs/disaster-recovery.md"><code>docs/disaster-recovery.md</code></x-ref> rebuilds a lost control node from the newest nightly metadata backup (<x-page id="backups--metadata"/>). The <code>upgrade-backups/</code> dumps are a second, local copy taken before each upgrade. They are never pruned.</p>
+
+<h2 id="operations--alerts">Alerts</h2>
+<p>Every <code>XENIBASE_ALERTS_INTERVAL</code> (30 s, 1 s to 1 h), each server runs <x-ref path="internal/alerts/service.go" symbol="func (s *Service) Tick("><code>Tick</code></x-ref>: evaluate every condition, then deliver what is pending. The list is V1 §8.8's plus what later milestones added.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Kind</th><th>Severity</th><th>Fires when</th></tr></thead>
+  <tbody>
+    <tr><td><code>backup_failed</code></td><td>critical</td><td>The latest finished <code>backup</code> or <code>base_backup</code> of a live project, or the latest <code>metadata_backup</code>, failed</td></tr>
+    <tr><td><code>backup_overdue</code></td><td>warning</td><td>A project the scheduler backs up, older than 26 h, has no successful backup in 26 h (<x-page id="backups--alerts"/>)</td></tr>
+    <tr><td><code>restore_test_failed</code></td><td>critical</td><td>The latest restore test failed, per project for one run on demand, else the scheduled one</td></tr>
+    <tr><td><code>wal_archive</code></td><td>critical</td><td>A dedicated project's archiver failed in the last 15 min, or a segment has waited over 15 min</td></tr>
+    <tr><td><code>isolation_check_failed</code></td><td>critical</td><td>A live shared cluster's latest isolation check failed (<x-page id="security--checklist"/>)</td></tr>
+    <tr><td><code>minor_upgrade_failed</code></td><td>critical</td><td>A live instance's latest minor upgrade failed</td></tr>
+    <tr><td><code>project_stuck</code></td><td>critical</td><td>A project frozen by a failed move, promotion, demotion or major upgrade 10 min on</td></tr>
+    <tr><td><code>node_unreachable</code></td><td>critical</td><td>An agent has not answered for 2 min (<code>last_reachable_at</code>)</td></tr>
+    <tr><td><code>node_disk</code></td><td>warning</td><td>A reachable node's data disk is over 85% full, from its last health report</td></tr>
+    <tr><td><code>project_disk</code></td><td>warning</td><td>A project's size sample from the last 30 min is over its disk warning</td></tr>
+    <tr><td><code>pooler_down</code></td><td>critical</td><td>A local PgBouncer's admin console has not answered for 1 min</td></tr>
+    <tr><td><code>pooler_allowlist_off</code></td><td>critical</td><td>A local PgBouncer is not on <code>auth_type = hba</code></td></tr>
+    <tr><td><code>pooler_config_skipped</code></td><td>critical</td><td>The last pooler sync left rows out as invalid</td></tr>
+    <tr><td><code>pooler_host_not_ready</code></td><td>critical</td><td>A healthy edge pooler host reports not ready for 1 min</td></tr>
+    <tr><td><code>pooler_split_brain</code></td><td>critical</td><td>Two hosts in one region are keepalived <code>MASTER</code> for 1 min</td></tr>
+    <tr><td><code>waker_down</code></td><td>critical</td><td>The waker refuses TCP for 1 min</td></tr>
+    <tr><td><code>agent_client_cert</code></td><td>critical</td><td>The server's client certificate for agents has under 3 days left</td></tr>
+    <tr><td><code>failure_domain</code></td><td>warning</td><td>Members that must be apart share a failure domain (<x-page id="ha--domains"/>)</td></tr>
+    <tr><td><code>files_share_backups</code></td><td>warning</td><td>A region with stored files has no files target of its own</td></tr>
+    <tr><td><code>capacity_proposal</code></td><td>warning</td><td>A capacity proposal waits for approval</td></tr>
+    <tr><td><code>capacity_failed</code></td><td>critical</td><td>A provisioning failed in the last 24 h (<x-page id="billing--capacity"/>)</td></tr>
+  </tbody>
+</table></div>
+<h3>Firing, deduplication and clearing</h3>
+<p>A condition's key is <code>kind:target_type:target_id</code>. <x-ref path="internal/alerts/service.go" symbol="func (s *Service) Evaluate("><code>Evaluate</code></x-ref> upserts each holding condition against a unique index on the key <code>WHERE status = 'firing'</code>, so it opens a row or refreshes the firing one (<code>xmax = 0</code> tells which), and resolves every firing row whose key did not come up. A condition that returns opens a new row. The grace periods are kept in each process's memory (<code>poolerFailing</code>).</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <ul>
+    <li><strong>Nothing holds a resolved alert down.</strong> Thresholds have no hysteresis and one good evaluation resolves. A node's disk hovering at 85% as WAL is recycled, or a project at its disk warning, fires and resolves at each crossing, every 30 s at worst, each time a new row and two notifications. With several servers the grace clocks are per process, so one server resolves what another just fired. The <code>alerts</code> table is never pruned, so flapping also grows it. Resolving only after a few clear evaluations would cover all three.</li>
+    <li><strong>A failed on-demand restore test of a deleted project never clears.</strong> <x-ref path="internal/store/queries/alerts.sql" symbol="-- name: FailedLatestOperations :many"><code>FailedLatestOperations</code></x-ref> groups by project and keeps soft-deleted ones, and the <code>restore_test</code> case, unlike the backup one, does not check the project is live. Weekly tests run with no project and never replace that row. So "Restore test of  failed" fires for good, and through <x-ref path="internal/incidents/heartbeat.go" symbol="func (s *Service) States("><code>States</code></x-ref> keeps the public page's Backups component degraded; for a live project, until someone tests it again. Alerts cannot be dismissed.</li>
+    <li><strong>One failing source silences every alert.</strong> <code>conditions</code> returns nothing when any query fails, so <code>Evaluate</code> neither resolves nor fires. A query that keeps failing (a bug, a lock, a slow <code>WALArchiveSamples</code> over a large <code>metric_points</code>) leaves a log line every 30 s and no alert. Firing what was read while resolving nothing would keep decision M7 #1's protection.</li>
+  </ul>
+</div>
+<h3>Delivery</h3>
+<p>Channels are one webhook and one SMTP account, kept in the <code>alerts</code> settings row with the webhook secret and SMTP password sealed under the master key (<x-ref path="internal/alerts/config.go" symbol="func (s *Service) Save("><code>Save</code></x-ref>). The API shows secrets only as present. <x-ref path="internal/alerts/service.go" symbol="func (s *Service) DeliverPending("><code>DeliverPending</code></x-ref> claims up to 50 notifications at a time:</p>
+<x-code path="internal/store/queries/alerts.sql" start="-- name: ClaimUndelivered :many" end="RETURNING *;" lang="sql" caption="a firing alert not yet notified, or a resolved one whose firing was notified; one minute's lock so one server sends each; nothing older than 7 days"/>
+<p>A failure sets the lock to <code>1 min × 2^attempts</code>, capped at 30 min. With no channel configured, the notification is marked handled. Each event goes to every channel:</p>
+<x-code path="internal/alerts/deliver.go" start="func (s *Service) deliver(" caption="the channels are tried together and fail together"/>
+<p>The webhook is a JSON <code>POST</code> with <code>X-Xenibase-Event</code> (<code>alert.firing</code>, <code>alert.resolved</code>, <code>alert.test</code>), 10 s to answer 2xx, and, with a secret, <code>X-Xenibase-Signature: t=&lt;unix&gt;,v1=&lt;HMAC-SHA256 of "t.body"&gt;</code> (<x-ref path="internal/alerts/deliver.go" symbol="func Sign("><code>alerts.Sign</code></x-ref>). The payload is the alert's id, kind, severity, summary, target, times and detail. It goes through a plain HTTP client, not the outbound one: the URL is the platform admin's. Email is plain text over STARTTLS (required when chosen), implicit TLS, or none for a local relay; a subject with anything outside printable ASCII is RFC 2047-encoded, so a name cannot add a header. Settings → Alerts → Test sends <code>alert.test</code> to each channel.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <ul>
+    <li><strong>One broken channel resends to the working one.</strong> <code>deliver</code> joins both channels' errors and the whole notification is retried on both. With email misconfigured, the webhook gets each firing again every 30 minutes for 7 days, about 340 times; with the webhook down, the inbox does. A scratch test (webhook answering 200, SMTP on a closed port) saw one firing three times in three claims. Recording delivery per channel would fix it.</li>
+    <li><strong>An alert that resolves before its first successful delivery is never sent.</strong> The claim takes a resolved alert only if its firing was notified, so while delivery fails any alert shorter than the backoff vanishes unannounced.</li>
+  </ul>
+</div>
+
+<h2 id="operations--metrics">Metrics</h2>
+<p><x-ref path="internal/metrics/metrics.go" symbol="func (c *Collector) Collect("><code>Collect</code></x-ref> runs every <code>XENIBASE_METRICS_INTERVAL</code> (1 min) on every server. Per instance it opens one admin connection and reads each database's counters from <code>pg_stat_database</code> and client backends from <code>pg_stat_activity</code>, with <code>pg_database_size</code> every 5 min, and a dedicated instance's archiver (<x-page id="backups--alerts"/>). TPS and cache hit ratio are deltas, skipped when a counter went backwards. The poolers' <code>SHOW POOLS</code> gives clients and waiting clients, and their transaction counters mark projects active for the Free tier (<x-page id="billing--free-tier"/>). Node metrics come from the agents' last health checks, when fresh.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Scope</th><th>Metrics</th></tr></thead>
+  <tbody>
+    <tr><td>project</td><td><code>size_bytes</code>, <code>connections_active</code>, <code>connections_idle</code>, <code>pooler_clients</code>, <code>pooler_waiting</code>, <code>tps</code>, <code>cache_hit_ratio</code>; dedicated only: <code>wal_archive_failed</code>, <code>wal_archive_age_s</code>, <code>wal_archive_pending</code>, <code>wal_archive_pending_age_s</code></td></tr>
+    <tr><td>node</td><td><code>cpu_percent</code>, <code>load1</code>, <code>mem_used_bytes</code>, <code>mem_total_bytes</code>, <code>disk_used_bytes</code>, <code>disk_total_bytes</code>, <code>disk_read_bps</code>, <code>disk_write_bps</code></td></tr>
+  </tbody>
+</table></div>
+<p>Points go into <code>metric_points</code>, keyed by scope, id, metric, resolution and minute, with an upsert, so several servers or a restart do not duplicate a point. Hourly (and at start, for the last 25 hours) the collector averages completed hours into <code>1h</code> points and prunes: <code>1m</code> points after 24 hours, <code>1h</code> after 30 days (<x-ref path="internal/store/queries/metrics.sql" symbol="-- name: PruneMetrics :execrows"><code>PruneMetrics</code></x-ref>), over an index on <code>(resolution, ts)</code>. The API serves 1 h and 24 h from minute points and 7 d from hourly ones, adding live averages for the hours not yet downsampled (<x-ref path="internal/metrics/series.go" symbol="func Query("><code>Query</code></x-ref>). A project's metrics are <code>ProjectView</code> and add the top 10 statements from <code>pg_stat_statements</code> when the project enabled it; a node's are the platform admin's.</p>
+<h3>The Prometheus endpoint</h3>
+<p><code>GET /metrics</code> serves the latest value of every series from the last <code>max(3 × interval, 6 min)</code> as gauges <code>xenibase_project_*</code> and <code>xenibase_node_*</code>, plus <code>xenibase_up</code> and the audit writer's own counters, which matter most when the database refuses writes. The route is public in the route table; the handler checks:</p>
+<x-code path="internal/api/insight.go" start="func (s *Server) metricsAuthorized(" caption="a bearer token compared in constant time, or a platform admin's session"/>
+<p><code>XENIBASE_METRICS_TOKEN</code> must be at least 24 characters. Project series are labelled <code>project_id</code>, <code>org_id</code>, <code>org</code> and <code>tier</code>, never by project or database name, since a project's name is its tenant's; node series by <code>node_id</code> and <code>node</code>. Label values are escaped. Cardinality is bounded by the platform's own size: at most 11 series per live project (deleted ones drop out) and 8 per node, with nothing per request, user or query. Renaming an organisation changes its <code>org</code> label and so starts new series.</p>
+
+<h2 id="operations--logging">Logging</h2>
+<p>Every binary builds its logger with <x-ref path="internal/logging/logging.go" symbol="func New("><code>logging.New</code></x-ref>: <code>log/slog</code> to stderr, JSON unless the format is <code>text</code>. The server takes <code>XENIBASE_LOG_FORMAT</code> and <code>XENIBASE_LOG_LEVEL</code>; the agent, edge and status page take their own <code>*_LOG_FORMAT</code> and log at info. The API's <x-ref path="internal/api/server.go" symbol="func requestLogger("><code>requestLogger</code></x-ref> writes one line per request with method, path, status, bytes, duration and request id. The path has no query string, and no body or header is logged. Paths carry ids, and on two routes a billing contact's email or a support phone number, but no secret.</p>
+<p>What is never logged: secrets (the import and Supabase helpers strip passwords from connection errors), and SQL. The console's audit entry has the statement count, the read-only flag and the error code, never the text (<x-page id="control-plane--console"/>). The one secret logged on purpose is the first-run setup code, which works only until the first operator exists. Postgres itself logs any statement over 5 s (<code>log_min_duration_statement</code>) with its text, in the container's log; <code>log_statement</code> stays <code>none</code>, and the isolation check fails a cluster where it is not.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <ul>
+    <li><strong>Container logs are never rotated.</strong> No service sets <code>logging:</code> and the install guide does not configure the daemon, whose default <code>json-file</code> driver keeps everything. A line per API request and every slow tenant statement's text pile up on the databases' disk until it fills. A <code>max-size</code> and <code>max-file</code> per service would bound it.</li>
+    <li><strong>Secret files take the default umask.</strong> <code>upgrade.sh</code> creates its dump (password hashes, verifiers, every sealed secret) under the shell's umask, usually 0644, in a <code>0755</code> directory, and <code>chmod 600</code>s it only after <code>pg_dump</code> ends. An <code>.env</code> copied by hand from <code>.env.example</code>, as its first line suggests, keeps the copy's mode; <code>install.sh</code> never tightens it. It matters only with other local users, but <code>umask 077</code> in both scripts costs nothing.</li>
+  </ul>
+</div>
+
+<h2 id="operations--status">The status page: xenibase-status</h2>
+<p><x-ref path="cmd/status/main.go"><code>xenibase-status</code></x-ref> is a separate pure-Go binary with one SQLite file (V3 §2.6), meant for another provider so an outage cannot take down the page that reports it, and it never touches Xenibase's database. <x-ref path="internal/statuspage/config.go" symbol="func LoadConfig("><code>LoadConfig</code></x-ref> refuses unknown keys in <code>status.toml</code>, reads <code>*_file</code> secrets, and requires a push secret of at least 32 characters if one is set.</p>
+<h3>Checks and automatic incidents</h3>
+<p>Every <code>interval</code> (1 min), <x-ref path="internal/statuspage/monitor.go" symbol="func (s *Service) Tick("><code>Tick</code></x-ref> runs every component's probes at once from outside: <code>http</code> (a 2xx), <code>postgres</code> (a query through a DSN in a secret file) or <code>tcp</code>, 10 s each. Some failing is degraded, all failing is down. A heartbeat component takes xenibase-server's last report, or <code>unknown</code> after 5 min; with probes too, the worse wins.</p>
+<x-code path="internal/statuspage/monitor.go" start="func advance(" doc caption="three failing checks open an incident, two good ones resolve it, unknown resets both counts"/>
+<p>An automatic incident is <code>auto-&lt;component&gt;-&lt;unix&gt;</code>, major when down and minor when degraded, backdated to the first failing check, quoting the probe errors; xenibase-server's pushes cannot overwrite it (409). A component shows the worse of its measured state and any open manual incident naming it, and a measurement older than three intervals as no data.</p>
+<h3>History</h3>
+<p>Each check records the worst state of the minute; each tick re-counts the last day into daily totals and drops minutes after 3 days and days after 90 (<x-ref path="internal/statuspage/store.go" symbol="func (s *store) rollUp("><code>rollUp</code></x-ref>). The page draws 90 daily bars, with uptime counting degraded minutes as up and unknown ones as neither; <code>/api/v1/status</code>, <code>/api/v1/incidents</code> and <code>/feed.rss</code> serve the same. The HTML is <code>html/template</code> under a CSP of <code>default-src 'none'</code>.</p>
+<h3>Signed pushes</h3>
+<p>Five endpoints take xenibase-server's requests: <code>PUT /api/v1/incidents/{id}</code>, <code>POST /api/v1/heartbeat</code>, <code>PUT /api/v1/sla/targets</code>, <code>POST /api/v1/sla/results</code> and <code>PUT /api/v1/subscribers/managed</code>. Each needs <code>Xenibase-Signature</code>, the same scheme as webhooks (<x-page id="webhooks-jobs--signing"/>), checked by one wrapper:</p>
+<x-code path="internal/statuspage/web.go" start="func (s *Service) signed(" caption="1 MiB (32 MiB for the managed list), then the HMAC of &quot;t.body&quot; within five minutes"/>
+<p>Without a push secret every push is refused. A pushed incident must name its own id in the path and only known components; its updates are replaced as a set, and the ones with new ids are mailed. The heartbeat maps each state to the page's components of that heartbeat id, a region-specific state winning over a regionless one. The SLA endpoints are on <x-page id="ha--sla"/>.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>A push's signature is not bound to its endpoint.</strong> The HMAC covers the timestamp and body only, and unknown JSON fields are ignored. A signed heartbeat body sent to <code>PUT /api/v1/subscribers/managed</code> decodes as an empty list and deletes every managed subscriber; sent to <code>/api/v1/sla/targets</code> it removes every SLA target. A scratch test did both (204 twice, the list emptied). A heartbeat replayed within five minutes also overwrites a newer one. It needs someone who sees a signed request, one a minute, and <code>XENIBASE_STATUS_URL</code> may be <code>http://</code>. Signing the method and path too, and refusing an older heartbeat, would close it.</p>
+</div>
+<h3>Subscribers</h3>
+<p>With <code>[smtp]</code> set, anyone can subscribe (<x-ref path="internal/statuspage/subscribe.go" symbol="func (s *Service) Subscribe("><code>Subscribe</code></x-ref>): five requests an hour per client address, one confirmation mail per address per 10 minutes, the same answer whether or not the address is subscribed, a 48-hour link whose token is stored only as a SHA-256, and unconfirmed sign-ups dropped after 7 days. Links open a page whose button POSTs, so a mail scanner's prefetch changes nothing. Mail goes through an outbox, retried with backoff up to 10 times. Managed subscribers come from xenibase-server hourly (<x-ref path="internal/incidents/subscribers.go" symbol="func (s *Service) Subscribers("><code>Subscribers</code></x-ref>): owners and billing contacts with status emails on, of active paying organisations, mailed without opt-in only for incidents on the components and regions their projects use. Unsubscribing removes the address from both lists and leaves a tombstone the syncs honour.</p>
+<h3>Incidents from Xenibase</h3>
+<p>Platform admins write incidents in Admin → Incidents (<x-ref path="internal/incidents/incidents.go" symbol="func (s *Service) Create("><code>incidents.Create</code></x-ref>, <code>Post</code>, <code>Edit</code>), on the components in <code>XENIBASE_STATUS_COMPONENTS</code>. A change clears <code>pushed_at</code>; every 10 s <x-ref path="internal/incidents/incidents.go" symbol="func (s *Service) Push("><code>Push</code></x-ref> sends each unpushed incident whole and marks it pushed only if it did not change meanwhile, so a status page that was down catches up. The same loop sends the heartbeat every minute (backups, dedicated, webhooks and jobs, billing, backend services per region: what is wrong, never how much or for whom), syncs subscribers hourly, and closes announced maintenance whose window ended. Organisations see open incidents covering their projects in a banner.</p>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Without a status page, maintenance never ends.</strong> <code>main</code> starts <x-ref path="internal/incidents/incidents.go" symbol="func (s *Service) Run("><code>incidents.Run</code></x-ref> only when <code>XENIBASE_STATUS_URL</code> is set (<x-ref path="cmd/server/main.go" symbol="go func() { defer bg.Done(); incidentSvc.Run(bgCtx, time.Minute) }()">here</x-ref>), yet <code>Run</code> has a branch for no status page whose only job is <x-ref path="internal/incidents/maintenance.go" symbol="func (s *Service) EndMaintenance("><code>EndMaintenance</code></x-ref>. On an install without one, an announced window is never resolved and an unconfirmed draft never lapses, so every covered organisation's dashboard shows the finished maintenance as in progress until an admin resolves it by hand. Starting <code>Run</code> unconditionally would fix it.</p>
+</div>
+<div class="callout note"><span class="callout-label">Note</span>
+  <p>An automatic incident and a degraded component's line show the probes' error text on the public page, cut at 200 characters. A <code>postgres</code> probe's error names the probe's user, database and the address it reached.</p>
+</div>
+
+<h2 id="operations--support">Support</h2>
+<p><x-ref path="internal/support/support.go"><code>internal/support</code></x-ref> keeps tickets in the metadata database (V3 §7.1), numbered <code>T-n</code>, each with a channel, status (<code>open</code>, <code>pending</code>, <code>solved</code>, <code>closed</code>), priority, the plan when it opened, an assignee and a response target. <x-ref path="internal/support/support.go" symbol="func (s *Service) OpenTicket("><code>OpenTicket</code></x-ref> trims the subject to 200 characters, refuses a body over 20,000, inserts the ticket and its first message in one transaction, and acknowledges by the same channel.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Channel</th><th>How it is authenticated</th><th>Which organisation</th></tr></thead>
+  <tbody>
+    <tr><td>Dashboard (<code>POST /api/v1/orgs/{org}/support/tickets</code>)</td><td>The session; any member (<code>OrgView</code>)</td><td>The path's</td></tr>
+    <tr><td>Email (<code>POST /api/v1/support/inbound/email</code>)</td><td>The email provider presents <code>XENIBASE_SUPPORT_INBOUND_SECRET</code> as basic auth or <code>X-Xenibase-Inbound-Secret</code>, compared in constant time. Bodies up to 4 MiB, in this API's fields or Postmark's.</td><td>The sender's: an organisation it is a billing contact of, else its only membership, else none for staff to assign</td></tr>
+    <tr><td>WhatsApp (<code>POST /api/v1/support/whatsapp</code>)</td><td><code>X-Hub-Signature-256</code>, HMAC-SHA256 of the body with the Meta app secret; the GET handshake checks the verify token</td><td>The organisation that registered the number, if on Pro or Team; other numbers get one reply pointing to email and the dashboard</td></tr>
+  </tbody>
+</table></div>
+<p><strong>Threading.</strong> Outbound mail carries <code>[T-n]</code> in the subject and a recorded Message-ID. An inbound email joins a ticket by that reference, or by an <code>In-Reply-To</code> or <code>References</code> id Xenibase recorded, but only from the requester or a member of the ticket's organisation; anything else opens a new ticket. Quoted history is stripped, and a message id seen before changes nothing. A WhatsApp message joins the open ticket from its number; media become a placeholder line. Attachments are not stored at all (every message's <code>attachments</code> is <code>[]</code>), so there is nothing to serve or sanitise yet.</p>
+<p><strong>Response targets</strong> (<x-ref path="internal/support/targets.go" symbol="func TargetFor("><code>TargetFor</code></x-ref>): Free is best effort with no target; Pro 8 business hours; Team 4; an urgent ticket on Pro or Team one hour of calendar time. Business hours are 09:00 to 17:00 WAT, Monday to Friday, without public holidays. A change of priority or organisation before the first response recomputes the target from the ticket's opening time.</p>
+<p><strong>Who sees what.</strong> In the dashboard, owners and admins see all of their organisation's tickets; other members see the ones they opened, by user id or email (<x-ref path="internal/api/support.go" symbol="func (s *Server) seesTicket("><code>seesTicket</code></x-ref>). A ticket of another organisation answers 404. Internal notes (<code>direction = 'note'</code>) never leave the support console, by email or the org API. The console is for platform admins and the <code>support</code> role (<code>SupportConsole</code>), and its context panel shows the organisation's metadata, never data (<x-page id="identity--authz"/>).</p>
+<x-code path="internal/support/support.go" start="func (s *Service) orgForEmail(" doc caption="a billing contact match wins, whichever organisation added it"/>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>Another organisation can claim a customer's tickets.</strong> Billing contacts and WhatsApp numbers are whatever an organisation's owners and admins type, unverified, and billing contacts rank first. If organisation A adds <code>victim@b.example</code> as a billing contact, every email the victim sends support opens a ticket in A: A's owners and admins read it and every staff reply in their dashboard, and A's members can reply into it by email, since the thread check accepts any member of the ticket's organisation. A scratch test reproduced both. A number registered by A does the same for WhatsApp (<x-ref path="internal/support/whatsapp.go" symbol="func (s *Service) InboundWhatsApp("><code>InboundWhatsApp</code></x-ref>), and B can no longer register it. Verifying an address or number by a code before it routes tickets would fix it.</p>
+</div>
+<div class="callout risk"><span class="callout-label">Risk</span>
+  <p><strong>An inbound email's sender is taken on trust.</strong> <x-ref path="internal/api/support.go" symbol="func parseInboundEmail("><code>parseInboundEmail</code></x-ref> reads <code>From</code> and ignores the provider's SPF and DKIM verdicts; the inbound secret proves the provider called, not who wrote. Mail forged as an organisation's owner opens a ticket the console shows as the owner's, with the organisation's context, or, with the owner's sequential <code>[T-n]</code>, joins the owner's thread. The forger reads no replies, but staff act on what tickets ask, and the acknowledgement from the genuine support address quotes the forged subject to the forged address. Flagging or refusing mail without a passing DMARC result would close it.</p>
+</div>
+
+<h2 id="operations--version">Version and build information</h2>
+<p><x-ref path="internal/version/version.go"><code>internal/version</code></x-ref> holds <code>Version</code>, <code>Commit</code> and <code>BuildDate</code>, set with <code>-ldflags -X</code>; a plain <code>go build</code> reports <code>0.0.0-dev</code>. The bundle takes <code>VERSION</code> from <code>git describe --tags --always</code>, exactly the tag on a tagged checkout, which <code>upgrade.sh</code>'s gate relies on. Only the main Dockerfile sets the build date. Every binary answers <code>-version</code>, the server serves <code>GET /api/v1/version</code> without authentication, and agents report theirs in health checks; the server sends no work to an agent of another major or an older minor (<x-page id="nodes-agents--commands"/>).</p>
+
+<h2 id="operations--drift">Spec and code</h2>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <ul>
+    <li>V1 §11.1 has a <code>curl … | sh</code> installer and a bare-metal systemd path beside Compose. There is only the Compose bundle, and <code>install.sh</code> needs a git checkout.</li>
+    <li>V1 §11.3 says the server refuses to start if the agent version is incompatible. It starts, and refuses work to that agent.</li>
+    <li>V1 §8.7 exposes <code>/metrics</code> "for anyone who wants it". It needs the metrics token or a platform admin's session (decision M6 #9).</li>
+    <li>V3 §2.6 wants the 90-day history to use "the same measurements as the SLA". The page's history comes from its component probes; the SLA counts separate per-project probes from both vantage points (<x-page id="ha--sla"/>).</li>
+    <li>V3 §7.1 gives the one-hour target to HA incidents. Any ticket the customer marks urgent on Pro or Team gets it.</li>
+    <li><code>docs/operations.md</code>'s alert table lists 12 of the 21 kinds, and calls the restore-test alert the weekly test's, though a test run on demand for one project raises its own.</li>
+  </ul>
+</div>
+
+<h2 id="operations--failures">Failure handling</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>What fails</th><th>What happens</th></tr></thead>
+  <tbody>
+    <tr><td><code>.env</code> lacks a required variable</td><td><code>docker compose up</code> refuses with the variable's message; nothing starts.</td></tr>
+    <tr><td><code>upgrade.sh</code>'s checks fail</td><td>Exit 1 with the reason; nothing changed.</td></tr>
+    <tr><td>The metadata dump fails or looks wrong</td><td>Exit 1; nothing changed.</td></tr>
+    <tr><td><code>install.sh</code> fails, or the gates time out</td><td>The rollback stops the server and agent, restores the dump if the schema moved, checks out the previous release, reinstalls and runs the gates. Exit 2.</td></tr>
+    <tr><td>The rollback fails</td><td>Exit 3 with the dump's path and the manual steps. The server may be stopped.</td></tr>
+    <tr><td>An alert condition query fails</td><td>No alert fires or resolves that round; a warning is logged.</td></tr>
+    <tr><td>A webhook or SMTP delivery fails</td><td>The notification retries on both channels with backoff to 30 min, for 7 days; the error is kept on the alert.</td></tr>
+    <tr><td>An instance does not answer the collector</td><td>Its projects get no points that minute; the error is logged and other instances are sampled.</td></tr>
+    <tr><td>xenibase-status is unreachable</td><td>Incidents stay unpushed and are sent when it is back; the server logs the first failure and the recovery. The page shows heartbeat components as no data after 5 min.</td></tr>
+    <tr><td>Xenibase is down</td><td>Probes fail from outside; after three checks the page opens an incident by itself, and resolves it after two good ones.</td></tr>
+    <tr><td>A push is unsigned, stale by over 5 min, or badly signed</td><td>401, logged with the path and remote address.</td></tr>
+    <tr><td>The inbound email secret is wrong or unset</td><td>401; dashboard tickets and outbound replies still work.</td></tr>
+    <tr><td>A WhatsApp webhook fails part-way</td><td>500, so Meta retries; messages already threaded are skipped by their ids.</td></tr>
+    <tr><td>Outbound support mail or WhatsApp fails</td><td>Logged; the ticket and message are kept, and no Message-ID is recorded for mail not sent.</td></tr>
+  </tbody>
+</table></div>
