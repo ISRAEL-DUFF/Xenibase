@@ -66,7 +66,7 @@ database, the shared PostgreSQL 18 cluster, the two PgBouncers on
 | `make docs-site` | Renders docs/ into `dist/docs` (navigation, search) and fails on broken links. |
 | `make test-docs` | Follows `docs/install.md` in a scratch clone (its marked commands, as written), then drives a browser from the fresh install to a working database. |
 | `make test-load` | 150 shared projects, pgbench on 10: create latency, pooler overhead, noisy neighbour; writes `tmp/load-report.md` (needs `pgbench`). |
-| `make release` | linux/amd64 and arm64 binaries, the source bundle, and checksums in `dist/` (CI does it on `v*` tags). |
+| `make release` | linux/amd64 and arm64 binaries, the source bundle, and checksums in `dist/`. On a pushed `v*` tag, the `release` job in `.github/workflows/ci.yml` runs it and publishes the GitHub release, once `ci`, `e2e`, `docs-install`, `audit` and `upgrade` have passed on the tag. |
 | `make run-dev` | Runs the built `bin/xenibase-server` against the dev environment (`deploy/dev/server.env`). |
 | `make lint` | `golangci-lint`. |
 | `make release-check` | Fails if the server binary embeds only the placeholder UI. |

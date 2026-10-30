@@ -912,6 +912,13 @@ bundle share one version (spec §11.5).
   `localhost`, `127.0.0.0/8` and `::1`, and a saved token is not sent over
   `http://` to any other host. See `docs/cli.md` ("Which server and token a
   command uses").
+- **A release is published only after CI passed on its tag.** The release
+  workflow started on the same tag push as CI and did not wait for it, so a
+  tag whose tests then failed still got a public GitHub release. Publishing
+  is now the `release` job of `ci.yml`, which needs `ci`, `e2e`,
+  `docs-install`, `audit` and `upgrade` to pass first; it alone can write to
+  the repository, and `release.yml` is gone. See `docs/deploying.md` ("Where
+  a release comes from").
 
 ### Upgrading
 - A CLI context saved for an `http://` server other than this machine stops

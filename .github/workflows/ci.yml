@@ -279,3 +279,47 @@ jobs:
         with:
           name: load-report
           path: tmp/load-report.md
+
+  # A tag like v1.0.0 publishes a GitHub release (spec §11.5: release
+  # artifacts on tags), but only after every job that runs on a tag passed
+  # on it: a job in this workflow, so it cannot race CI. The only job that
+  # can write to the repository.
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ci, e2e, docs-install, audit, upgrade]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build binaries, bundle, and checksums
+        run: make release VERSION=${GITHUB_REF_NAME}
+
+      - name: The binaries embed the real UI and report the tag
+        run: |
+          ./dist/xenibase-server-${GITHUB_REF_NAME}-linux-amd64 -require-ui
+          ./dist/xenibase-server-${GITHUB_REF_NAME}-linux-amd64 -version | grep -F "${GITHUB_REF_NAME}"
+          ./dist/xenibase-cli-${GITHUB_REF_NAME}-linux-amd64 version | grep -F "${GITHUB_REF_NAME}"
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v tag="${GITHUB_REF_NAME}" '$0 ~ "^## "tag {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          test -s notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "Xenibase ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag
