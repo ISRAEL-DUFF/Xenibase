@@ -127,13 +127,13 @@ func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps
 // Kinds returns the operation kinds this service runs.
 func (s *Service) Kinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
-		KindBackup:         {Handler: s.runBackup, MaxAttempts: 3, Timeout: 6 * time.Hour},
+		KindBackup:         {Handler: s.runBackup, MaxAttempts: 3, Timeout: 6 * time.Hour, Class: jobs.ClassScheduled},
 		KindRestore:        {Handler: s.runRestore, OnFail: s.failRestore, MaxAttempts: 2, Timeout: 6 * time.Hour},
-		KindRestoreTest:    {Handler: s.runRestoreTest, OnFail: s.failRestoreTest, MaxAttempts: 1, Timeout: 6 * time.Hour},
-		KindMetadataBackup: {Handler: s.runMetadataBackup, MaxAttempts: 3, Timeout: time.Hour},
-		KindImport:         {Handler: s.runImport, OnFail: s.projects.Rollback, MaxAttempts: 1, Timeout: 12 * time.Hour},
-		KindBaseBackup:     {Handler: s.runBaseBackup, MaxAttempts: 3, Timeout: 12 * time.Hour},
-		KindStorageSwitch:  {Handler: s.runStorageSwitch, MaxAttempts: 3, Timeout: 12 * time.Hour},
+		KindRestoreTest:    {Handler: s.runRestoreTest, OnFail: s.failRestoreTest, MaxAttempts: 1, Timeout: 6 * time.Hour, Class: jobs.ClassScheduled},
+		KindMetadataBackup: {Handler: s.runMetadataBackup, MaxAttempts: 3, Timeout: time.Hour, Class: jobs.ClassScheduled},
+		KindImport:         {Handler: s.runImport, OnFail: s.projects.Rollback, MaxAttempts: 1, Timeout: 12 * time.Hour, Class: jobs.ClassLong},
+		KindBaseBackup:     {Handler: s.runBaseBackup, MaxAttempts: 3, Timeout: 12 * time.Hour, Class: jobs.ClassScheduled},
+		KindStorageSwitch:  {Handler: s.runStorageSwitch, MaxAttempts: 3, Timeout: 12 * time.Hour, Class: jobs.ClassScheduled},
 	}
 }
 

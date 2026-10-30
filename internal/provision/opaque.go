@@ -43,9 +43,9 @@ type renameParams struct {
 
 func (s *Service) opaqueKinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
-		KindRenameOpaque:      {Handler: s.runRenameOpaque, OnFail: s.rollbackRenameOpaque, MaxAttempts: 3},
+		KindRenameOpaque:      {Handler: s.runRenameOpaque, OnFail: s.rollbackRenameOpaque, MaxAttempts: 3, Class: jobs.ClassScheduled},
 		KindSwitchCredentials: {Handler: s.runSwitchCredentials, OnFail: s.rollbackSwitchCredentials, MaxAttempts: 3},
-		KindExpireLegacy:      {Handler: s.runExpireLegacy, MaxAttempts: 10},
+		KindExpireLegacy:      {Handler: s.runExpireLegacy, MaxAttempts: 10, Class: jobs.ClassScheduled},
 		KindReclaimSpace:      {Handler: s.runReclaimSpace, MaxAttempts: 2},
 	}
 }

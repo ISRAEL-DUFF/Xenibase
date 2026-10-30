@@ -439,6 +439,7 @@ func Start(t testing.TB, opts Options) *Env {
 	consoleSvc := console.New(db, svc, keyring, false, log)
 	insightSvc := insights.New(db, svc, consoleSvc, insights.Config{SlowQuery: 200 * time.Millisecond, Plans: []string{"all"}}, log)
 	alertSvc := alerts.New(db, keyring, alerts.Config{PublicURL: "https://xenibase.test", Poolers: append(pm.Admins(), opts.ExtraPoolers...), PoolerGrace: time.Nanosecond, WakerAddr: pm.WakerAddr,
+		OperationClass: jobs.Classifier(kinds),
 		// One clear evaluation resolves, as the integration tests expect.
 		ResolveAfter: 1}, log)
 	collector := metrics.NewCollector(db, svc, pm, nodeSvc, time.Second, log)

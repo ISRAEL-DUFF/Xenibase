@@ -43,6 +43,23 @@ WHERE p.deleted_at IS NULL
       < now() - make_interval(secs => @stuck_seconds::float8)
 ORDER BY p.created_at;
 
+-- ListProjectsLeftWithoutOperation finds live projects in any status but
+-- active (paused and archived projects are active, with a lifecycle) that
+-- no queued or running operation will move on: a move-like rollback that
+-- could not unfreeze, or a create, restore or delete whose operation ended
+-- without its project's final status, or one left in error. stuck_seconds
+-- is how long since the project's last operation ended. For the
+-- project_stuck alert; RepairStuckMoves repairs only ListStuckProjects'.
+-- name: ListProjectsLeftWithoutOperation :many
+-- tenant: system - the project_stuck alert reports every organisation's projects.
+SELECT p.* FROM projects p
+WHERE p.deleted_at IS NULL
+  AND p.status NOT IN ('active', 'deleted')
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id AND o.status IN ('queued', 'running'))
+  AND coalesce((SELECT max(o.finished_at) FROM operations o WHERE o.project_id = p.id), p.created_at)
+      < now() - make_interval(secs => @stuck_seconds::float8)
+ORDER BY p.created_at;
+
 -- MoveNameInUse reports whether a queued or running operation owns the
 -- move objects named after it (logical.Name: its id's first 16 hex digits).
 -- name: MoveNameInUse :one

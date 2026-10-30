@@ -37,7 +37,7 @@ func New(db *pgxpool.Pool, projects *provision.Service, log *slog.Logger) *Servi
 
 // Kinds registers the operation.
 func (s *Service) Kinds() map[string]jobs.Kind {
-	return map[string]jobs.Kind{Kind: {Handler: s.run, MaxAttempts: 2, Timeout: 30 * time.Minute}}
+	return map[string]jobs.Kind{Kind: {Handler: s.run, MaxAttempts: 2, Timeout: 30 * time.Minute, Class: jobs.ClassScheduled}}
 }
 
 type params struct {

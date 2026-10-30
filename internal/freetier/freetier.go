@@ -116,9 +116,9 @@ func New(db *pgxpool.Pool, projects *provision.Service, backups *backup.Service,
 // Kinds returns the operation kinds this service runs.
 func (s *Service) Kinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
-		KindPause:     {Handler: s.runPause, OnFail: s.failPause, MaxAttempts: 3, Timeout: 5 * time.Minute},
+		KindPause:     {Handler: s.runPause, OnFail: s.failPause, MaxAttempts: 3, Timeout: 5 * time.Minute, Class: jobs.ClassScheduled},
 		KindResume:    {Handler: s.runResume, MaxAttempts: 5, Timeout: 5 * time.Minute},
-		KindArchive:   {Handler: s.runArchive, OnFail: s.failArchive, MaxAttempts: 3, Timeout: 2 * time.Hour},
+		KindArchive:   {Handler: s.runArchive, OnFail: s.failArchive, MaxAttempts: 3, Timeout: 2 * time.Hour, Class: jobs.ClassScheduled},
 		KindUnarchive: {Handler: s.runUnarchive, OnFail: s.failUnarchive, MaxAttempts: 3, Timeout: 2 * time.Hour},
 	}
 }
