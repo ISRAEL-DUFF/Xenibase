@@ -977,7 +977,58 @@ bundle share one version (spec §11.5).
   from `.env.example` kept the copy's mode; `install.sh` now sets an
   existing `.env` to 600 on every run and warns when it had to.
 
+- **Another organisation can no longer capture a customer's support
+  tickets.** Billing contacts and WhatsApp numbers were whatever an
+  organisation's owners and admins typed, and a billing contact ranked
+  first when routing inbound email: an organisation that added
+  `victim@b.example` as a billing contact got every ticket the victim
+  emailed, its owners and admins read them and the replies, and its
+  members could reply into them by email; a WhatsApp number did the same,
+  and its real owner's organisation could no longer register it. Now an
+  address or number routes tickets only once verified. A billing contact
+  is verified at once when it is the verified address of one of the
+  organisation's members; any other address is emailed a confirmation
+  link (`POST /api/v1/billing/contacts/confirm`, the `/confirm-contact`
+  page) and gets billing email meanwhile, as before. A WhatsApp number
+  stays pending until the code the dashboard shows (`XB-12345678`) is sent
+  from it to the support number; pending registrations don't route and
+  don't stop another organisation registering the number, and the one
+  that verifies drops the others. An inbound email joins a ticket only
+  from its requester or a member of the ticket's organisation whose
+  address is verified, never from a billing contact alone. The API's
+  `BillingContact` gains `verified`, and `SupportPhone` gains `verified`,
+  `code` and `code_expires_at`.
+- **An inbound email's sender is no longer taken on trust.** The
+  inbound webhook read `From` and ignored the provider's verdicts, so mail
+  forged as an owner opened a ticket under the owner's organisation, or
+  joined the owner's thread with its `[T-n]`. The sender is now trusted
+  only on a DMARC pass, or DKIM and SPF passes aligned with `From`'s
+  domain, from Postmark's `Received-SPF` and `X-Spam-Tests` headers,
+  `Authentication-Results` naming `XENIBASE_SUPPORT_AUTHSERV_ID`, or the
+  plain body's new `authentication_results`. Other mail still opens a
+  ticket, with no organisation or user, flagged `unverified_sender`
+  (a badge and a warning in the support console); it never joins a
+  thread, and its acknowledgement says only the ticket's reference.
+
 ### Upgrading
+- Migration 00097 adds billing contacts' `verified_at` and confirmation
+  token, and lets several organisations hold a WhatsApp number pending
+  (`org_support_phones` is keyed by organisation and number, with
+  `verified_at` and a `code`). Billing contacts that are a member's
+  verified address count as verified. The others keep getting invoices,
+  billing and status page email, but their email to support opens tickets
+  without an organisation until they are confirmed: **Send the link
+  again** under Billing → Billing contacts emails each one the link. Every WhatsApp
+  number registered before the upgrade is pending, with a code good for
+  30 days shown under Organisation → Support; its messages get the "how to
+  reach support" reply until the code is sent from it.
+- Migration 00098 adds `tickets.unverified_sender`. Inbound email that
+  isn't authenticated no longer threads or reaches an organisation. With
+  Postmark nothing needs setting. With another provider, have it pass its
+  verdict in `authentication_results`, or set
+  `XENIBASE_SUPPORT_AUTHSERV_ID` to the authserv-id of the
+  `Authentication-Results` header it adds; otherwise every inbound email
+  is unverified (`docs/support.md`, "Inbound email").
 - **Upgrade xenibase-server before xenibase-status.** A status page of this
   release requires the `v2` push signature and refuses (401, logged as "no
   v2 signature") heartbeats, incidents, SLA and subscriber pushes from an

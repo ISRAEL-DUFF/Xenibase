@@ -14,29 +14,60 @@ import (
 )
 
 const addOrgSupportPhone = `-- name: AddOrgSupportPhone :one
-INSERT INTO org_support_phones (phone, org_id, added_by) VALUES ($1, $2, $3) RETURNING phone, org_id, added_by, created_at
+INSERT INTO org_support_phones (phone, org_id, added_by, code, code_expires_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (org_id, phone) DO UPDATE SET code = EXCLUDED.code, code_expires_at = EXCLUDED.code_expires_at, added_by = EXCLUDED.added_by
+WHERE org_support_phones.verified_at IS NULL
+RETURNING phone, org_id, added_by, created_at, verified_at, code, code_expires_at
 `
 
 type AddOrgSupportPhoneParams struct {
-	Phone   string
-	OrgID   uuid.UUID
-	AddedBy *uuid.UUID
+	Phone         string
+	OrgID         uuid.UUID
+	AddedBy       *uuid.UUID
+	Code          *string
+	CodeExpiresAt *time.Time
 }
 
+// A pending registration, or a fresh code for one; none for a number the org already verified.
 func (q *Queries) AddOrgSupportPhone(ctx context.Context, arg AddOrgSupportPhoneParams) (OrgSupportPhone, error) {
-	row := q.db.QueryRow(ctx, addOrgSupportPhone, arg.Phone, arg.OrgID, arg.AddedBy)
+	row := q.db.QueryRow(ctx, addOrgSupportPhone,
+		arg.Phone,
+		arg.OrgID,
+		arg.AddedBy,
+		arg.Code,
+		arg.CodeExpiresAt,
+	)
 	var i OrgSupportPhone
 	err := row.Scan(
 		&i.Phone,
 		&i.OrgID,
 		&i.AddedBy,
 		&i.CreatedAt,
+		&i.VerifiedAt,
+		&i.Code,
+		&i.CodeExpiresAt,
 	)
 	return i, err
 }
 
+const dropPendingSupportPhones = `-- name: DropPendingSupportPhones :exec
+DELETE FROM org_support_phones WHERE phone = $1 AND org_id <> $2 AND verified_at IS NULL
+`
+
+type DropPendingSupportPhonesParams struct {
+	Phone string
+	OrgID uuid.UUID
+}
+
+// tenant: system - a number verified by one organisation drops the others' pending registrations.
+func (q *Queries) DropPendingSupportPhones(ctx context.Context, arg DropPendingSupportPhonesParams) error {
+	_, err := q.db.Exec(ctx, dropPendingSupportPhones, arg.Phone, arg.OrgID)
+	return err
+}
+
 const getTicket = `-- name: GetTicket :one
-SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by FROM tickets WHERE id = $1
+SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by, unverified_sender FROM tickets WHERE id = $1
 `
 
 // tenant: system - the support console, or a ticket the caller checks belongs to its org.
@@ -60,12 +91,13 @@ func (q *Queries) GetTicket(ctx context.Context, id uuid.UUID) (Ticket, error) {
 		&i.UpdatedAt,
 		&i.FirstResponseAt,
 		&i.RespondBy,
+		&i.UnverifiedSender,
 	)
 	return i, err
 }
 
 const getTicketByNumber = `-- name: GetTicketByNumber :one
-SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by FROM tickets WHERE number = $1
+SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by, unverified_sender FROM tickets WHERE number = $1
 `
 
 // tenant: system - threading an inbound email by the ticket number in its subject.
@@ -89,28 +121,30 @@ func (q *Queries) GetTicketByNumber(ctx context.Context, number int64) (Ticket, 
 		&i.UpdatedAt,
 		&i.FirstResponseAt,
 		&i.RespondBy,
+		&i.UnverifiedSender,
 	)
 	return i, err
 }
 
 const insertTicket = `-- name: InsertTicket :one
 
-INSERT INTO tickets (org_id, requester, requester_name, requester_user_id, channel, subject, priority, plan, respond_by)
+INSERT INTO tickets (org_id, requester, requester_name, requester_user_id, channel, subject, priority, plan, respond_by, unverified_sender)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
-  $8, $9)
-RETURNING id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by
+  $8, $9, $10)
+RETURNING id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by, unverified_sender
 `
 
 type InsertTicketParams struct {
-	OrgID           *uuid.UUID
-	Requester       string
-	RequesterName   *string
-	RequesterUserID *uuid.UUID
-	Channel         string
-	Subject         string
-	Priority        string
-	Plan            *string
-	RespondBy       *time.Time
+	OrgID            *uuid.UUID
+	Requester        string
+	RequesterName    *string
+	RequesterUserID  *uuid.UUID
+	Channel          string
+	Subject          string
+	Priority         string
+	Plan             *string
+	RespondBy        *time.Time
+	UnverifiedSender bool
 }
 
 // Support (V3 §7.1).
@@ -126,6 +160,7 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		arg.Priority,
 		arg.Plan,
 		arg.RespondBy,
+		arg.UnverifiedSender,
 	)
 	var i Ticket
 	err := row.Scan(
@@ -145,6 +180,7 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		&i.UpdatedAt,
 		&i.FirstResponseAt,
 		&i.RespondBy,
+		&i.UnverifiedSender,
 	)
 	return i, err
 }
@@ -193,7 +229,7 @@ func (q *Queries) InsertTicketMessage(ctx context.Context, arg InsertTicketMessa
 }
 
 const listTickets = `-- name: ListTickets :many
-SELECT t.id, t.number, t.org_id, t.requester, t.requester_name, t.requester_user_id, t.channel, t.subject, t.status, t.priority, t.plan, t.assignee, t.created_at, t.updated_at, t.first_response_at, t.respond_by, o.name AS org_name,
+SELECT t.id, t.number, t.org_id, t.requester, t.requester_name, t.requester_user_id, t.channel, t.subject, t.status, t.priority, t.plan, t.assignee, t.created_at, t.updated_at, t.first_response_at, t.respond_by, t.unverified_sender, o.name AS org_name,
   (SELECT count(*) FROM ticket_messages m WHERE m.ticket_id = t.id AND m.direction <> 'note')::bigint AS messages
 FROM tickets t LEFT JOIN organizations o ON o.id = t.org_id
 WHERE ($1::text IS NULL OR t.status = $1)
@@ -210,24 +246,25 @@ type ListTicketsParams struct {
 }
 
 type ListTicketsRow struct {
-	ID              uuid.UUID
-	Number          int64
-	OrgID           *uuid.UUID
-	Requester       string
-	RequesterName   *string
-	RequesterUserID *uuid.UUID
-	Channel         string
-	Subject         string
-	Status          string
-	Priority        string
-	Plan            *string
-	Assignee        *uuid.UUID
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	FirstResponseAt *time.Time
-	RespondBy       *time.Time
-	OrgName         *string
-	Messages        int64
+	ID               uuid.UUID
+	Number           int64
+	OrgID            *uuid.UUID
+	Requester        string
+	RequesterName    *string
+	RequesterUserID  *uuid.UUID
+	Channel          string
+	Subject          string
+	Status           string
+	Priority         string
+	Plan             *string
+	Assignee         *uuid.UUID
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	FirstResponseAt  *time.Time
+	RespondBy        *time.Time
+	UnverifiedSender bool
+	OrgName          *string
+	Messages         int64
 }
 
 // tenant: system - the support console across organisations.
@@ -257,6 +294,7 @@ func (q *Queries) ListTickets(ctx context.Context, arg ListTicketsParams) ([]Lis
 			&i.UpdatedAt,
 			&i.FirstResponseAt,
 			&i.RespondBy,
+			&i.UnverifiedSender,
 			&i.OrgName,
 			&i.Messages,
 		); err != nil {
@@ -271,18 +309,19 @@ func (q *Queries) ListTickets(ctx context.Context, arg ListTicketsParams) ([]Lis
 }
 
 const openTicketFrom = `-- name: OpenTicketFrom :one
-SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by FROM tickets WHERE requester = $1 AND channel = $2 AND status IN ('open', 'pending')
+SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by, unverified_sender FROM tickets WHERE org_id = $1 AND requester = $2 AND channel = $3 AND status IN ('open', 'pending')
 ORDER BY created_at DESC LIMIT 1
 `
 
 type OpenTicketFromParams struct {
+	OrgID     *uuid.UUID
 	Requester string
 	Channel   string
 }
 
-// tenant: system - an open WhatsApp conversation with a number, to thread its next message.
+// An open WhatsApp conversation with a number, in the organisation that holds the number verified, to thread its next message.
 func (q *Queries) OpenTicketFrom(ctx context.Context, arg OpenTicketFromParams) (Ticket, error) {
-	row := q.db.QueryRow(ctx, openTicketFrom, arg.Requester, arg.Channel)
+	row := q.db.QueryRow(ctx, openTicketFrom, arg.OrgID, arg.Requester, arg.Channel)
 	var i Ticket
 	err := row.Scan(
 		&i.ID,
@@ -301,15 +340,16 @@ func (q *Queries) OpenTicketFrom(ctx context.Context, arg OpenTicketFromParams) 
 		&i.UpdatedAt,
 		&i.FirstResponseAt,
 		&i.RespondBy,
+		&i.UnverifiedSender,
 	)
 	return i, err
 }
 
 const orgByPhone = `-- name: OrgByPhone :one
-SELECT org_id FROM org_support_phones WHERE phone = $1
+SELECT org_id FROM org_support_phones WHERE phone = $1 AND verified_at IS NOT NULL
 `
 
-// tenant: system - a WhatsApp message's number names its organisation.
+// tenant: system - a WhatsApp message's number names its organisation, once verified.
 func (q *Queries) OrgByPhone(ctx context.Context, phone string) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, orgByPhone, phone)
 	var org_id uuid.UUID
@@ -330,7 +370,7 @@ func (q *Queries) OrgPlan(ctx context.Context, orgID uuid.UUID) (string, error) 
 }
 
 const orgSupportPhones = `-- name: OrgSupportPhones :many
-SELECT phone, org_id, added_by, created_at FROM org_support_phones WHERE org_id = $1 ORDER BY created_at
+SELECT phone, org_id, added_by, created_at, verified_at, code, code_expires_at FROM org_support_phones WHERE org_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) OrgSupportPhones(ctx context.Context, orgID uuid.UUID) ([]OrgSupportPhone, error) {
@@ -347,6 +387,9 @@ func (q *Queries) OrgSupportPhones(ctx context.Context, orgID uuid.UUID) ([]OrgS
 			&i.OrgID,
 			&i.AddedBy,
 			&i.CreatedAt,
+			&i.VerifiedAt,
+			&i.Code,
+			&i.CodeExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -359,7 +402,7 @@ func (q *Queries) OrgSupportPhones(ctx context.Context, orgID uuid.UUID) ([]OrgS
 }
 
 const orgTickets = `-- name: OrgTickets :many
-SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by FROM tickets WHERE org_id = $1 ORDER BY created_at DESC LIMIT 200
+SELECT id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by, unverified_sender FROM tickets WHERE org_id = $1 ORDER BY created_at DESC LIMIT 200
 `
 
 func (q *Queries) OrgTickets(ctx context.Context, orgID *uuid.UUID) ([]Ticket, error) {
@@ -388,6 +431,7 @@ func (q *Queries) OrgTickets(ctx context.Context, orgID *uuid.UUID) ([]Ticket, e
 			&i.UpdatedAt,
 			&i.FirstResponseAt,
 			&i.RespondBy,
+			&i.UnverifiedSender,
 		); err != nil {
 			return nil, err
 		}
@@ -400,9 +444,10 @@ func (q *Queries) OrgTickets(ctx context.Context, orgID *uuid.UUID) ([]Ticket, e
 }
 
 const orgsForEmail = `-- name: OrgsForEmail :many
-SELECT c.org_id, 0 AS rank FROM billing_contacts c WHERE c.email = $1::citext
+SELECT c.org_id, 0 AS rank FROM billing_contacts c WHERE c.email = $1::citext AND c.verified_at IS NOT NULL
 UNION ALL
-SELECT m.org_id, 1 FROM org_members m JOIN users u ON u.id = m.user_id WHERE u.email = $1::citext AND u.disabled_at IS NULL
+SELECT m.org_id, 1 FROM org_members m JOIN users u ON u.id = m.user_id
+WHERE u.email = $1::citext AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL
 ORDER BY rank
 `
 
@@ -411,7 +456,8 @@ type OrgsForEmailRow struct {
 	Rank  int32
 }
 
-// tenant: system - which organisations an inbound email's sender belongs to: billing contacts first, then members.
+// tenant: system - which organisations an inbound email's sender belongs to: verified billing contacts first (rank 0),
+// then members by their verified address (rank 1).
 func (q *Queries) OrgsForEmail(ctx context.Context, sender string) ([]OrgsForEmailRow, error) {
 	rows, err := q.db.Query(ctx, orgsForEmail, sender)
 	if err != nil {
@@ -422,6 +468,46 @@ func (q *Queries) OrgsForEmail(ctx context.Context, sender string) ([]OrgsForEma
 	for rows.Next() {
 		var i OrgsForEmailRow
 		if err := rows.Scan(&i.OrgID, &i.Rank); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pendingSupportPhonesByCode = `-- name: PendingSupportPhonesByCode :many
+SELECT phone, org_id, added_by, created_at, verified_at, code, code_expires_at FROM org_support_phones
+WHERE phone = $1 AND code = $2 AND verified_at IS NULL AND code_expires_at > $3
+`
+
+type PendingSupportPhonesByCodeParams struct {
+	Phone string
+	Code  *string
+	Now   *time.Time
+}
+
+// tenant: system - the pending registrations a code sent from a number confirms.
+func (q *Queries) PendingSupportPhonesByCode(ctx context.Context, arg PendingSupportPhonesByCodeParams) ([]OrgSupportPhone, error) {
+	rows, err := q.db.Query(ctx, pendingSupportPhonesByCode, arg.Phone, arg.Code, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OrgSupportPhone
+	for rows.Next() {
+		var i OrgSupportPhone
+		if err := rows.Scan(
+			&i.Phone,
+			&i.OrgID,
+			&i.AddedBy,
+			&i.CreatedAt,
+			&i.VerifiedAt,
+			&i.Code,
+			&i.CodeExpiresAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -487,7 +573,7 @@ func (q *Queries) SupportStaff(ctx context.Context) ([]SupportStaffRow, error) {
 }
 
 const ticketByMessageExternalID = `-- name: TicketByMessageExternalID :one
-SELECT t.id, t.number, t.org_id, t.requester, t.requester_name, t.requester_user_id, t.channel, t.subject, t.status, t.priority, t.plan, t.assignee, t.created_at, t.updated_at, t.first_response_at, t.respond_by FROM tickets t JOIN ticket_messages m ON m.ticket_id = t.id WHERE m.external_id = $1
+SELECT t.id, t.number, t.org_id, t.requester, t.requester_name, t.requester_user_id, t.channel, t.subject, t.status, t.priority, t.plan, t.assignee, t.created_at, t.updated_at, t.first_response_at, t.respond_by, t.unverified_sender FROM tickets t JOIN ticket_messages m ON m.ticket_id = t.id WHERE m.external_id = $1
 `
 
 // tenant: system - threading an inbound email by the Message-ID it replies to.
@@ -511,6 +597,7 @@ func (q *Queries) TicketByMessageExternalID(ctx context.Context, externalID *str
 		&i.UpdatedAt,
 		&i.FirstResponseAt,
 		&i.RespondBy,
+		&i.UnverifiedSender,
 	)
 	return i, err
 }
@@ -601,7 +688,7 @@ func (q *Queries) TicketResponded(ctx context.Context, id uuid.UUID) error {
 const updateTicket = `-- name: UpdateTicket :one
 UPDATE tickets SET status = $1, priority = $2, assignee = $3, org_id = $4,
   respond_by = $5, updated_at = now()
-WHERE id = $6 RETURNING id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by
+WHERE id = $6 RETURNING id, number, org_id, requester, requester_name, requester_user_id, channel, subject, status, priority, plan, assignee, created_at, updated_at, first_response_at, respond_by, unverified_sender
 `
 
 type UpdateTicketParams struct {
@@ -641,6 +728,26 @@ func (q *Queries) UpdateTicket(ctx context.Context, arg UpdateTicketParams) (Tic
 		&i.UpdatedAt,
 		&i.FirstResponseAt,
 		&i.RespondBy,
+		&i.UnverifiedSender,
 	)
 	return i, err
+}
+
+const verifySupportPhone = `-- name: VerifySupportPhone :execrows
+UPDATE org_support_phones SET verified_at = $1, code = NULL, code_expires_at = NULL
+WHERE org_id = $2 AND phone = $3 AND verified_at IS NULL
+`
+
+type VerifySupportPhoneParams struct {
+	Now   *time.Time
+	OrgID uuid.UUID
+	Phone string
+}
+
+func (q *Queries) VerifySupportPhone(ctx context.Context, arg VerifySupportPhoneParams) (int64, error) {
+	result, err := q.db.Exec(ctx, verifySupportPhone, arg.Now, arg.OrgID, arg.Phone)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

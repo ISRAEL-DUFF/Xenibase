@@ -2,9 +2,9 @@
 
 -- name: InsertTicket :one
 -- tenant: system - a ticket from email, WhatsApp or the dashboard; org_id is the requester's when known.
-INSERT INTO tickets (org_id, requester, requester_name, requester_user_id, channel, subject, priority, plan, respond_by)
+INSERT INTO tickets (org_id, requester, requester_name, requester_user_id, channel, subject, priority, plan, respond_by, unverified_sender)
 VALUES (sqlc.narg(org_id), @requester, sqlc.narg(requester_name), sqlc.narg(requester_user_id), @channel, @subject, @priority,
-  sqlc.narg(plan), sqlc.narg(respond_by))
+  sqlc.narg(plan), sqlc.narg(respond_by), @unverified_sender)
 RETURNING *;
 
 -- name: InsertTicketMessage :one
@@ -27,8 +27,8 @@ SELECT * FROM tickets WHERE number = @number;
 SELECT t.* FROM tickets t JOIN ticket_messages m ON m.ticket_id = t.id WHERE m.external_id = @external_id;
 
 -- name: OpenTicketFrom :one
--- tenant: system - an open WhatsApp conversation with a number, to thread its next message.
-SELECT * FROM tickets WHERE requester = @requester AND channel = @channel AND status IN ('open', 'pending')
+-- An open WhatsApp conversation with a number, in the organisation that holds the number verified, to thread its next message.
+SELECT * FROM tickets WHERE org_id = @org_id AND requester = @requester AND channel = @channel AND status IN ('open', 'pending')
 ORDER BY created_at DESC LIMIT 1;
 
 -- name: TicketMessages :many
@@ -73,23 +73,43 @@ SELECT count(*) FILTER (WHERE status = 'open')::bigint AS open,
 FROM tickets;
 
 -- name: OrgByPhone :one
--- tenant: system - a WhatsApp message's number names its organisation.
-SELECT org_id FROM org_support_phones WHERE phone = @phone;
+-- tenant: system - a WhatsApp message's number names its organisation, once verified.
+SELECT org_id FROM org_support_phones WHERE phone = @phone AND verified_at IS NOT NULL;
 
 -- name: OrgSupportPhones :many
 SELECT * FROM org_support_phones WHERE org_id = @org_id ORDER BY created_at;
 
 -- name: AddOrgSupportPhone :one
-INSERT INTO org_support_phones (phone, org_id, added_by) VALUES (@phone, @org_id, sqlc.narg(added_by)) RETURNING *;
+-- A pending registration, or a fresh code for one; none for a number the org already verified.
+INSERT INTO org_support_phones (phone, org_id, added_by, code, code_expires_at)
+VALUES (@phone, @org_id, sqlc.narg(added_by), @code, @code_expires_at)
+ON CONFLICT (org_id, phone) DO UPDATE SET code = EXCLUDED.code, code_expires_at = EXCLUDED.code_expires_at, added_by = EXCLUDED.added_by
+WHERE org_support_phones.verified_at IS NULL
+RETURNING *;
+
+-- name: PendingSupportPhonesByCode :many
+-- tenant: system - the pending registrations a code sent from a number confirms.
+SELECT * FROM org_support_phones
+WHERE phone = @phone AND code = @code AND verified_at IS NULL AND code_expires_at > @now;
+
+-- name: VerifySupportPhone :execrows
+UPDATE org_support_phones SET verified_at = @now, code = NULL, code_expires_at = NULL
+WHERE org_id = @org_id AND phone = @phone AND verified_at IS NULL;
+
+-- name: DropPendingSupportPhones :exec
+-- tenant: system - a number verified by one organisation drops the others' pending registrations.
+DELETE FROM org_support_phones WHERE phone = @phone AND org_id <> @org_id AND verified_at IS NULL;
 
 -- name: RemoveOrgSupportPhone :execrows
 DELETE FROM org_support_phones WHERE org_id = @org_id AND phone = @phone;
 
 -- name: OrgsForEmail :many
--- tenant: system - which organisations an inbound email's sender belongs to: billing contacts first, then members.
-SELECT c.org_id, 0 AS rank FROM billing_contacts c WHERE c.email = @sender::citext
+-- tenant: system - which organisations an inbound email's sender belongs to: verified billing contacts first (rank 0),
+-- then members by their verified address (rank 1).
+SELECT c.org_id, 0 AS rank FROM billing_contacts c WHERE c.email = @sender::citext AND c.verified_at IS NOT NULL
 UNION ALL
-SELECT m.org_id, 1 FROM org_members m JOIN users u ON u.id = m.user_id WHERE u.email = @sender::citext AND u.disabled_at IS NULL
+SELECT m.org_id, 1 FROM org_members m JOIN users u ON u.id = m.user_id
+WHERE u.email = @sender::citext AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL
 ORDER BY rank;
 
 -- name: OrgPlan :one

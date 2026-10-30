@@ -5082,6 +5082,9 @@ type BillingContact struct {
 
 	// StatusEmails Gets the status page's incident emails while the organisation is on a paid plan (default true).
 	StatusEmails *bool `json:"status_emails,omitempty"`
+
+	// Verified A member's verified address, or confirmed from the emailed link. Only a verified contact's email to support opens tickets for the organisation; billing email goes to every contact.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 // BillingDetailsUpdate defines model for BillingDetailsUpdate.
@@ -9539,8 +9542,14 @@ type SupportOperation struct {
 
 // SupportPhone defines model for SupportPhone.
 type SupportPhone struct {
-	CreatedAt time.Time `json:"created_at"`
-	Phone     string    `json:"phone"`
+	// Code While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678.
+	Code          *string    `json:"code,omitempty"`
+	CodeExpiresAt *time.Time `json:"code_expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	Phone         string     `json:"phone"`
+
+	// Verified The code was sent from the number; only then do its messages open tickets.
+	Verified bool `json:"verified"`
 }
 
 // SupportProject defines model for SupportProject.
@@ -9695,7 +9704,10 @@ type Ticket struct {
 	RespondBy *time.Time   `json:"respond_by,omitempty"`
 	Status    TicketStatus `json:"status"`
 	Subject   string       `json:"subject"`
-	UpdatedAt time.Time    `json:"updated_at"`
+
+	// UnverifiedSender An email whose sender the provider didn't authenticate (no DMARC pass, nor aligned DKIM and SPF passes): the From address may be forged, so the ticket has no organisation.
+	UnverifiedSender bool      `json:"unverified_sender"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // TicketChannel defines model for Ticket.Channel.
@@ -11174,6 +11186,9 @@ type ResendVerificationJSONRequestBody = EmailRequest
 
 // RestoreBackupJSONRequestBody defines body for RestoreBackup for application/json ContentType.
 type RestoreBackupJSONRequestBody = RestoreRequest
+
+// ConfirmBillingContactJSONRequestBody defines body for ConfirmBillingContact for application/json ContentType.
+type ConfirmBillingContactJSONRequestBody = TokenRequest
 
 // CreateDevOperationJSONRequestBody defines body for CreateDevOperation for application/json ContentType.
 type CreateDevOperationJSONRequestBody = NoopParams
@@ -12991,6 +13006,24 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/backups/{id}/restore (the `RestoreBackup` operationId).
 	RestoreBackup(ctx context.Context, id BackupID, body RestoreBackupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ConfirmBillingContactWithBody Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContactWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContact(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// CreateDevOperationWithBody Enqueue a dummy operation (development only)
 	//
 	// Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -13678,12 +13711,16 @@ type ClientInterface interface {
 
 	// AddBillingContactWithBody Add a billing contact
 	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
 	AddBillingContactWithBody(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AddBillingContact Add a billing contact
+	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -13984,12 +14021,16 @@ type ClientInterface interface {
 
 	// AddSupportPhoneWithBody Register a WhatsApp number (E.164) for the organisation's support
 	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
 	AddSupportPhoneWithBody(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AddSupportPhone Register a WhatsApp number (E.164) for the organisation's support
+	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -15976,6 +16017,12 @@ type ClientInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -15987,6 +16034,12 @@ type ClientInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -19422,6 +19475,44 @@ func (c *Client) RestoreBackup(ctx context.Context, id BackupID, body RestoreBac
 	return c.Client.Do(req)
 }
 
+// ConfirmBillingContactWithBody Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *Client) ConfirmBillingContactWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewConfirmBillingContactRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *Client) ConfirmBillingContact(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewConfirmBillingContactRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // CreateDevOperationWithBody Enqueue a dummy operation (development only)
 //
 // Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -21009,6 +21100,8 @@ func (c *Client) ListBillingContacts(ctx context.Context, org OrgID, reqEditors 
 
 // AddBillingContactWithBody Add a billing contact
 //
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
@@ -21025,6 +21118,8 @@ func (c *Client) AddBillingContactWithBody(ctx context.Context, org OrgID, conte
 }
 
 // AddBillingContact Add a billing contact
+//
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -21795,6 +21890,8 @@ func (c *Client) ListSupportPhones(ctx context.Context, org OrgID, reqEditors ..
 
 // AddSupportPhoneWithBody Register a WhatsApp number (E.164) for the organisation's support
 //
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
@@ -21811,6 +21908,8 @@ func (c *Client) AddSupportPhoneWithBody(ctx context.Context, org OrgID, content
 }
 
 // AddSupportPhone Register a WhatsApp number (E.164) for the organisation's support
+//
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -26277,6 +26376,12 @@ func (c *Client) TestStorageTarget(ctx context.Context, params *TestStorageTarge
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes any type of body and a specified content type.
 //
@@ -26298,6 +26403,12 @@ func (c *Client) SupportInboundEmailWithBody(ctx context.Context, contentType st
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -32042,6 +32153,46 @@ func NewRestoreBackupRequestWithBody(server string, id BackupID, contentType str
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/backups/%s/restore", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewConfirmBillingContactRequest calls the generic ConfirmBillingContact builder with application/json body
+func NewConfirmBillingContactRequest(server string, body ConfirmBillingContactJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewConfirmBillingContactRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewConfirmBillingContactRequestWithBody constructs an http.Request for the ConfirmBillingContact method, with any body, and a specified content type
+func NewConfirmBillingContactRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/billing/contacts/confirm")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -46190,6 +46341,24 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /api/v1/backups/{id}/restore (the `RestoreBackup` operationId).
 	RestoreBackupWithResponse(ctx context.Context, id BackupID, body RestoreBackupJSONRequestBody, reqEditors ...RequestEditorFn) (*RestoreBackupResponse, error)
 
+	// ConfirmBillingContactWithBodyWithResponse Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContactWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error)
+
+	// ConfirmBillingContactWithResponse Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContactWithResponse(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error)
+
 	// CreateDevOperationWithBodyWithResponse Enqueue a dummy operation (development only)
 	//
 	// Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -46933,12 +47102,16 @@ type ClientWithResponsesInterface interface {
 
 	// AddBillingContactWithBodyWithResponse Add a billing contact
 	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
 	AddBillingContactWithBodyWithResponse(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AddBillingContactResponse, error)
 
 	// AddBillingContactWithResponse Add a billing contact
+	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -47293,12 +47466,16 @@ type ClientWithResponsesInterface interface {
 
 	// AddSupportPhoneWithBodyWithResponse Register a WhatsApp number (E.164) for the organisation's support
 	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
 	AddSupportPhoneWithBodyWithResponse(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AddSupportPhoneResponse, error)
 
 	// AddSupportPhoneWithResponse Register a WhatsApp number (E.164) for the organisation's support
+	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -49485,6 +49662,12 @@ type ClientWithResponsesInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -49496,6 +49679,12 @@ type ClientWithResponsesInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -55998,6 +56187,60 @@ func (r RestoreBackupResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r RestoreBackupResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ConfirmBillingContactResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *struct {
+		Email   string `json:"email"`
+		OrgName string `json:"org_name"`
+	}
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ConfirmBillingContactResponse) GetJSON200() *struct {
+	Email   string `json:"email"`
+	OrgName string `json:"org_name"`
+} {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ConfirmBillingContactResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ConfirmBillingContactResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ConfirmBillingContactResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ConfirmBillingContactResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ConfirmBillingContactResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -71953,6 +72196,36 @@ func (c *ClientWithResponses) RestoreBackupWithResponse(ctx context.Context, id 
 	return ParseRestoreBackupResponse(rsp)
 }
 
+// ConfirmBillingContactWithBodyWithResponse Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *ClientWithResponses) ConfirmBillingContactWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error) {
+	rsp, err := c.ConfirmBillingContactWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseConfirmBillingContactResponse(rsp)
+}
+
+// ConfirmBillingContactWithResponse Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *ClientWithResponses) ConfirmBillingContactWithResponse(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error) {
+	rsp, err := c.ConfirmBillingContact(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseConfirmBillingContactResponse(rsp)
+}
+
 // CreateDevOperationWithBodyWithResponse Enqueue a dummy operation (development only)
 //
 // Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -73236,6 +73509,8 @@ func (c *ClientWithResponses) ListBillingContactsWithResponse(ctx context.Contex
 
 // AddBillingContactWithBodyWithResponse Add a billing contact
 //
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
@@ -73248,6 +73523,8 @@ func (c *ClientWithResponses) AddBillingContactWithBodyWithResponse(ctx context.
 }
 
 // AddBillingContactWithResponse Add a billing contact
+//
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -73884,6 +74161,8 @@ func (c *ClientWithResponses) ListSupportPhonesWithResponse(ctx context.Context,
 
 // AddSupportPhoneWithBodyWithResponse Register a WhatsApp number (E.164) for the organisation's support
 //
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
@@ -73896,6 +74175,8 @@ func (c *ClientWithResponses) AddSupportPhoneWithBodyWithResponse(ctx context.Co
 }
 
 // AddSupportPhoneWithResponse Register a WhatsApp number (E.164) for the organisation's support
+//
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -77570,6 +77851,12 @@ func (c *ClientWithResponses) TestStorageTargetWithResponse(ctx context.Context,
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -77587,6 +77874,12 @@ func (c *ClientWithResponses) SupportInboundEmailWithBodyWithResponse(ctx contex
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -82164,6 +82457,42 @@ func ParseRestoreBackupResponse(rsp *http.Response) (*RestoreBackupResponse, err
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseConfirmBillingContactResponse parses an HTTP response from a ConfirmBillingContactWithResponse call
+func ParseConfirmBillingContactResponse(rsp *http.Response) (*ConfirmBillingContactResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ConfirmBillingContactResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Email   string `json:"email"`
+			OrgName string `json:"org_name"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

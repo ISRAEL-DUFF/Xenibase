@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,13 @@ func (m *sentMail) Send(_ context.Context, msg mail.Message) error {
 	defer m.mu.Unlock()
 	m.msgs = append(m.msgs, msg)
 	return nil
+}
+
+// reset forgets what was sent (a new contact's confirmation link).
+func (m *sentMail) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.msgs = nil
 }
 
 // all is a copy of what was sent: mail goes out from background work (a
@@ -196,6 +205,7 @@ func TestPriceBookPublishing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	sent.reset()
 	for slug, term := range map[string]string{"monthly": billing.TermMonthly, "annual": billing.TermAnnual, "grandfathered": billing.TermMonthly} {
 		if _, err := s.ChangePlan(ctx, orgs[slug], billing.PlanRequest{Plan: billing.PlanPro, Term: term}); err != nil {
 			t.Fatal(err)
@@ -277,5 +287,67 @@ func TestContacts(t *testing.T) {
 	}
 	if err := s.RemoveContact(ctx, org, "ap@example.com"); !errors.Is(err, billing.ErrNotFound) {
 		t.Errorf("remove twice: %v", err)
+	}
+}
+
+// TestContactVerification: a billing contact routes support email to the
+// organisation only once verified (F2). A member's verified address is at
+// once; any other gets a confirmation link, and billing email meanwhile.
+func TestContactVerification(t *testing.T) {
+	s, db, clk, sent := newService(t)
+	ctx := context.Background()
+	org := newOrg(t, db, "acme")
+	if _, err := db.Exec(ctx, `WITH u AS (INSERT INTO users (email, password_hash, email_verified_at) VALUES ('fin@acme.example', 'x', now()) RETURNING id)
+		INSERT INTO org_members (org_id, user_id, role) SELECT $1, id, 'billing' FROM u`, org); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.AddContact(ctx, org, "Fin@acme.example", nil); err != nil || c.VerifiedAt == nil {
+		t.Fatalf("a member's address: %+v %v", c, err)
+	}
+	if len(sent.all()) != 0 {
+		t.Error("a member's address was sent a confirmation")
+	}
+
+	c, err := s.AddContact(ctx, org, "victim@b.example", nil)
+	if err != nil || c.VerifiedAt != nil {
+		t.Fatalf("an outside address: %+v %v", c, err)
+	}
+	msgs := sent.all()
+	if len(msgs) != 1 || msgs[0].To[0] != "victim@b.example" || !strings.Contains(msgs[0].Subject, "Confirm") {
+		t.Fatalf("confirmation: %+v", msgs)
+	}
+	m := regexp.MustCompile(`/confirm-contact\?token=([A-Za-z0-9_-]+)`).FindStringSubmatch(msgs[0].Body)
+	if m == nil {
+		t.Fatalf("no link in %q", msgs[0].Body)
+	}
+	// Adding it again straight away doesn't send another.
+	if _, err := s.AddContact(ctx, org, "victim@b.example", nil); err != nil || len(sent.all()) != 1 {
+		t.Fatalf("again: %d %v", len(sent.all()), err)
+	}
+	// Billing email still goes to it.
+	to, _ := store.New(db).BillingRecipients(ctx, org)
+	if !slices.Contains(to, "victim@b.example") {
+		t.Errorf("billing recipients: %v", to)
+	}
+	if _, _, err := s.ConfirmContact(ctx, "not-the-token"); !errors.Is(err, billing.ErrInvalid) {
+		t.Errorf("a wrong token: %v", err)
+	}
+	got, name, err := s.ConfirmContact(ctx, m[1])
+	if err != nil || got.VerifiedAt == nil || got.Email != "victim@b.example" || name != "acme" {
+		t.Fatalf("confirm: %+v %q %v", got, name, err)
+	}
+	if _, _, err := s.ConfirmContact(ctx, m[1]); !errors.Is(err, billing.ErrInvalid) {
+		t.Errorf("a used token: %v", err)
+	}
+
+	// A link past its week does nothing.
+	if _, err := s.AddContact(ctx, org, "late@c.example", nil); err != nil {
+		t.Fatal(err)
+	}
+	msgs = sent.all()
+	late := regexp.MustCompile(`/confirm-contact\?token=([A-Za-z0-9_-]+)`).FindStringSubmatch(msgs[len(msgs)-1].Body)
+	clk.t = clk.t.Add(billing.ContactConfirmTTL + time.Minute)
+	if _, _, err := s.ConfirmContact(ctx, late[1]); !errors.Is(err, billing.ErrInvalid) {
+		t.Errorf("an expired token: %v", err)
 	}
 }

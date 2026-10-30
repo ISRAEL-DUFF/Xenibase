@@ -2,7 +2,15 @@ package billing
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/google/uuid"
 
@@ -40,6 +48,71 @@ func (s *Service) notifyContent(ctx context.Context, orgID uuid.UUID, event, sub
 	m.Headers = map[string]string{"X-Xenibase-Event": event}
 	if err := s.mail.Send(ctx, m); err != nil {
 		s.log.Warn("billing email", "org", orgID, "event", event, "err", err)
+	}
+}
+
+// ContactConfirmTTL is how long a billing contact's confirmation link works.
+const ContactConfirmTTL = 7 * 24 * time.Hour
+
+// sendContactConfirmation emails addr a link that verifies it as orgID's
+// billing contact. Only the token's SHA-256 is kept.
+func (s *Service) sendContactConfirmation(ctx context.Context, orgID uuid.UUID, addr string) error {
+	if s.mail == nil {
+		return nil
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(token))
+	now := s.Now()
+	exp := now.Add(ContactConfirmTTL)
+	if err := store.New(s.db).SetBillingContactVerifyToken(ctx, store.SetBillingContactVerifyTokenParams{
+		OrgID: orgID, Email: addr, TokenHash: sum[:], ExpiresAt: &exp, Now: &now,
+	}); err != nil {
+		return err
+	}
+	subject, c := s.contactConfirmEmail(s.orgName(ctx, orgID), token)
+	m := mail.Compose([]string{addr}, subject, c)
+	m.Headers = map[string]string{"X-Xenibase-Event": "billing.contact_confirm"}
+	return s.mail.Send(ctx, m)
+}
+
+// ConfirmContact verifies the billing contact a confirmation link's token
+// names, returning it and its organisation's name.
+func (s *Service) ConfirmContact(ctx context.Context, token string) (store.BillingContact, string, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return store.BillingContact{}, "", invalid("the link is missing its token")
+	}
+	sum := sha256.Sum256([]byte(token))
+	now := s.Now()
+	c, err := store.New(s.db).ConfirmBillingContact(ctx, store.ConfirmBillingContactParams{TokenHash: sum[:], Now: &now})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c, "", invalid("this link has expired or was used already; ask the organisation to add the address again")
+	}
+	if err != nil {
+		return c, "", err
+	}
+	return c, s.orgName(ctx, c.OrgID), nil
+}
+
+// contactConfirmEmail asks the owner of an address an organisation added
+// as its billing contact to confirm it. Confirming lets the address's
+// support email reach the organisation, so it says so.
+func (s *Service) contactConfirmEmail(org, token string) (string, mail.Content) {
+	return "Confirm you're a billing contact for " + mail.Inert(org), mail.Content{
+		Preheader: "Confirm only if you work with this organisation.",
+		Title:     "Confirm this billing contact",
+		Blocks: []mail.Block{
+			mail.P("Hello,"),
+			mail.P(fmt.Sprintf("Someone at %s added this address as a billing contact on Xenibase. It gets the organisation's invoices and payment email.", mail.Inert(org))),
+			mail.P("Once you confirm, email you send to Xenibase support opens tickets for " + mail.Inert(org) + ", which its owners and admins can read. Confirm only if you work with them; otherwise ignore this email."),
+			mail.Button("Confirm", s.publicURL+"/confirm-contact?token="+token),
+			mail.P("The link works for 7 days."),
+		},
+		SignOff: mail.SignOff,
 	}
 }
 

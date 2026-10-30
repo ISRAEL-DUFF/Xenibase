@@ -490,6 +490,12 @@ export const api = {
     request<S["VerifyEmailResult"]>("POST", "/api/v1/auth/verify-email", {
       token,
     }),
+  confirmBillingContact: (token: string) =>
+    request<{ email: string; org_name: string }>(
+      "POST",
+      "/api/v1/billing/contacts/confirm",
+      { token },
+    ),
   resendVerification: (email: string) =>
     request<void>("POST", "/api/v1/auth/verify-email/resend", { email }),
   requestPasswordReset: (email: string) =>
