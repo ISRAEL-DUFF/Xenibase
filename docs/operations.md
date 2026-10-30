@@ -340,7 +340,7 @@ organisation's own shared cluster if it has one), from its latest backup
 or live, schema only or with data. Developers and above create them under
 **Database → Branches** or with `xenibase branch create`; they expire after
 7 days unless given another TTL (1 hour to 30 days, or kept), the
-creator is emailed a day before, and an hourly job deletes expired ones
+creator is emailed a day before, and a sweep every 10 minutes deletes expired ones
 without a final backup. **Reset** refills a branch from its parent while
 keeping its database name, URL, password and members' logins;
 **Detach** turns it into a standalone project (which can then be

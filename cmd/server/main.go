@@ -359,7 +359,7 @@ func run() error {
 		})
 	}
 
-	// Database branches and their hourly expiry (V2 §8).
+	// Database branches and their expiry, swept every 10 minutes (V2 §8, decision M13 #4).
 	var branchSvc *branching.Service
 	if backups != nil {
 		branchSvc = branching.New(pool, projects, backups, nodeSvc, mailSvc, branching.Config{PublicURL: cfg.Insight.PublicURL}, log)

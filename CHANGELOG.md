@@ -39,6 +39,14 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **The security review no longer overstates sign-out.** `docs/security-review.md`
+  (ASVS 3.3.1) said an ended session's access tokens are refused at once.
+  That holds for `/auth/v1` only: the data API, storage and realtime accept
+  an access token until it expires (an hour by default, up to a day). The
+  review now says so and lists it under Accepted. Stale text elsewhere is
+  corrected too: the branch sweep runs every 10 minutes, not hourly
+  (`docs/operations.md` and a comment), and `docs/load-test.md` describes
+  the realtime load test it pointed to.
 - **A status page push is bound to its endpoint.** The push signature
   covered the timestamp and body only, so a signed heartbeat replayed to
   `PUT /api/v1/subscribers/managed` decoded as an empty list and deleted
