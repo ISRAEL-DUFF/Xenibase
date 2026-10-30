@@ -45,7 +45,7 @@ SET status = 'running', attempts = attempts + 1, locked_by = $1::text, locked_at
 WHERE id = (
   SELECT o.id FROM operations o
   WHERE o.status = 'queued' AND o.run_after <= now() AND o.kind = ANY($2::text[])
-  ORDER BY o.run_after, o.created_at
+  ORDER BY (o.kind = ANY($3::text[])) IS TRUE DESC, o.run_after, o.created_at
   FOR UPDATE SKIP LOCKED
   LIMIT 1
 )
@@ -53,16 +53,19 @@ RETURNING id, kind, project_id, params, status, attempts, run_after, locked_by, 
 `
 
 type ClaimOperationParams struct {
-	Worker string
-	Kinds  []string
+	Worker     string
+	Kinds      []string
+	FirstKinds []string
 }
 
 // ClaimOperation takes the next runnable operation of one of the given
-// kinds. SKIP LOCKED lets any number of workers claim concurrently without
-// blocking each other or double-claiming.
+// kinds: one of first_kinds (the interactive ones) if any is runnable,
+// otherwise the oldest. The runner leaves out of kinds the classes whose
+// slots are full. SKIP LOCKED lets any number of workers claim
+// concurrently without blocking each other or double-claiming.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) ClaimOperation(ctx context.Context, arg ClaimOperationParams) (Operation, error) {
-	row := q.db.QueryRow(ctx, claimOperation, arg.Worker, arg.Kinds)
+	row := q.db.QueryRow(ctx, claimOperation, arg.Worker, arg.Kinds, arg.FirstKinds)
 	var i Operation
 	err := row.Scan(
 		&i.ID,
@@ -319,15 +322,54 @@ SELECT EXISTS (
 )
 `
 
-// ProjectHasActiveOperation reports any operation queued or running on
-// the project, background ones included: a new exclusive one waits for
-// them too.
 // tenant: system - the job runner, or an operation the request already authorized; API lists use ListOrgOperations.
 func (q *Queries) ProjectHasActiveOperation(ctx context.Context, projectID *uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, projectHasActiveOperation, projectID)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const queuedOperationAges = `-- name: QueuedOperationAges :many
+SELECT kind, count(*)::bigint AS queued,
+       extract(epoch FROM now() - min(run_after))::float8 AS waited_seconds
+FROM operations
+WHERE status = 'queued' AND run_after <= now()
+GROUP BY kind
+ORDER BY kind
+`
+
+type QueuedOperationAgesRow struct {
+	Kind          string
+	Queued        int64
+	WaitedSeconds float64
+}
+
+// ProjectHasActiveOperation reports any operation queued or running on
+// the project, background ones included: a new exclusive one waits for
+// them too.
+// QueuedOperationAges is, per kind, how many runnable operations wait and
+// how long the oldest has (since its run_after, on the database's clock),
+// for the queue-age alert.
+// tenant: system - the queue-age alert looks at the whole queue, every organisation's operations.
+func (q *Queries) QueuedOperationAges(ctx context.Context) ([]QueuedOperationAgesRow, error) {
+	rows, err := q.db.Query(ctx, queuedOperationAges)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []QueuedOperationAgesRow
+	for rows.Next() {
+		var i QueuedOperationAgesRow
+		if err := rows.Scan(&i.Kind, &i.Queued, &i.WaitedSeconds); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const reclaimStaleOperations = `-- name: ReclaimStaleOperations :many

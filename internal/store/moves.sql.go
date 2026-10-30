@@ -56,6 +56,92 @@ func (q *Queries) LatestMoves(ctx context.Context, arg LatestMovesParams) ([]Mov
 	return items, nil
 }
 
+const listProjectsLeftWithoutOperation = `-- name: ListProjectsLeftWithoutOperation :many
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
+WHERE p.deleted_at IS NULL
+  AND p.status NOT IN ('active', 'deleted')
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id AND o.status IN ('queued', 'running'))
+  AND coalesce((SELECT max(o.finished_at) FROM operations o WHERE o.project_id = p.id), p.created_at)
+      < now() - make_interval(secs => $1::float8)
+ORDER BY p.created_at
+`
+
+// ListProjectsLeftWithoutOperation finds live projects in any status but
+// active (paused and archived projects are active, with a lifecycle) that
+// no queued or running operation will move on: a move-like rollback that
+// could not unfreeze, or a create, restore or delete whose operation ended
+// without its project's final status, or one left in error. stuck_seconds
+// is how long since the project's last operation ended. For the
+// project_stuck alert; RepairStuckMoves repairs only ListStuckProjects'.
+// tenant: system - the project_stuck alert reports every organisation's projects.
+func (q *Queries) ListProjectsLeftWithoutOperation(ctx context.Context, stuckSeconds float64) ([]Project, error) {
+	rows, err := q.db.Query(ctx, listProjectsLeftWithoutOperation, stuckSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Project
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slug,
+			&i.DbName,
+			&i.OwnerRole,
+			&i.ScramVerifier,
+			&i.Tier,
+			&i.InstanceID,
+			&i.Status,
+			&i.Settings,
+			&i.StorageTargetID,
+			&i.Extensions,
+			&i.Description,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.DeletedAt,
+			&i.OrgID,
+			&i.AliasDbName,
+			&i.LegacyOwnerRole,
+			&i.LegacyScramVerifier,
+			&i.LegacyUntil,
+			&i.StorageState,
+			&i.StorageStateAt,
+			&i.BackupKeyID,
+			&i.ParentProjectID,
+			&i.BranchSource,
+			&i.BranchSchemaOnly,
+			&i.ExpiresAt,
+			&i.ExpiryNotifiedAt,
+			&i.BranchBackups,
+			&i.SensitiveData,
+			&i.ProbeVerifier,
+			&i.Lifecycle,
+			&i.LastActiveAt,
+			&i.PauseWarnedAt,
+			&i.PausedAt,
+			&i.ArchivedAt,
+			&i.ArchiveBackupID,
+			&i.ArchiveNoticeDays,
+			&i.Region,
+			&i.DataResidency,
+			&i.ForwardRegion,
+			&i.ForwardUntil,
+			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStuckProjects = `-- name: ListStuckProjects :many
 SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 WHERE p.deleted_at IS NULL

@@ -1071,6 +1071,35 @@ bundle share one version (spec §11.5).
   reachable from the commit (not one on the commit itself, so CI on a
   release tag upgrades from the release before), falling back to v4.1.0;
   `UPGRADE_FROM` still overrides it.
+- **Interactive operations no longer wait behind moves and backups.** The
+  queue took the oldest runnable operation, 4 at a time per server, so two
+  48-hour moves and the nightly backups (all queued between 02:00 and
+  04:00 UTC) could hold every slot while a create, restore or delete
+  waited. Each operation kind now has a class: interactive (create,
+  delete, restore, rotate, settings, pause and resume, branches, the
+  default), long (moves, major upgrades, promotion and demotion, HA
+  enable, replicas, resizes, imports, Supabase user and storage copies,
+  branch file copies, Move all) or scheduled (backups, base backups,
+  restore tests, the metadata backup, storage switches, isolation checks,
+  minor upgrades, the Free tier's pause and archive, the V1 renames and
+  credential expiry). A server claims interactive operations first, and
+  lets long ones hold at most half its slots and long and scheduled ones
+  together all but one, so with the default 4 slots at most 2 long and 3
+  scheduled operations run at once and one slot is always free for
+  interactive work. The claim keeps `SKIP LOCKED`, the lease, the one
+  exclusive operation per project and the per-organisation limit. A new
+  `queue_age` alert fires when the oldest runnable operation of a class
+  has waited longer than 15 minutes (interactive, critical) or an hour
+  (long and scheduled, warning).
+- **Every stuck project raises `project_stuck`.** The alert covered
+  projects left `moving`, `promoting`, `demoting` or `upgrading` only. It
+  now covers a live project in any status but `active` (paused and
+  archived projects are `active`) with no queued or running operation 10
+  minutes after its last one ended: also `provisioning`, `restoring` and
+  `deleting` (critical: nothing repairs them, see `docs/operations.md`)
+  and `error` (warning: delete the project once the cause is fixed). The
+  repair loop still thaws only the move-like statuses, the ones with a
+  safe automatic repair.
 
 ### Upgrading
 - Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
@@ -1211,6 +1240,20 @@ bundle share one version (spec §11.5).
   and an organisation already at its allowance gets new replicas and
   dedicated projects refused (or a promotion turned into a request) until
   the allowance is raised.
+- The operations queue has classes (no migration). With the default 4
+  workers a server runs at most 2 long operations (moves, upgrades, HA,
+  replicas, resizes, imports) and 3 scheduled ones (backups and other
+  timetabled work) at once, where it used to run 4 of either: a night with
+  many projects to back up takes longer, and `queue_age` warns if a
+  scheduled operation waits over an hour. Raise `XENIBASE_WORKERS` for
+  more of both; with `XENIBASE_WORKERS=1` nothing is kept back. Servers of
+  an older release sharing the metadata database still claim oldest first
+  until upgraded.
+- `project_stuck` now also fires for projects left `provisioning`,
+  `restoring`, `deleting` or `error` with no operation, so an install may
+  see it for such projects at the first evaluation after the upgrade.
+  Delete a project in `error`; the others need repair by hand
+  (`docs/operations.md`, "Projects stuck in a status").
 
 ## v4.2.4
 

@@ -568,6 +568,8 @@ func run() error {
 		alertCfg := alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
 			PoolerSkipped: pm.Skipped,
+			// Every kind is in kinds by now; the runner below serves the same map.
+			OperationClass: jobs.Classifier(kinds),
 		}
 		if nodeSvc != nil {
 			alertCfg.ClientCertExpiry = nodeSvc.ClientCertExpiry
