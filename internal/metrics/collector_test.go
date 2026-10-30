@@ -202,8 +202,14 @@ func TestInstanceConnectionReused(t *testing.T) {
 		t.Fatal(err)
 	}
 	var open int
-	if err := db.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE application_name = 'xenibase-metrics-test'`).Scan(&open); err != nil {
-		t.Fatal(err)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		// The backend exits shortly after the client closes.
+		if err := db.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE application_name = 'xenibase-metrics-test'`).Scan(&open); err != nil {
+			t.Fatal(err)
+		}
+		if open == 0 || time.Now().After(deadline) {
+			break
+		}
 	}
 	if open != 0 || len(c.conns) != 0 {
 		t.Fatalf("%d instance connections still open (%d kept), want none", open, len(c.conns))
@@ -283,3 +289,21 @@ func TestOtherServersPoolerReadings(t *testing.T) {
 	}
 }
 
+// Instance series carry the instance's labels on /metrics.
+func TestPrometheusInstanceSeries(t *testing.T) {
+	db, _, p := setup(t)
+	ctx := context.Background()
+	if err := store.New(db).UpsertMetricPoints(ctx, store.UpsertMetricPointsParams{
+		Scope: ScopeInstance, ScopeIds: []uuid.UUID{p.InstanceID}, Metrics: []string{WebhookListenConnections}, Ts: bucket(time.Now()), Vals: []float64{7},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := WritePrometheus(ctx, &out, db, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	want := `xenibase_instance_webhook_listen_connections{instance_id="` + p.InstanceID.String() + `",kind="shared",node_id=`
+	if !strings.Contains(out.String(), want) || !strings.Contains(out.String(), `,node="n1"} 7`) {
+		t.Fatalf("/metrics lacks the instance series %s...:\n%s", want, out.String())
+	}
+}

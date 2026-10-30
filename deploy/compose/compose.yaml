@@ -103,6 +103,13 @@ services:
       XENIBASE_BACKUP_HOUR: ${XENIBASE_BACKUP_HOUR:-2}
       XENIBASE_METRICS_INTERVAL: ${XENIBASE_METRICS_INTERVAL:-1m}
       XENIBASE_TENANCY_SWEEP_INTERVAL: ${XENIBASE_TENANCY_SWEEP_INTERVAL:-5m}
+      # Webhook delivery's direct LISTEN connections, outside the poolers:
+      # at most this many per instance (the shared cluster below has
+      # max_connections=500), released after the outbox has had nothing to
+      # send for IDLE_AFTER; other projects are polled every IDLE_POLL.
+      XENIBASE_WEBHOOK_LISTEN_MAX: ${XENIBASE_WEBHOOK_LISTEN_MAX:-50}
+      XENIBASE_WEBHOOK_IDLE_AFTER: ${XENIBASE_WEBHOOK_IDLE_AFTER:-10m}
+      XENIBASE_WEBHOOK_IDLE_POLL: ${XENIBASE_WEBHOOK_IDLE_POLL:-30s}
       # Query insights (V3 §8): which plans get them, how often
       # pg_stat_statements is read, and the slow-query threshold.
       XENIBASE_INSIGHTS_PLANS: ${XENIBASE_INSIGHTS_PLANS:-pro,team}

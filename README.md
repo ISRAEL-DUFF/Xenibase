@@ -282,7 +282,10 @@ with `NOTIFY`, which wakes idle workers and drives the SSE stream at
 | `XENIBASE_SHARED_NODE_ROLE` | `both` | Role of the node registered from `XENIBASE_SHARED_ADMIN_URL`, when first registered |
 | `XENIBASE_DEDICATED_ADMIN_VIA` | `network` | How xenibase-server reaches dedicated instances: `network` (the agent's Docker network) or `published` (the port published on the node) |
 | `XENIBASE_CONSOLE_DISABLED` | `false` | Turns the SQL console and table browser off for every project |
-| `XENIBASE_METRICS_INTERVAL` | `1m` | How often project and node metrics are sampled |
+| `XENIBASE_METRICS_INTERVAL` | `1m` | How often project and node metrics are sampled (by one server at a time) |
+| `XENIBASE_WEBHOOK_LISTEN_MAX` | `50` | Most direct `LISTEN` connections webhook delivery holds to one instance, outside the poolers; projects past it are polled. `0`: none, every project is polled |
+| `XENIBASE_WEBHOOK_IDLE_AFTER` | `10m` | A project's `LISTEN` connection is released once its outbox has had nothing to send this long |
+| `XENIBASE_WEBHOOK_IDLE_POLL` | `30s` | How often the outbox of a project without a `LISTEN` connection is read |
 | `XENIBASE_METRICS_TOKEN` | | Bearer token for scraping `/metrics` (24+ characters); without it only signed-in operators can read it |
 | `XENIBASE_ALERTS_INTERVAL` | `30s` | How often alert conditions are checked |
 | `XENIBASE_PUBLIC_URL` | | The web UI's address, for links in alerts (`install.sh` sets it) |

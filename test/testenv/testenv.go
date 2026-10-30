@@ -473,7 +473,7 @@ func Start(t testing.TB, opts Options) *Env {
 	// The auth message and hook sender starts once its outbound client is set.
 	wg.Add(1)
 	go func() { defer wg.Done(); servicesSvc.RunAuthEmail(ctx) }()
-	webhookSvc := webhooks.New(db, keyring, svc, outboundSvc, tenancySvc, mailSvc, webhooks.Config{Poll: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
+	webhookSvc := webhooks.New(db, keyring, svc, outboundSvc, tenancySvc, mailSvc, webhooks.Config{Poll: 200 * time.Millisecond, IdlePoll: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
 	jobSvc := schedjobs.New(db, keyring, svc, consoleSvc, outboundSvc, tenancySvc, mailSvc, schedjobs.Config{Tick: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
 	svc.RefreshWebhooks = webhookSvc.Reinstall
 	tokenSvc := tokens.New(db, keyring, mailSvc, tokens.Config{Now: clock.Now, PublicURL: "https://xenibase.test"}, log)
