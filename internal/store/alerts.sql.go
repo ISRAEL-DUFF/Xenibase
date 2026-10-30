@@ -386,7 +386,7 @@ INSERT INTO alert_grace (key) VALUES ($1)
 ON CONFLICT (key) DO UPDATE SET
   since = CASE WHEN alert_grace.seen_at < now() - make_interval(secs => $2::float8) THEN now() ELSE alert_grace.since END,
   seen_at = now()
-RETURNING EXTRACT(EPOCH FROM now() - since)::float8 AS failing_seconds
+RETURNING EXTRACT(EPOCH FROM clock_timestamp() - since)::float8 AS failing_seconds
 `
 
 type GraceFailingParams struct {
@@ -398,6 +398,9 @@ type GraceFailingParams struct {
 // key is failing now: returns for how many seconds, by the database's
 // clock and shared by every server. A row no server refreshed for
 // @stale_seconds starts over.
+// clock_timestamp, not now(): a key first seen in this statement has been
+// failing for a moment, not for no time, so a grace period of next to
+// nothing is already over.
 func (q *Queries) GraceFailing(ctx context.Context, arg GraceFailingParams) (float64, error) {
 	row := q.db.QueryRow(ctx, graceFailing, arg.Key, arg.StaleSeconds)
 	var failing_seconds float64

@@ -110,7 +110,10 @@ INSERT INTO alert_grace (key) VALUES (@key)
 ON CONFLICT (key) DO UPDATE SET
   since = CASE WHEN alert_grace.seen_at < now() - make_interval(secs => @stale_seconds::float8) THEN now() ELSE alert_grace.since END,
   seen_at = now()
-RETURNING EXTRACT(EPOCH FROM now() - since)::float8 AS failing_seconds;
+-- clock_timestamp, not now(): a key first seen in this statement has been
+-- failing for a moment, not for no time, so a grace period of next to
+-- nothing is already over.
+RETURNING EXTRACT(EPOCH FROM clock_timestamp() - since)::float8 AS failing_seconds;
 
 -- name: GraceClear :exec
 -- tenant: system - the platform alert evaluator; alerts are the platform admin's.

@@ -261,6 +261,22 @@ func TestGraceSharedAcrossServers(t *testing.T) {
 	}
 }
 
+// A grace period of next to nothing (the integration tests use 1 ns) is
+// over at the first failure, as it was with the in-memory clocks: the
+// first sighting has been failing for a moment, not for no time.
+func TestTinyGraceFiresAtOnce(t *testing.T) {
+	ctx := context.Background()
+	db := storetest.New(t)
+	ghost, err := pooler.NewAdmin("ghost", "127.0.0.1:1", "xenibase", "x", "disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, nil, Config{Poolers: []*pooler.Admin{ghost}, PoolerGrace: time.Nanosecond}, quiet())
+	if c, err := s.poolerConditions(ctx); err != nil || len(c) != 1 || c[0].kind != KindPoolerDown {
+		t.Fatalf("first failure with a 1 ns grace: %+v %v", c, err)
+	}
+}
+
 // Resolved alerts older than Retain are pruned with their deliveries;
 // newer ones and firing ones stay.
 func TestPruneResolvedAlerts(t *testing.T) {
