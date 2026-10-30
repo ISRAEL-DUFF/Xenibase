@@ -111,7 +111,8 @@
     <tr><td><code>wal_archive</code></td><td>critical</td><td>A dedicated project's archiver failed in the last 15 min, or a segment has waited over 15 min</td></tr>
     <tr><td><code>isolation_check_failed</code></td><td>critical</td><td>A live shared cluster's latest isolation check failed (<x-page id="security--checklist"/>)</td></tr>
     <tr><td><code>minor_upgrade_failed</code></td><td>critical</td><td>A live instance's latest minor upgrade failed</td></tr>
-    <tr><td><code>project_stuck</code></td><td>critical</td><td>A project frozen by a failed move, promotion, demotion or major upgrade 10 min on</td></tr>
+    <tr><td><code>project_stuck</code></td><td>critical; warning for <code>error</code></td><td>A live project in any status but <code>active</code> with no queued or running operation, 10 min after its last one ended (<x-page id="control-plane--queue"/>)</td></tr>
+    <tr><td><code>queue_age</code></td><td>critical for interactive, else warning</td><td>The oldest runnable operation of a class has waited over 15 min (interactive) or 1 h (long, scheduled)</td></tr>
     <tr><td><code>node_unreachable</code></td><td>critical</td><td>An agent has not answered for 2 min (<code>last_reachable_at</code>)</td></tr>
     <tr><td><code>node_disk</code></td><td>warning</td><td>A reachable node's data disk is over 85% full, from its last health report</td></tr>
     <tr><td><code>project_disk</code></td><td>warning</td><td>A project's size sample from the last 30 min is over its disk warning</td></tr>

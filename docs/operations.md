@@ -17,7 +17,8 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   | WAL archiving (`wal_archive`) | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
   | Isolation check (`isolation_check_failed`) | critical | A live shared cluster's latest tenant-isolation check (every 24 h) found a problem |
   | Minor upgrade failed (`minor_upgrade_failed`) | critical | A live instance's latest Postgres minor upgrade failed; it stays on its release until a newer one or **Run now** |
-  | Project stuck (`project_stuck`) | critical | A move, promotion, demotion or major upgrade failed and the project is still frozen 10 minutes on: the rollback can't give its logins back until its instance answers |
+  | Project stuck (`project_stuck`) | critical, or warning for `error` | A live project is in a status other than `active` with no queued or running operation, 10 minutes after its last one ended. `moving`, `promoting`, `demoting` or `upgrading`: the rollback can't give its logins back until its instance answers, and Xenibase retries every minute. `provisioning`, `restoring` or `deleting`: the operation ended without finishing, and nothing repairs it (see [Projects stuck in a status](#projects-stuck-in-a-status)). `error`: a delete or restore gave up; delete the project once the cause is fixed |
+  | Operations waiting (`queue_age`) | critical for interactive, warning otherwise | The oldest runnable operation of a class has waited over 15 minutes (interactive) or an hour (long, scheduled): every slot that may run it is busy, or no server runs its kind (see [The operations queue](#the-operations-queue)) |
   | Node unreachable (`node_unreachable`) | critical | A node's agent has not answered for 2+ minutes |
   | Node disk (`node_disk`) | warning | A reachable node's data disk is over 85% full, from its last health report |
   | Project disk (`project_disk`) | warning | A project is larger than its disk warning (Project Settings → Database), from a size sample of the last 30 minutes |
@@ -60,6 +61,55 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   that far. Ship them elsewhere if you need longer. A container created
   before this setting picks it up the next time it is recreated
   (`./install.sh` or `docker compose up -d`).
+
+## The operations queue
+
+Every long action is an operation, run by the server's workers
+(`XENIBASE_WORKERS`, 4 by default per server). Each kind has a class:
+
+| Class | Kinds | Slots per server (of 4) |
+| --- | --- | --- |
+| Interactive | Create, delete, restore, rotate, settings, pause and resume, unarchive, branches, services, HA disable and switchover, etcd, capacity, and any kind not listed below | All of them; claimed first |
+| Long | Moves, major upgrades, promotion and demotion, HA enable, creating and detaching replicas, resizes, imports, Supabase user and storage copies, branch file copies, Move all | At most half (2) |
+| Scheduled | Backups and base backups, restore tests, the metadata backup, storage switches, isolation checks, minor upgrades, the Free tier's pause and archive, V1 renames and credential expiry | At most all but one (3) |
+
+Long and scheduled operations together hold at most all but one slot, so
+one is always free for interactive work, and a server claims interactive
+operations before older ones of the other classes. With
+`XENIBASE_WORKERS=8`: 4 long, 7 scheduled, 7 together; with 1, nothing is
+kept back. More servers add slots: each applies the caps to its own.
+
+`queue_age` fires when the oldest runnable operation of a class has
+waited past its threshold. For interactive work, look at what the
+servers run (Operations, filtered by `running`): a burst of creates, or
+one server for many projects, calls for more workers or another server.
+For scheduled work during the backup window, a backlog of backups is
+expected for a while; one that lasts over an hour means the window needs
+more workers. An operation of a kind no server runs (a server of another
+release) waits too, and fails after a day.
+
+### Projects stuck in a status
+
+`project_stuck` names a live project left in a status other than `active`
+that no operation will move on. Read its last operation's log
+(Operations, or the project's own list) first.
+
+- `moving`, `promoting`, `demoting`, `upgrading`: Xenibase gives the
+  logins back, resumes the poolers and sets the project `active` once its
+  instance answers. Bring the instance's node back.
+- `error`: a delete gave up, or a restore could not put the safety
+  backup back. Fix the cause the log names and delete the project again
+  (a branch can also be reset).
+- `provisioning`, `deleting`: the create or delete ended without setting
+  the project's final status. There is no button for these: in the
+  metadata database set the project's status to `error`, then delete it,
+  which drops whatever the create left (a delete finds what is already
+  gone).
+- `restoring`: the restore ended without reopening the project. If the
+  log shows the restore, or its rollback, finished and the database is as
+  expected, set the status to `active` (and `RESUME` its database on both
+  PgBouncers if clients are refused); otherwise restore one of its backups
+  into a new project, then set it to `error` and delete it.
 
 ## Backups
 
