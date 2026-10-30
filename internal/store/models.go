@@ -970,6 +970,12 @@ type PoolerGeneration struct {
 	UpdatedAt  time.Time
 }
 
+type PoolerReading struct {
+	Source    string
+	Pools     json.RawMessage
+	SampledAt time.Time
+}
+
 type PrepaidDeduction struct {
 	OrgID       uuid.UUID
 	Month       pgtype.Date

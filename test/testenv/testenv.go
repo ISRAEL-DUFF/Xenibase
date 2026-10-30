@@ -546,6 +546,8 @@ func Start(t testing.TB, opts Options) *Env {
 		e.StopAutomation()
 		cancel()
 		wg.Wait()
+		// The collector keeps its instance connections between samples.
+		collector.Close()
 		e.dropLeftovers()
 		// Leave the test poolers with no routes from this run.
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)

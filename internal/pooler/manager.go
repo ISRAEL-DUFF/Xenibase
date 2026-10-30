@@ -212,6 +212,20 @@ func (m *Manager) Admins() []*Admin {
 	return out
 }
 
+// LocalAdmins are the admin consoles of the poolers next to this
+// xenibase-server (XENIBASE_POOLER_LOCAL): only this server reaches them,
+// and another server has its own.
+func (m *Manager) LocalAdmins() []*Admin { return append([]*Admin(nil), m.admins...) }
+
+// HostAdmins are both PgBouncers of every pooler host last seen reachable
+// (V3 §2.1). Every server reaches the same hosts.
+func (m *Manager) HostAdmins() []*Admin {
+	if hs := m.hostSet(); hs != nil {
+		return hs.reachableAdmins("")
+	}
+	return nil
+}
+
 // adminsFor are the admin consoles of the poolers that route db: the local
 // ones for the home region's databases, and the pooler hosts of each region
 // that routes it (V3 §6.1). Commands to the others would fail: they don't
