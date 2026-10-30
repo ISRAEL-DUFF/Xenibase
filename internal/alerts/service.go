@@ -61,7 +61,7 @@ const (
 	nodeDiskThreshold      = 0.85
 	nodeUnreachableAfter   = 2 * time.Minute
 	projectSizeFreshWithin = 30 * time.Minute
-	clientCertWarnWithin   = 3 * 24 * time.Hour
+	clientCertWarnWithin   = 6 * time.Hour
 	// walArchiveWindow is how far back failed archiving attempts count;
 	// walArchiveStale how long a completed WAL segment may wait (with
 	// archive_timeout at 60 s, a healthy archive waits seconds).
@@ -644,9 +644,9 @@ func (s *Service) wakerConditions(ctx context.Context) ([]condition, error) {
 }
 
 // clientCertConditions reports xenibase-server's agent client certificate
-// when less than clientCertWarnWithin is left: it is renewed with a week
-// left, so renewing has been failing. Once it expires no agent accepts the
-// server.
+// when less than clientCertWarnWithin is left: it lasts a day and is
+// renewed with twelve hours left, so renewing has been failing for six
+// hours. Once it expires no agent accepts the server.
 func (s *Service) clientCertConditions() []condition {
 	if s.cfg.ClientCertExpiry == nil {
 		return nil
@@ -656,7 +656,7 @@ func (s *Service) clientCertConditions() []condition {
 		return nil
 	}
 	return []condition{{KindAgentClientCert, SeverityCritical, "control_plane", "agent_client_cert", "agent client certificate",
-		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until it restarts.", exp.UTC().Format(time.RFC3339)),
+		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until a renewal succeeds.", exp.UTC().Format(time.RFC3339)),
 		map[string]any{"expires_at": exp.UTC().Format(time.RFC3339)}}}
 }
 

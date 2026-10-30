@@ -111,7 +111,11 @@ server cannot rewrite, ship the server's logs or a logical replica of
   one private network.
 - Agents use mTLS with a private CA; the server pins each agent's
   certificate fingerprint and node ID; no work is sent to an agent of
-  another major version (`nodes.Compatible`, spec §11.3).
+  another major version (`nodes.Compatible`, spec §11.3). Each server's
+  client certificate is its own and lasts a day; agents accept only the
+  serials on the CA-signed list the servers push, on every request, and an
+  admin can revoke one (`TestAllowListRefusesUnlisted`,
+  `TestRevokedServerRefused`).
 - Webhook alerts can be signed (`X-Xenibase-Signature: t=…,v1=HMAC-SHA256`).
 - `/metrics` needs a session or `XENIBASE_METRICS_TOKEN`.
 

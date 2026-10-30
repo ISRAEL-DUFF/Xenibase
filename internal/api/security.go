@@ -202,6 +202,7 @@ var auditActions = map[string]string{
 	"POST /api/v1/nodes":                                           "node.create",
 	"DELETE /api/v1/nodes/{id}":                                    "node.remove",
 	"PATCH /api/v1/nodes/{id}":                                     "node.update",
+	"POST /api/v1/admin/agent-client-certs/revoke":                 "node.client_cert_revoke",
 	"PUT /api/v1/admin/capacity/settings":                          "capacity.settings",
 	"PUT /api/v1/admin/regions/{region_id}":                        "region.save",
 	"PUT /api/v1/projects/{id}/residency":                          "project.residency",

@@ -157,6 +157,14 @@ the first real invoice:
   means lost backups.
 - The **master key** (`XENIBASE_MASTER_KEY`) seals credentials; rotate it with
   `xenibase-server -rotate-master-key` ([operations](operations.md#secrets)).
+- A **server's agent certificate** may have been copied (a server's memory
+  or a core dump exposed): `GET /api/v1/admin/agent-client-certs` lists each
+  server's certificates (a day long, named after its host), and `POST
+  /api/v1/admin/agent-client-certs/revoke` with `{"server": "<host>"}`, or
+  `{"serial": "<hex>"}`, withdraws them. Every agent gets the new list at
+  once (the answer names any that didn't; they get it at their next health
+  check), and the server issues itself a new certificate. It does not help
+  if the master key went too: rotate that as well.
 - A full rebuild of the control node: [disaster recovery](disaster-recovery.md).
 
 ## Releases

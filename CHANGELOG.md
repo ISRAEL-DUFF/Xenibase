@@ -39,6 +39,28 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A copied server certificate can be withdrawn, and lasts a day.** Every
+  xenibase-server presented the same kind of client certificate to agents,
+  `CN=xenibase-server`, valid 30 days, and agents accepted any the agent CA
+  signed with that name, so a copy of one server's certificate and key
+  commanded every agent (root on each node, with the Docker socket) until
+  it expired, with no way to withdraw it. Each server now issues itself a
+  certificate with its own key, valid 24 hours and renewed at half-life,
+  that names the server (the subject's OU and a
+  `xenibase://server/<host>` URI) and keeps the `xenibase-server` subject.
+  Its serial is recorded in the metadata database (migration 00101), and
+  the live serials of every server sharing it (unexpired, unrevoked) are
+  the allow list each agent is given, signed by the agent CA, over the
+  agent API (`PUT /v1/client-serials`) before the server's first call with
+  a new certificate. An agent with a list checks every request against
+  it, so a revoked serial is refused even on a connection it already has
+  open, and keeps the list in its state directory across restarts. `POST
+  /api/v1/admin/agent-client-certs/revoke` (platform admins, audited as
+  `node.client_cert_revoke`) revokes a serial or every live certificate of
+  a server and pushes the new list to every agent at once; the revoked
+  server issues itself a new certificate and keeps its agents. `GET
+  /api/v1/admin/agent-client-certs` lists them. The `agent_client_cert`
+  alert now fires with under 6 hours left, renewal having failed for 6.
 - **A status page push is bound to its endpoint.** The push signature
   covered the timestamp and body only, so a signed heartbeat replayed to
   `PUT /api/v1/subscribers/managed` decoded as an empty list and deleted
@@ -1065,6 +1087,21 @@ bundle share one version (spec §11.5).
   `UPGRADE_FROM` still overrides it.
 
 ### Upgrading
+- Migration 00101 adds `agent_client_certs` and `agent_client_cert_state`.
+  Agents of this release accept any `xenibase-server` certificate, as
+  before, until a server of this release gives them a list; from then on
+  only the listed serials, plus, for 31 days after an agent's first list,
+  certificates that name no server (issued by an older server, which
+  registers none). So an older agent works with a newer server (it never
+  asks for a list), and a newer agent with an older server (no list is
+  pushed). With several servers on one metadata database, finish
+  upgrading all of them within those 31 days: an older server still
+  running after that is refused by every agent that has a list. A server
+  needs its host name to be unique among them to revoke one by name
+  (revoking by serial works either way). `client-serials.json` in an
+  agent's state directory holds its list; an agent restarted without it
+  accepts by subject again until a server's next health check (30
+  seconds) gives it a new one.
 - Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
   up`. An install with backend services on keeps the Caddy image
   `enable-services.sh` built until it is run again, which rebuilds it pinned.

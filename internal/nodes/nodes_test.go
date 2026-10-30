@@ -35,6 +35,7 @@ type env struct {
 	reg   *httptest.Server
 	node  store.Node
 	token string
+	ca    *agentca.CA
 }
 
 func setup(t *testing.T, bootstrap string) *env {
@@ -70,7 +71,7 @@ func setup(t *testing.T, bootstrap string) *env {
 		_ = json.NewEncoder(w).Encode(res)
 	}))
 	t.Cleanup(reg.Close)
-	return &env{db: db, svc: svc, reg: reg, node: n, token: tok}
+	return &env{db: db, svc: svc, reg: reg, node: n, token: tok, ca: ca}
 }
 
 // startAgent registers an agent and serves it on a free port.
@@ -87,7 +88,7 @@ func (e *env) startAgent(t *testing.T, token, node string) *agentsvc.State {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := agentsvc.New(agentsvc.Config{Version: "test", NodeID: st.NodeID, PGBinDir: os.Getenv("XENIBASE_TEST_PG_BIN")}, quiet)
+	svc := agentsvc.New(agentsvc.Config{Version: "test", NodeID: st.NodeID, PGBinDir: os.Getenv("XENIBASE_TEST_PG_BIN"), ClientAllow: agentsvc.LoadClientAllow(st.Dir, st.CACert, quiet)}, quiet)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = svc.Serve(ctx, ln, agentsvc.TLSConfig(st.Cert, st.CA)) }()
 	t.Cleanup(cancel)
@@ -125,7 +126,7 @@ func TestRegisterAndHealth(t *testing.T) {
 }
 
 // TestClientCertRenewed: a server whose client certificate has run out
-// (it was issued 40 days ago) still reaches its agents, because the
+// (it was issued 40 days ago, and certificates last a day) still reaches its agents, because the
 // handshake gets a fresh one.
 func TestClientCertRenewed(t *testing.T) {
 	e := setup(t, "")
@@ -140,7 +141,7 @@ func TestClientCertRenewed(t *testing.T) {
 	if _, err := a.Health(context.Background()); err != nil {
 		t.Fatalf("health with an expired client certificate: %v", err)
 	}
-	if left := time.Until(e.svc.ClientCertExpiry()); left < 29*24*time.Hour {
+	if left := time.Until(e.svc.ClientCertExpiry()); left < 23*time.Hour {
 		t.Fatalf("client certificate expires in %s", left)
 	}
 }

@@ -41,7 +41,7 @@ func TestAgentConnectionsAreReused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := agentsvc.New(agentsvc.Config{Version: "test", NodeID: st.NodeID, PGBinDir: os.Getenv("XENIBASE_TEST_PG_BIN")}, quiet)
+	agent := agentsvc.New(agentsvc.Config{Version: "test", NodeID: st.NodeID, PGBinDir: os.Getenv("XENIBASE_TEST_PG_BIN"), ClientAllow: agentsvc.LoadClientAllow(st.Dir, st.CACert, quiet)}, quiet)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = agent.Serve(ctx, counted, agentsvc.TLSConfig(st.Cert, st.CA)) }()
