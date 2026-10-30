@@ -898,6 +898,13 @@ bundle share one version (spec §11.5).
   sessions opened before kept running. They are now switched off and their
   sessions ended with the project's other logins, and switched back on
   with them; the role sync keeps them recorded meanwhile.
+- **Container logs are rotated.** No service in the compose files set
+  `logging:`, so Docker's default `json-file` driver kept every line (one
+  per API request, and the text of every slow tenant statement) until the
+  disk filled. Every service in `deploy/compose`, the status page's and the
+  pooler hosts' compose files now uses `json-file` with `max-size: 50m` and
+  `max-file: 5`, at most 250 MB per container. Existing containers pick it
+  up when they are next recreated (`./install.sh` does it).
 
 ### Upgrading
 - Migration 00094 adds the node lifecycle `retiring`, with

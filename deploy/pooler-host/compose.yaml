@@ -25,11 +25,20 @@
 
 name: xenibase-edge
 
+# Every container's log: Docker's json-file driver, rotated, so a chatty or
+# crash-looping service can't fill the disk (at most 5 x 50 MB per container).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   pooler-host:
     image: ${XENIBASE_POOLER_HOST_IMAGE:-xenibase-pooler-host:local}
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     env_file: .env
     environment:
       XENIBASE_AGENT_SERVER_ID: ${XENIBASE_AGENT_SERVER_ID:-hetzner-metadata}
@@ -45,6 +54,7 @@ services:
     image: ${XENIBASE_KEEPALIVED_IMAGE:-xenibase-keepalived:local}
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     cap_add: [NET_ADMIN, NET_BROADCAST, NET_RAW]
     volumes:
       - edge:/etc/xenibase-edge:ro

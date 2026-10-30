@@ -130,6 +130,9 @@ It asks for the web UI hostname and an email for Let's Encrypt notices
    PostgreSQL 18 cluster, both poolers, and the agent;
 4. prints the web UI's address and a **one-time setup code**.
 
+Container logs are rotated (Docker's `json-file` driver, 5 files of 50 MB per
+container), so they can't fill the disk.
+
 The first run takes a few minutes, mostly building images.
 
 **Back up `.env` now**, somewhere off this server (a password manager is

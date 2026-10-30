@@ -28,7 +28,13 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
   cache hit ratio, CPU, memory, disk, and I/O; `/metrics` serves them to
   Prometheus.
 - `docker compose ps` and `docker compose logs <service>` for the
-  containers themselves.
+  containers themselves. Their logs are rotated: every service in the
+  compose files (here, the status page's and the pooler hosts') uses
+  Docker's `json-file` driver with `max-size: 50m` and `max-file: 5`, so a
+  container keeps at most 250 MB and `docker compose logs` reaches back
+  that far. Ship them elsewhere if you need longer. A container created
+  before this setting picks it up the next time it is recreated
+  (`./install.sh` or `docker compose up -d`).
 
 ## Backups
 
