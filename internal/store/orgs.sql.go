@@ -1616,6 +1616,22 @@ func (q *Queries) SetProjectOrg(ctx context.Context, arg SetProjectOrgParams) er
 	return err
 }
 
+const unverifyLeavingMemberContact = `-- name: UnverifyLeavingMemberContact :exec
+UPDATE billing_contacts c SET verified_at = NULL FROM users u
+WHERE c.org_id = $1 AND u.id = $2 AND c.email = u.email
+`
+
+type UnverifyLeavingMemberContactParams struct {
+	OrgID  uuid.UUID
+	UserID uuid.UUID
+}
+
+// A billing contact verified because it was a member's address routes support tickets only while they are a member.
+func (q *Queries) UnverifyLeavingMemberContact(ctx context.Context, arg UnverifyLeavingMemberContactParams) error {
+	_, err := q.db.Exec(ctx, unverifyLeavingMemberContact, arg.OrgID, arg.UserID)
+	return err
+}
+
 const updateOrg = `-- name: UpdateOrg :one
 UPDATE organizations SET name = $1, slug = $2, settings = $3
 WHERE id = $4

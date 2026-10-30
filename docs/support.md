@@ -41,7 +41,8 @@ it; the others' registrations are then dropped.
 it comes from a member's verified address, or from a billing contact who
 confirmed the link Xenibase emailed them when they were added (Billing →
 Billing contacts shows **unconfirmed** until then; contacts who are members
-need no link). Unconfirmed contacts still get invoices and billing email.
+need no link, until they leave the organisation). Unconfirmed contacts
+still get invoices and billing email.
 A reply joins a ticket only from the person who opened it or from a member
 of the ticket's organisation, and only when the email provider could
 authenticate the sender (below).

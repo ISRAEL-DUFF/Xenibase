@@ -275,3 +275,8 @@ FROM invitations WHERE org_id = @org_id AND created_at >= @since::timestamptz;
 -- tenant: system - one inviter's organisation invitations in every organisation, for the daily cap.
 SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
 FROM invitations WHERE invited_by = @invited_by AND kind = 'org' AND created_at >= @since::timestamptz;
+
+-- name: UnverifyLeavingMemberContact :exec
+-- A billing contact verified because it was a member's address routes support tickets only while they are a member.
+UPDATE billing_contacts c SET verified_at = NULL FROM users u
+WHERE c.org_id = @org_id AND u.id = @user_id AND c.email = u.email;
