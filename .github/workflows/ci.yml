@@ -270,6 +270,158 @@ jobs:
           (cd test/e2e && npm audit --audit-level=high)
           (cd sdk/js && npm audit --audit-level=high)
 
+  # Known vulnerabilities in the images Xenibase runs (Caddy, PgBouncer,
+  # Postgres with WAL-G and Patroni, and the base layers under ours), which
+  # govulncheck and npm audit do not see. Weekly and on demand only: a new
+  # advisory fails this run, not every push. Fixed CRITICAL and HIGH findings
+  # fail it; one with no fixed version yet is not counted. Every image is
+  # scanned even when an earlier one fails. The action is pinned to a commit.
+  image-scan:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the images (as make e2e-images and the install do)
+        id: build
+        run: |
+          make e2e-images edge-image pooler-host-images status-image
+          docker build -t xenibase-caddy-cloudflare:scan deploy/compose/caddy-dns
+          docker pull -q caddy:2.10.0
+          docker pull -q edoburu/pgbouncer:v1.25.1-p0
+
+      - name: "Scan xenibase:local (the server, UI embedded)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase:local
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-agent:local (the agent)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-agent:local
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-postgres:17-walg3.0.9 (dedicated instances, Postgres 17)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-postgres:17-walg3.0.9
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-postgres:18-walg3.0.9 (dedicated instances, Postgres 18)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-postgres:18-walg3.0.9
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-edge:local (the edge)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-edge:local
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-pooler-host:local (the edge pooler host)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-pooler-host:local
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-keepalived:local (the pooler host's keepalived)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-keepalived:local
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-status:local (the status page)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-status:local
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan xenibase-caddy-cloudflare:scan (Caddy with the Cloudflare DNS plugin)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: xenibase-caddy-cloudflare:scan
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan caddy:2.10.0 (Caddy, stock)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: caddy:2.10.0
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
+      - name: "Scan edoburu/pgbouncer:v1.25.1-p0 (PgBouncer)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          image-ref: edoburu/pgbouncer:v1.25.1-p0
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: true
+
   # 150 shared projects with pgbench on 10 (spec §13), weekly and on demand.
   load:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

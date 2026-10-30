@@ -933,8 +933,23 @@ bundle share one version (spec §11.5).
   output of failing tests, the counts, and every skipped test with its
   reason, and fails when a test named in `XENIBASE_TEST_MUST_RUN` skipped;
   CI names the tests its environment is there for.
+- **Caddy is pinned, the images are scanned, and dependency updates are
+  proposed.** Caddy ran from the floating `caddy:2`, so two installs of one
+  release could run different Caddy, and the DNS plugins were built at
+  whatever version was latest. Caddy is now `caddy:2.10.0` in the bundle,
+  the status page and the DNS-plugin build (`xcaddy build v2.10.0`, the
+  version `test/acmedns` checks), and the cloudflare (v0.2.4) and desec
+  (v1.0.1) plugins are pinned to versions built for it. A weekly
+  `image-scan` job (and on demand) builds the images the install runs, pulls
+  Caddy and PgBouncer, and scans each with Trivy, failing on a fixed CRITICAL
+  or HIGH vulnerability. And `.github/dependabot.yml` proposes weekly,
+  grouped updates for the Go modules, the npm trees, the Dockerfiles and
+  compose images, and the workflows' actions.
 
 ### Upgrading
+- Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
+  up`. An install with backend services on keeps the Caddy image
+  `enable-services.sh` built until it is run again, which rebuilds it pinned.
 - A CLI context saved for an `http://` server other than this machine stops
   working: log in again with `https://`. A script that sets `XENIBASE_SERVER`
   to a server other than its current context's needs `XENIBASE_TOKEN`, or a

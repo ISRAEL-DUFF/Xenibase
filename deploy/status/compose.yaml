@@ -19,7 +19,7 @@ services:
       XENIBASE_STATUS_LOG_FORMAT: json
 
   caddy:
-    image: caddy:2
+    image: caddy:2.10.0
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     command: ["caddy", "reverse-proxy", "--from", "${STATUS_DOMAIN:?set STATUS_DOMAIN}", "--to", "status:8080"]
