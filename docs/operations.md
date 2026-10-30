@@ -5,23 +5,48 @@ Day-to-day running of a Xenibase install. Commands run in `deploy/compose`.
 ## Health at a glance
 
 - **Alerts** (sidebar) lists what is wrong now; the same alerts go to your
-  webhook and email (Settings → Alerts). Each is sent when it fires and when
-  it resolves:
+  webhook and email (Settings → Alerts). Conditions are evaluated every
+  `XENIBASE_ALERTS_INTERVAL` (30 s). Each alert is sent when it fires and
+  when it resolves:
 
-  | Alert | Severity | Fires when |
+  | Alert (kind) | Severity | Fires when |
   | --- | --- | --- |
-  | Backup failed | critical | A project's (or the metadata database's) latest backup failed |
-  | Backup overdue | warning | A project older than 26 h has no successful backup in 26 h (paused and archived projects, branches without backups and suspended organisations, which the nightly schedule skips, are left out) |
-  | Restore test failed | critical | The latest weekly restore test failed |
-  | WAL archiving | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
-  | Node disk | warning | A node's data disk is over 85% full |
-  | Node unreachable | critical | A node's agent has not answered for 2+ minutes |
-  | Project disk | warning | A project is larger than its disk warning (Project Settings → Database) |
-  | Pooler down | critical | A PgBouncer's admin console does not answer |
-  | Pooler host not ready | critical | An edge pooler host can't serve or is stale ([standby edge pooler](edge-poolers.md)) |
-  | Pooler split brain | critical | Both edge pooler hosts say keepalived made them MASTER |
-  | Isolation check | critical | The nightly tenant-isolation check found a problem |
-  | Agent client certificate | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
+  | Backup failed (`backup_failed`) | critical | A live project's latest backup or base backup failed, or the metadata database's nightly backup did |
+  | Backup overdue (`backup_overdue`) | warning | A project older than 26 h has no successful backup in 26 h (paused and archived projects, branches without backups and suspended organisations, which the nightly schedule skips, are left out) |
+  | Restore test failed (`restore_test_failed`) | critical | For a live project tested on demand (`POST /api/v1/restore-tests?project_id=`), its latest test failed; otherwise the latest scheduled (weekly) restore test failed. A deleted project's failed test does not alert |
+  | WAL archiving (`wal_archive`) | critical | A dedicated project's WAL archiving failed in the last 15 minutes, or a finished WAL segment has waited over 15 minutes to be archived: recovery past it is impossible, and WAL fills the volume. Check the archive's storage target and credentials, and the instance's log for `wal-push` |
+  | Isolation check (`isolation_check_failed`) | critical | A live shared cluster's latest tenant-isolation check (every 24 h) found a problem |
+  | Minor upgrade failed (`minor_upgrade_failed`) | critical | A live instance's latest Postgres minor upgrade failed; it stays on its release until a newer one or **Run now** |
+  | Project stuck (`project_stuck`) | critical | A move, promotion, demotion or major upgrade failed and the project is still frozen 10 minutes on: the rollback can't give its logins back until its instance answers |
+  | Node unreachable (`node_unreachable`) | critical | A node's agent has not answered for 2+ minutes |
+  | Node disk (`node_disk`) | warning | A reachable node's data disk is over 85% full, from its last health report |
+  | Project disk (`project_disk`) | warning | A project is larger than its disk warning (Project Settings → Database), from a size sample of the last 30 minutes |
+  | Pooler down (`pooler_down`) | critical | A local PgBouncer's admin console has not answered for 1 minute |
+  | Pooler allowlist off (`pooler_allowlist_off`) | critical | A local PgBouncer is not on `auth_type = hba`: IP allowlists are stored but not enforced |
+  | Pooler configuration skipped (`pooler_config_skipped`) | critical | The last pooler sync left rows out as invalid (often a node's private address), so those projects or logins can't connect through the poolers |
+  | Pooler host not ready (`pooler_host_not_ready`) | critical | A healthy edge pooler host can't serve or is stale for 1 minute ([standby edge pooler](edge-poolers.md)) |
+  | Pooler split brain (`pooler_split_brain`) | critical | Two edge pooler hosts in one region say keepalived made them MASTER, for 1 minute |
+  | Waker down (`waker_down`) | critical | The Free tier's waker has refused connections for 1 minute: paused projects can't resume on connect, and pausing is on hold |
+  | Agent client certificate (`agent_client_cert`) | critical | xenibase-server's certificate for talking to agents (30 days, renewed with 7 left) has under 3 days left: renewing it keeps failing (see the server's log) |
+  | Failure domain (`failure_domain`) | warning | HA members, etcd members or pooler hosts that must be apart share a failure domain |
+  | Files share backups (`files_share_backups`) | warning | A region with stored files has no files target of its own, so its edges hold credentials that can delete its backups |
+  | Capacity proposal (`capacity_proposal`) | warning | A capacity proposal waits for approval (Platform → Capacity) |
+  | Capacity failed (`capacity_failed`) | critical | Provisioning a server failed in the last 24 hours |
+
+  An alert resolves after 3 evaluations in a row (from any server, about a
+  minute) find its condition clear; if it holds again before that, it is
+  the same alert, so a value hovering at a threshold does not fire and
+  resolve at every crossing. If one of the sources cannot be read (a
+  failing query), what the others report still fires, but nothing
+  resolves that round. The grace periods above are shared by every server.
+  Resolved alerts are deleted after 90 days.
+
+  Delivery is recorded per channel: if the webhook or the SMTP account
+  fails, only that channel is retried (after 1 minute, doubling to 30), for
+  7 days from the event; the other channel is not sent it again. An alert
+  that resolves before its firing could be delivered is announced by its
+  `alert.resolved` notification alone, which carries `started_at` and
+  `resolved_at`.
 
 - **Operations** shows every long action with its step log.
 - **Metrics** (per project and per node) charts size, connections, TPS,

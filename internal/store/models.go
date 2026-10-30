@@ -32,6 +32,24 @@ type Alert struct {
 	DeliveryAttempts   int32
 	DeliveryError      *string
 	DeliveryLock       *time.Time
+	ClearCount         int32
+	ClearedSince       *time.Time
+}
+
+type AlertDelivery struct {
+	AlertID  uuid.UUID
+	Event    string
+	Channel  string
+	SentAt   *time.Time
+	Attempts int32
+	Error    *string
+	NextAt   *time.Time
+}
+
+type AlertGrace struct {
+	Key    string
+	Since  time.Time
+	SeenAt time.Time
 }
 
 type ApiRequestLog struct {

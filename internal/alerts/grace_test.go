@@ -32,11 +32,11 @@ func TestPoolerGrace(t *testing.T) {
 	}
 	s := New(nil, nil, Config{Poolers: []*pooler.Admin{ghost}, PoolerGrace: 200 * time.Millisecond}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
-	if c := s.poolerConditions(ctx); len(c) != 0 {
+	if c, err := s.poolerConditions(ctx); err != nil || len(c) != 0 {
 		t.Fatalf("down on the first failure: %+v", c)
 	}
 	time.Sleep(250 * time.Millisecond)
-	if c := s.poolerConditions(ctx); len(c) != 1 || c[0].kind != KindPoolerDown || c[0].targetID != "ghost" {
+	if c, err := s.poolerConditions(ctx); err != nil || len(c) != 1 || c[0].kind != KindPoolerDown || c[0].targetID != "ghost" {
 		t.Fatalf("after the grace period: %+v", c)
 	}
 }
