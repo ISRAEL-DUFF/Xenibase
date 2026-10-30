@@ -415,12 +415,13 @@ func (s *Service) PutIncident(ctx context.Context, in statusapi.Incident) error 
 	return tx.Commit()
 }
 
-// Heartbeat stores xenibase-server's report.
+// Heartbeat stores xenibase-server's report, unless it was sent before the
+// newest one accepted (errStaleHeartbeat).
 func (s *Service) Heartbeat(ctx context.Context, hb statusapi.Heartbeat) error {
 	if err := hb.Validate(); err != nil {
 		return err
 	}
-	return s.st.saveHeartbeat(ctx, s.heartbeatStates(hb), s.Now().UTC())
+	return s.st.saveHeartbeat(ctx, s.heartbeatStates(hb), hb.SentAt, s.Now().UTC())
 }
 
 // heartbeatStates maps a heartbeat's states to the page's components: a
