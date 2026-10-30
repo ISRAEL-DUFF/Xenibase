@@ -215,6 +215,26 @@ func TestDedicatedProjectAndPITR(t *testing.T) {
 		t.Fatalf("base backup now: %s %s\n%s", op.Kind, op.Status, testenv.FormatLog(op))
 	}
 
+	// The restore test recovers a dedicated project's archive into a
+	// scratch instance, reads every table there and removes it; no project
+	// is created.
+	var projects, after2 int
+	if err := e.DB.QueryRow(ctx, `SELECT count(*) FROM projects`).Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if code := e.Do("POST", "/api/v1/restore-tests?project_id="+c.Project.Id.String(), nil, &op); code != http.StatusAccepted {
+		t.Fatalf("restore test: %d", code)
+	}
+	if op = e.WaitOperation(op.Id); op.Status != gen.OperationStatusSucceeded || !strings.Contains(testenv.FormatLog(op), "recovered from its archive") {
+		t.Fatalf("point-in-time restore test: %s\n%s", op.Status, testenv.FormatLog(op))
+	}
+	if _, err := dockerInspect(t, "xenibase-"+op.Id.String(), "{{.Id}}"); err == nil {
+		t.Fatal("the restore test's scratch instance survived it")
+	}
+	if err := e.DB.QueryRow(ctx, `SELECT count(*) FROM projects`).Scan(&after2); err != nil || after2 != projects {
+		t.Fatalf("projects after the restore test: %d, before %d (%v)", after2, projects, err)
+	}
+
 	// Restart through the API; the URL keeps working.
 	var st gen.InstanceState
 	if code := e.Do("POST", "/api/v1/projects/"+c.Project.Id.String()+"/instance", gen.InstanceActionRequest{Action: gen.Restart}, &st); code != http.StatusOK || !st.Running {

@@ -52,6 +52,8 @@ type ReplicaParams struct {
 	// residency keeps its replicas in its region.
 	Region    string
 	CreatedBy *uuid.UUID
+	// Settings are its standby settings (nil: Postgres's defaults).
+	Settings *ReplicaSettings
 }
 
 type replicaParams struct {
@@ -59,6 +61,8 @@ type replicaParams struct {
 	Replica  uuid.UUID `json:"replica"`
 	Node     uuid.UUID `json:"node"`
 	Region   string    `json:"region,omitempty"`
+	// Settings are absent from operations queued before they existed.
+	Settings *ReplicaSettings `json:"settings,omitempty"`
 }
 
 // replicaPort is the host port an instance's replicas ask for when they
@@ -120,6 +124,13 @@ func (s *Service) replicaNode(ctx context.Context, q *store.Queries, inst store.
 
 // CreateReplica checks and queues a read replica.
 func (s *Service) CreateReplica(ctx context.Context, p ReplicaParams) (store.Operation, error) {
+	rs := DefaultReplicaSettings
+	if p.Settings != nil {
+		rs = *p.Settings
+	}
+	if err := rs.Validate(); err != nil {
+		return store.Operation{}, err
+	}
 	if s.Etcd == nil {
 		return store.Operation{}, fmt.Errorf("%w: read replicas need the etcd service (as HA does)", provision.ErrNoDedicated)
 	}
@@ -135,6 +146,17 @@ func (s *Service) CreateReplica(ctx context.Context, p ReplicaParams) (store.Ope
 			}
 			if inst.Status != "running" {
 				return nil, fmt.Errorf("%w: the instance is %s", provision.ErrConflict, inst.Status)
+			}
+			// A replica is an instance the size of its primary (V4 §7),
+			// within the dedicated allowance, counted under the
+			// organisation's lock with the replicas queued before it.
+			size := SizeProfile(inst)
+			claim := provision.Claim{OrgID: pr.OrgID, Instance: size}
+			if inst.VolumeGb != nil {
+				claim.VolumeGB = int(*inst.VolumeGb)
+			}
+			if err := s.projects.Claim(ctx, tx, claim); err != nil {
+				return nil, err
 			}
 			n, err := q.CountProjectReplicas(ctx, pr.ID)
 			if err != nil {
@@ -161,7 +183,7 @@ func (s *Service) CreateReplica(ctx context.Context, p ReplicaParams) (store.Ope
 			if err != nil {
 				return nil, err
 			}
-			return replicaParams{Instance: inst.ID, Replica: uuid.New(), Node: node.ID, Region: region}, nil
+			return replicaParams{Instance: inst.ID, Replica: uuid.New(), Node: node.ID, Region: region, Settings: &rs}, nil
 		})
 }
 
@@ -220,8 +242,12 @@ func (s *Service) runCreateReplica(ctx context.Context, op store.Operation, log 
 		if params.Region != "" {
 			region = &params.Region
 		}
+		rs := DefaultReplicaSettings
+		if params.Settings != nil {
+			rs = *params.Settings
+		}
 		if _, err := q.InsertReadReplica(ctx, store.InsertReadReplicaParams{ID: params.Replica, ProjectID: p.ID, InstanceMemberID: &params.Replica,
-			NodeID: params.Node, RegionID: region, Size: size}); err != nil {
+			NodeID: params.Node, RegionID: region, Size: size, HotStandbyFeedback: rs.HotStandbyFeedback, MaxStandbyDelayS: int32(rs.MaxStandbyDelay)}); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -255,6 +281,20 @@ func (s *Service) runCreateReplica(ctx context.Context, op store.Operation, log 
 	}
 	if err := q.SetReplicaStatus(ctx, store.SetReplicaStatusParams{ID: params.Replica, Status: ReplicaStreaming}); err != nil {
 		return err
+	}
+	// Its spec carried the standby settings; confirm them (the watcher
+	// retries if this fails).
+	if r, err := q.GetReadReplica(ctx, params.Replica); err == nil {
+		s.applyReplicaSettings(ctx, inst, r)
+		if r, err = q.GetReadReplica(ctx, params.Replica); err == nil && r.SettingsError == nil {
+			fb := "off"
+			if r.HotStandbyFeedback {
+				fb = "on"
+			}
+			if err := log.Info(ctx, "settings", "hot_standby_feedback %s, queries conflicting with replay wait up to %d s", fb, r.MaxStandbyDelayS); err != nil {
+				return err
+			}
+		}
 	}
 	// 3. Into rotation once it is caught up: the watcher checks its lag
 	// every poll; this is the first check.

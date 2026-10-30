@@ -6,9 +6,9 @@
     {"title": "Build apps", "pages": ["backend-services.md", "errors.md", "integrations/README.md", "sdk/javascript.md", "sdk/go.md", "sdk/dart.md"]},
     {"title": "Guides", "pages": ["guides/storefront.md", "guides/nextjs.md", "guides/react-native.md", "guides/flutter.md", "examples/flutter-auth/README.md"]},
     {"title": "Migrate", "pages": ["migrate-from-supabase.md", "supabase-client-mapping.md", "guides/import-docker-vps-db.md"]},
-    {"title": "Databases", "pages": ["ha.md", "read-replicas.md", "moves.md", "query-insights.md", "webhooks.md", "regions.md", "free-tier.md"]},
+    {"title": "Databases", "pages": ["ha.md", "read-replicas.md", "moves.md", "database-roles.md", "network-access.md", "query-insights.md", "webhooks.md", "regions.md", "free-tier.md"]},
     {"title": "Billing", "pages": ["billing.md", "payments.md", "iswallet.md"]},
     {"title": "Operate", "pages": ["install.md", "operations.md", "upgrade.md", "deploying.md", "upgrade-v2-to-v4.md", "disaster-recovery.md", "admin-runbook.md", "backend-runbook.md", "capacity.md", "enabling-backend-services.md", "edge-poolers.md", "failure-domains.md", "status-page.md", "incidents.md", "support.md", "legal.md", "security-review.md", "pentest-scope.md", "load-test.md", "brand.md"]},
-    {"title": "Internals", "pages": ["decisions.md"]}
+    {"title": "Internals", "pages": ["decisions.md", "migrations.md"]}
   ]
 }

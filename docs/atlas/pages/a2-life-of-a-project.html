@@ -1,0 +1,142 @@
+<!--atlas
+{
+  "id": "life-of-a-project",
+  "title": "The life of a project",
+  "part": "A",
+  "order": 2,
+  "summary": "One customer followed from sign-up, through the create request and the operation that builds the database, to an app connecting through the pooler and through the edge: what is written where, and what happens when something fails.",
+  "verified": "b45797127b806235ef770f1c3981a8f5eea1cc38",
+  "sources": [
+    "internal/auth/accounts.go", "internal/auth/service.go", "internal/orgs/orgs.go",
+    "internal/api/security.go", "internal/api/access.go", "internal/api/routes.go", "internal/api/projects.go",
+    "internal/authz/authz.go",
+    "internal/provision/service.go", "internal/provision/flows.go", "internal/provision/names.go", "internal/provision/activity.go", "internal/provision/cluster.go",
+    "internal/dedicated/dedicated.go", "internal/dedicated/hosts.go",
+    "internal/jobs/", "internal/store/queries/operations.sql", "internal/store/queries/infra.sql", "internal/store/queries/projects.sql",
+    "internal/pooler/manager.go", "internal/pooler/render.go", "deploy/pgbouncer/",
+    "internal/edge/gateway.go", "internal/edge/edge.go", "internal/services/service.go",
+    "Xenibase — V1 Specification & Build Plan.md", "docs/decisions.md", "docs/network-access.md"
+  ]
+}
+-->
+<p>The fastest way to understand Xenibase is to follow one project from start to end. This page follows a developer who signs up on an install with open signup, creates a shared-tier project from the dashboard, connects an app server to it with a Postgres driver, and later turns on backend services and calls the data API from a browser. Each stage names the function that does the work and the rows it writes, so you can open the code beside it.</p>
+
+<h2>Follow the project</h2>
+<p>Select a stage to light up its part of the sequence. Shaded bars are transactions: everything a stage writes there commits together or not at all.</p>
+<div class="stepper">
+  <ol class="stages">
+    <li class="stage" data-lit="s1">
+      <h3 id="life-of-a-project--signup">Sign-up makes a user and an organisation</h3>
+      <p><code>POST /api/v1/auth/signup</code> is a public route. <x-ref path="internal/auth/accounts.go" symbol="func (s *Service) Signup("><code>auth.Signup</code></x-ref> reads the platform's signup policy (invite-only by default, or approval, or open, with an optional domain allow-list), checks the Turnstile challenge and the per-address limit of the signup guard, the password policy and that the terms version accepted is the current one. An address that already has an account gets a "you already have an account" email instead, so the response does not say which addresses are registered.</p>
+      <p>Then one transaction inserts the user, runs the <code>UserCreated</code> hook, and records the accepted terms. The hook is <x-ref path="internal/orgs/orgs.go" symbol="func (s *Service) createPersonalOrg("><code>createPersonalOrg</code></x-ref>: every user gets a personal organisation on the Personal plan and is its owner. The verification email goes last. Until the address is verified, and in approval mode until an admin approves, <x-ref path="internal/auth/service.go" symbol="func (s *Service) Login("><code>Login</code></x-ref> refuses to open a session, and only the right password learns why.</p>
+      <p class="writes"><code>users</code><code>organizations</code><code>org_members</code><code>terms_acceptances</code><code>email_tokens</code></p>
+    </li>
+    <li class="stage" data-lit="s2">
+      <h3 id="life-of-a-project--t1">The create request</h3>
+      <p><code>POST /api/v1/projects</code> passes the <x-ref path="internal/api/security.go" symbol="func (s *Server) guard("><code>guard</code></x-ref> first: the session cookie (or bearer token), the double-submit CSRF token and the <code>Origin</code> check, outstanding terms. Its rule is <code>scopeBody</code>, so <x-ref path="internal/api/projects.go" symbol="func (s *Server) CreateProject("><code>CreateProject</code></x-ref> names the organisation itself and calls <x-ref path="internal/api/access.go" symbol="func (s *Server) authorizeOrg("><code>authorizeOrg</code></x-ref> for <code>org.create_project</code>. With no <code>org_id</code> in the body that is the caller's personal organisation. Tenancy then checks the organisation's project quota.</p>
+      <p><x-ref path="internal/provision/service.go" symbol="func (s *Service) Create(ctx"><code>provision.Create</code></x-ref> validates the name, generates a 32-byte password and its SCRAM verifier, settles the Postgres major and the region, and picks the shared instance. It seals the password with the master key, bound to the new project id and the purpose, and in one transaction inserts the project (status <code>provisioning</code>), makes the creator a project member, and enqueues a <code>create</code> operation whose <code>params.secrets</code> holds the sealed password. The response is <code>202</code> with the operation, the connection strings and the password, which is never shown again.</p>
+      <p class="writes"><code>projects</code><code>project_members</code><code>operations</code><code>audit_log</code></p>
+    </li>
+    <li class="stage" data-lit="s3">
+      <h3 id="life-of-a-project--claim">A worker claims the operation</h3>
+      <p>A trigger on <code>operations</code> sends <code>pg_notify('xenibase_operations', …)</code>, and the notifier's <code>LISTEN</code> connection wakes the runner; polling every two seconds is the fallback. <x-ref path="internal/jobs/runner.go" symbol="func (r *Runner) Run(ctx"><code>Runner.Run</code></x-ref> claims only while it has a free slot (four by default, <code>XENIBASE_WORKERS</code>). The claim takes the oldest runnable operation of a kind this process serves, interactive kinds such as <code>create</code> before long and scheduled ones (<x-page id="control-plane--queue"/>), with <code>FOR UPDATE SKIP LOCKED</code>, sets it <code>running</code>, increments <code>attempts</code> and records the worker in <code>locked_by</code>.</p>
+      <p>While the handler runs, a heartbeat refreshes <code>locked_at</code> every ten seconds. Another worker's reclaim loop puts back any operation whose heartbeat is more than thirty seconds old, and every write the old worker makes afterwards is refused because <code>locked_by</code> no longer matches.</p>
+    </li>
+    <li class="stage" data-lit="s4">
+      <h3 id="life-of-a-project--build">The database is built</h3>
+      <p><x-ref path="internal/provision/flows.go" symbol="func (s *Service) runCreate("><code>runCreate</code></x-ref> opens the password, then runs steps that are each safe to repeat. <code>EnsureInstance</code> is a no-op on the shared tier. <code>ensureRole</code> creates (or alters) the owner role with every attribute spelled out: <code>NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS</code>, a connection limit, the verifier as its password, a temporary file limit, and the role's statement and idle-in-transaction timeouts. <code>ensureDatabase</code> creates the database from <code>template0</code>, owned by that role, revokes everything from <code>PUBLIC</code> and grants <code>CONNECT, TEMPORARY</code> to the owner. <code>hardenDatabase</code> revokes <code>CREATE</code> on <code>public</code>, gives the schema to the owner and, on the shared tier, hides <code>pg_stat_activity</code>.</p>
+      <p>All of this is plain SQL from <code>xenibase-server</code> to the cluster as its admin role, over the private network. Identifiers go through <code>pgx.Identifier.Sanitize</code>, and the verifier is checked to be a SCRAM verifier without a quote before it is inlined.</p>
+    </li>
+    <li class="stage" data-lit="s5">
+      <h3 id="life-of-a-project--sync">The poolers learn the route</h3>
+      <p><x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) Sync("><code>Manager.Sync</code></x-ref> takes a cluster-wide advisory lock and rebuilds every region's pooler configuration from the metadata database: a route per project database, its owner's verifier, read-only <code>_ro</code> routes for projects with replicas, V1 aliases, personal logins, backend services' logins, probe logins and owner-created logins on dedicated projects. <x-ref path="internal/pooler/render.go" symbol="func Render("><code>Render</code></x-ref> validates every name, host and verifier rather than escaping it, so nothing in the metadata database can inject pooler configuration. The files are written atomically in a safe order (users, then <code>hba.conf</code>, then routes), pushed to the pooler hosts through their agents, and every PgBouncer gets <code>RELOAD</code>.</p>
+      <p class="writes"><code>userlist.txt</code><code>hba.conf</code><code>databases.ini</code></p>
+    </li>
+    <li class="stage" data-lit="s6">
+      <h3 id="life-of-a-project--smoke">The smoke test, then active</h3>
+      <p><x-ref path="internal/provision/flows.go" symbol="func (s *Service) smokeTest("><code>smokeTest</code></x-ref> connects through both poolers as the owner with the real password and checks <code>current_user</code> and <code>current_database()</code>. That proves the route and the SCRAM passthrough end to end. The project is then set <code>active</code>, and when the runner marks the operation succeeded the same statement deletes <code>params.secrets</code>, so the sealed password is gone.</p>
+      <p class="writes"><code>projects.status = active</code><code>operations.status = succeeded</code></p>
+    </li>
+    <li class="stage" data-lit="s7">
+      <h3 id="life-of-a-project--connect">An app connects through the pooler</h3>
+      <p>The app opens <code>postgresql://p_…_owner:…@db.example.com:6543/p_…?sslmode=require</code>. PgBouncer requires TLS, then applies <code>hba.conf</code> (<code>auth_type = hba</code>): a project with an IP allowlist takes its customer logins only from those networks. It authenticates the client with the verifier from <code>userlist.txt</code>, finds the route by database name, and logs in to the backend by passing the client's SCRAM proof through, so it never needs the password. Pools are per database and user, so connections are never shared between tenants.</p>
+      <p>The last line of defence is Postgres itself. Every role is in one auth file per region, and a client can ask PgBouncer for any route. But <code>CONNECT</code> on each project database is granted only to its own roles, so a role routed to someone else's database is refused at login.</p>
+    </li>
+    <li class="stage" data-lit="s8">
+      <h3 id="life-of-a-project--edge">Or through the edge</h3>
+      <p>Turning on backend services (<x-ref path="internal/services/service.go" symbol="func (s *Service) Enable("><code>services.Enable</code></x-ref>) creates a publishable and a secret key and queues an operation that makes the project's request roles and <code>xb_*</code> schemas. The project then appears in the edge feed. A browser calls <code>https://&lt;ref&gt;.&lt;domain&gt;/data/v1/…</code> with the publishable key.</p>
+      <p><x-ref path="internal/edge/gateway.go" symbol="func (e *Edge) ServeHTTP("><code>Edge.ServeHTTP</code></x-ref> resolves exactly one project from the hostname, applies CORS, the project's state and plan limits, and <x-ref path="internal/edge/gateway.go" symbol="func (e *Edge) authorize("><code>authorize</code></x-ref> looks the key up by its SHA-256 among that project's keys only, rate-limits by address and key, and verifies a user's ES256 token against the project's own JWKs. <x-ref path="internal/edge/edge.go" symbol="func (e *Edge) WithRequest("><code>WithRequest</code></x-ref> then runs the request in one transaction through the transaction-mode pooler, logged in as the <code>anon</code>, <code>user</code> or <code>service</code> role itself, with the claims and statement timeout set with <code>set_config(…, true)</code>, so nothing outlives the transaction. Row-level security decides what the role sees.</p>
+    </li>
+  </ol>
+  <div class="stepper-figure">
+    <x-include name="project-sequence.html"/>
+    <div class="stepper-bar"><button class="prev" type="button">Previous</button><button class="next" type="button">Next</button><span class="count" aria-live="polite"></span></div>
+  </div>
+</div>
+
+<h2 id="life-of-a-project--names">Names and credentials</h2>
+<p>A project's database name is <code>p_</code> followed by ten random base32 letters, and its owner role is derived from it. Nothing in either says who the customer is or what the project is called, because both are visible to every tenant on a shared cluster in <code>pg_database</code> and <code>pg_roles</code>. A collision on insert is retried with fresh names, up to five times.</p>
+<x-code path="internal/provision/names.go" start="func Names() (dbName, ownerRole string, err error) {" doc="true"/>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V1 gives names as <code>&lt;slug&gt;_&lt;4-char-random&gt;</code>, such as <code>blog_k2f9</code> (<x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 5.1 Stable connection strings">V1 5.1</x-ref>). V2 §10.2 replaced them with opaque names, and a V1 project renamed since keeps its old name as a pooler alias (<code>alias_db_name</code>), so old connection strings still work. V1 also says the password is never stored reversibly (<x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 5.3 Credentials">V1 5.3</x-ref>). The code keeps it, sealed, in the create operation until it finishes, because the smoke test needs it and may run in another process after a restart (<x-ref path="docs/decisions.md" symbol="| 3 | Password handoff for the smoke test |">decision M1 #3</x-ref>).</p>
+</div>
+
+<h2 id="life-of-a-project--placement">Where the project lands</h2>
+<p>A shared project goes to a running shared instance in its region, on a healthy, active node, running the requested major. An organisation with shared clusters of its own uses only those; every other organisation uses only untagged ones. Among those, the instance with the fewest live projects wins.</p>
+<x-code path="internal/store/queries/infra.sql" start="-- name: PickSharedInstance :one" end="LIMIT 1;"/>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V1's create flow picks "the shared node with the most free capacity" (<x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 6.1 Create project (shared)">V1 6.1</x-ref>). The query counts projects instead. Projects differ a lot in size, so a cluster with a few large databases keeps getting new ones; capacity automation (Part E) watches disk separately.</p>
+</div>
+<p>A dedicated project goes through <x-ref path="internal/dedicated/dedicated.go" symbol="func (s *Service) Validate("><code>dedicated.Validate</code></x-ref>, which places it on the least loaded node in the region that fits its profile, or asks capacity automation for a new host.</p>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>A tenant used to be able to choose the node for a dedicated project: <code>CreateProject</code> passed the request's <code>node_id</code> into <code>CreateParams.NodeID</code> for any caller allowed to create projects, and <code>Validate</code> then checked only that the node took dedicated instances, had an agent and was healthy, not that the instance fitted or that the node was active rather than draining. Now <x-ref path="internal/api/projects.go" symbol="func (s *Server) CreateProject("><code>CreateProject</code></x-ref> refuses <code>node_id</code> with 403 unless the caller is a platform admin (the dashboard offers the choice only to them, and API tokens never are), and <x-ref path="internal/dedicated/dedicated.go" symbol="func (s *Service) Validate("><code>Validate</code></x-ref> runs <code>placeDedicated</code>'s lifecycle and <code>fits</code> checks on a hand-picked node too, except for a detached replica, whose instance is already there (<code>TestCreateProjectNodeIsForPlatformAdmins</code>, <code>TestValidateChecksAChosenNodeLikePlacement</code>). Promote and move reach <code>Validate</code> too and get the same checks; who may name a node for a promote, HA standby, replica or demote is not changed here.</p>
+</div>
+
+<h2 id="life-of-a-project--operations">How the operation is run</h2>
+<p>Every long action is the same shape: a row in <code>operations</code>, a handler that must be safe to run again, and optionally a compensating <code>OnFail</code>. The kind sets the attempts (create: three) and the time limit per attempt (create: 45 minutes, because a dedicated create may wait for a new host).</p>
+<x-code path="internal/store/queries/operations.sql" start="-- name: ClaimOperation :one" end="RETURNING *;"/>
+<p>When an attempt fails, the runner retries with exponential backoff (two seconds doubling to five minutes). A permanent error, or the last attempt, runs <code>OnFail</code>. For a create that is <x-ref path="internal/provision/flows.go" symbol="func (s *Service) rollbackCreate("><code>rollbackCreate</code></x-ref>: it soft-deletes the project as <code>error</code>, kills pooled connections, removes the route and drops the database and role, so a failed create leaves nothing behind. Every step log line is appended to the row and streamed to the dashboard over Server-Sent Events.</p>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>The lease used to be fenced only by worker identity, and a failed heartbeat was logged and skipped, so a worker cut off from the metadata database for more than thirty seconds kept running an operation that another worker had reclaimed, and could even write its result over the new attempt's. Now <x-ref path="internal/jobs/runner.go" symbol="func (r *Runner) heartbeat("><code>heartbeat</code></x-ref> gives each heartbeat a third of the lease and cancels the attempt once heartbeats have failed for two thirds of it, before anyone can reclaim it, and every write to the row (heartbeat, step log, succeed, fail, retry) matches <code>locked_by</code> and <code>attempts</code>, so a stale attempt writes nothing even when the same process claimed the operation again. <code>TestPartitionedAttemptStopsAndIsFenced</code> cuts a worker off through a proxy and checks both.</p>
+</div>
+
+<h2 id="life-of-a-project--isolation">What keeps tenants apart on a shared cluster</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Layer</th><th>What it does</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td>Control plane</td><td>Every route declares a scope and an action. Resources resolve to their organisation before <code>authz.Can</code>; ones the caller cannot see answer 404, and a token acts only in its own organisation and projects.</td><td><x-ref path="internal/authz/authz.go" symbol="func Can("><code>authz.Can</code></x-ref></td></tr>
+    <tr><td>Pooler</td><td>TLS required, SCRAM against the stored verifier, an optional per-project IP allowlist, separate pools per database and user.</td><td><x-ref path="internal/pooler/render.go" symbol="func renderHBA("><code>renderHBA</code></x-ref></td></tr>
+    <tr><td>Database</td><td><code>CONNECT</code> revoked from <code>PUBLIC</code>, granted to the project's roles only. Owner roles are not superusers and cannot create databases or roles (except on a dedicated instance with role management on).</td><td><x-ref path="internal/provision/flows.go" symbol="func (s *Service) ensureDatabase("><code>ensureDatabase</code></x-ref></td></tr>
+    <tr><td>Catalog</td><td><code>CREATE</code> on <code>public</code> revoked; <code>pg_stat_activity</code>, <code>pg_stat_database</code>, <code>pg_stat_database_conflicts</code> and the <code>pg_stat_get_activity</code>, <code>pg_stat_get_db_*</code> and <code>pg_stat_get_backend_*</code> functions hidden from <code>PUBLIC</code> in each database.</td><td><x-ref path="internal/provision/activity.go" symbol="var activityPrivacy = []string{"><code>activityPrivacy</code></x-ref></td></tr>
+  </tbody>
+</table></div>
+<div class="callout"><span class="callout-label">Resolved</span><p>Hiding <code>pg_stat_activity</code> left its neighbours readable: <code>pg_stat_database</code> (every database's backends, commits, rows and blocks), <code>pg_stat_database_conflicts</code>, and <code>pg_stat_get_backend_dbid</code> and <code>_userid</code>, which return every backend's database and role, so a tenant could watch another's load. <x-ref path="internal/provision/activity.go" symbol="func RestrictActivity("><code>RestrictActivity</code></x-ref> now revokes both views and every <code>pg_stat_get_db_*</code> and <code>pg_stat_get_backend_*</code> function (and <code>pg_stat_get_progress_info</code>), listed from <code>pg_proc</code> so a new major's additions are covered. <code>apply_settings</code> runs it on shared databases, and migration <x-ref path="internal/store/migrations/00066_restrict_stat_views.sql">00066</x-ref> queues one for every existing shared project that has no exclusive operation pending (the others get it from their next one). <code>isocheck.Database</code> reports any of them readable by <code>PUBLIC</code>, the live probes and the isolation suite try them, and query insights read <code>stats_reset</code> as the admin.</p></div>
+
+<h2 id="life-of-a-project--allowlist">The IP allowlist</h2>
+<p>Since release 4.2.4 a project can narrow who reaches it through the poolers. <code>PUT /projects/{id}/network</code> normalises the list (bare addresses become <code>/32</code> or <code>/128</code>, host bits and <code>/0</code> are refused), stores it, and runs a pooler sync. <code>renderHBA</code> writes, for each restricted project, its platform logins from anywhere, then each network, then <code>reject</code>, and finally a rule that takes everything else with SCRAM. The edge's request roles and the probe login stay exempt, so the data API keeps working, and the dashboard's console connects to instances directly.</p>
+<x-code path="internal/pooler/render.go" start="func renderHBA(" doc="true"/>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>The create and rotate flows skip their smoke test for a project with an allowlist, because it would connect from <code>xenibase-server</code>'s address (<x-ref path="docs/decisions.md" symbol="| 5 | Smoke test | Provisioning and rotation skip">allowlist decision #5</x-ref>). V1 §6.1 step 5 makes the smoke test part of every create. A new project starts with no list, so creates still test; a rotation on a restricted project does not.</p>
+</div>
+<div class="callout"><span class="callout-label">Resolved</span><p>Narrowing the list did not disconnect anyone already connected: HBA rules are checked only at login, and in session mode a connection can last days. After the sync, <x-ref path="internal/api/projects.go" symbol="func (s *Server) SetProjectNetwork("><code>SetProjectNetwork</code></x-ref> now calls <x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) DropDisallowed("><code>DropDisallowed</code></x-ref>, which reads <code>SHOW CLIENTS</code> on every pooler serving the project and sends <code>KILL_CLIENT</code> for each client on its routes (database, <code>_ro</code>, V1 alias) whose address is on none of the networks, leaving Xenibase's exempt logins and socket clients alone. Clients still on the list keep their connections, unlike a <code>KILL</code> of the whole database. The audit entry records how many were dropped, and <code>docs/network-access.md</code> says so.</p></div>
+
+<h2 id="life-of-a-project--when-something-goes-wrong">When something goes wrong</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>If this happens</th><th>What Xenibase does</th></tr></thead>
+  <tbody>
+    <tr><td>The browser retries the create request</td><td>There is no idempotency key: a second request makes a second project with new names. The dashboard prevents a double submit; API callers should not retry a create blindly.</td></tr>
+    <tr><td>The worker dies mid-create</td><td>Its heartbeat stops, the operation is reclaimed after thirty seconds, and the next attempt re-runs every step. Each one checks before it acts (<code>CREATE</code> or <code>ALTER ROLE</code>, create the database only if missing), so repeating them is safe. An attempt cut short counts towards the three.</td></tr>
+    <tr><td>The shared cluster is down</td><td>Connecting fails, the attempt is retried with backoff, and after three attempts <code>rollbackCreate</code> marks the project <code>error</code> and cleans up what it can.</td></tr>
+    <tr><td>A pooler is down during the sync</td><td>The files are written anyway. A pooler host that misses the push stays stale and fails keepalived's check until the arbiter catches it up; only when no host took the change does the step fail and retry.</td></tr>
+    <tr><td>One route in the metadata database is invalid</td><td>Resolved: <code>Render</code> used to refuse the whole configuration, so one bad host blocked every project's create and delete platform-wide, and <code>CreateNode</code> accepted a private address such as <code>pg_shared</code> that <code>Render</code>'s host pattern rejects. <x-ref path="internal/nodes/nodes.go" symbol="func CheckAddr("><code>CheckAddr</code></x-ref> now applies the renderer's pattern when a node is added (and the shared node's and an agent-advertised address are checked too), and <code>Sync</code> runs <x-ref path="internal/pooler/render.go" symbol="func (c *Config) DropInvalid() []error {"><code>DropInvalid</code></x-ref> first: a bad route or login is left out (skipped, never escaped), a bad allowlist takes its project's routes with it, the rest is written, and the <code>pooler_config_skipped</code> alert says what was left out.</td></tr>
+    <tr><td>The smoke test fails</td><td>The route works in the files but not end to end (a wrong verifier, TLS, the backend's <code>pg_hba.conf</code>). The attempt is retried; if it keeps failing, the project is rolled back.</td></tr>
+    <tr><td>The organisation is suspended later</td><td>Its routes drop out of the pooler files (<code>PoolerRoutes</code> skips suspended organisations), the edge answers <code>project_suspended</code>, and the API allows only reads.</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="life-of-a-project--read-next">Read next</h2>
+<ul>
+  <li><x-page id="control-plane"/>: the guard, the operations queue and every provisioning flow in full.</li>
+  <li><x-page id="connections"/>: the pooler files, pooler hosts and the floating IP, the waker, and the edge.</li>
+  <li><x-page id="security"/>: the isolation checklist, the master key, and the isolation tests.</li>
+</ul>

@@ -1,6 +1,6 @@
 module github.com/israel-duff/xenibase
 
-go 1.26.9
+go 1.26.10
 
 tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
 

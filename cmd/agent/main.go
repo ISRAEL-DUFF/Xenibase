@@ -5,7 +5,7 @@
 //
 //	xenibase-agent register --server https://xenibase.example.com --token <one-time>
 //	xenibase-agent run
-//	xenibase-agent decrypt --key-file xenibase-backup-key.txt < x.dump.enc > x.dump
+//	xenibase-agent decrypt --key-file xenibase-backup-key.txt --in x.dump.enc --out x.dump
 //
 // Environment variables mirror the flags (XENIBASE_AGENT_*).
 package main
@@ -36,9 +36,11 @@ import (
 )
 
 // DefaultPGImage is the instance image this release was built and tested
-// with (deploy/images/postgres).
-// DefaultPGImage is the instance image, {major} replaced by each
-// instance's Postgres major (V3 §2.4).
+// with (deploy/images/postgres), {major} replaced by each instance's
+// Postgres major (V3 §2.4). build.sh builds each major from the minor
+// release the Dockerfile pins, and tags it with the release too
+// (xenibase-postgres:18.6-walg3.0.9), so pointing XENIBASE_AGENT_PG_IMAGE
+// at a release tag holds instances on it.
 const DefaultPGImage = "xenibase-postgres:{major}-walg3.0.9"
 
 func main() {
@@ -64,6 +66,7 @@ type opts struct {
 	poolerDir, poolerSession, poolerPooled, poolerLocal string
 	serverID, hetznerToken, hetznerAPI, floatingIP      string
 	poolerPidFiles                                      string
+	assignIP                                            bool
 }
 
 func flags(name string, args []string) (*opts, error) {
@@ -94,16 +97,17 @@ func flags(name string, args []string) (*opts, error) {
 	fs.StringVar(&o.poolerPooled, "pooler-pooled-addr", env("XENIBASE_AGENT_POOLER_POOLED_ADDR", "127.0.0.1:6543"), "pooler host: the transaction PgBouncer, checked for readiness")
 	fs.StringVar(&o.poolerLocal, "pooler-local", env("XENIBASE_AGENT_POOLER_LOCAL", "127.0.0.1:7071"), "pooler host: loopback address for keepalived's check and notify calls")
 	fs.StringVar(&o.serverID, "server-id", env("XENIBASE_AGENT_SERVER_ID", ""), "pooler host: the provider's ID for this machine, or \"hetzner-metadata\" to ask Hetzner's metadata service")
-	fs.StringVar(&o.hetznerToken, "hetzner-token", env("XENIBASE_AGENT_HETZNER_TOKEN", ""), "pooler host: Hetzner Cloud API token for assigning the floating IP")
+	fs.StringVar(&o.hetznerToken, "hetzner-token", env("XENIBASE_AGENT_HETZNER_TOKEN", ""), "pooler host: Hetzner Cloud API token for assigning the floating IP (only with --assign-floating-ip)")
+	fs.BoolVar(&o.assignIP, "assign-floating-ip", env("XENIBASE_AGENT_ASSIGN_FLOATING_IP", "") == "true", "pooler host: assign the floating IP from this host when keepalived makes it MASTER (needs a Hetzner token here; by default xenibase-server assigns it)")
 	fs.StringVar(&o.hetznerAPI, "hetzner-api", env("XENIBASE_AGENT_HETZNER_API", floatip.DefaultHetznerAPI), "pooler host: Hetzner Cloud API base URL")
 	fs.StringVar(&o.poolerPidFiles, "pooler-pidfiles", env("XENIBASE_AGENT_POOLER_PIDFILES", ""), "pooler host: comma-separated PgBouncer PID files, signalled to reload after each new configuration")
-	fs.StringVar(&o.floatingIP, "floating-ip-id", env("XENIBASE_AGENT_FLOATING_IP_ID", ""), "pooler host: the floating IP's ID; empty when keepalived alone moves the address")
+	fs.StringVar(&o.floatingIP, "floating-ip-id", env("XENIBASE_AGENT_FLOATING_IP_ID", ""), "pooler host: the floating IP's ID (only with --assign-floating-ip)")
 	return o, fs.Parse(args)
 }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xenibase-agent register|run|decrypt|pooler-seed|keepalived-config|version [flags]")
+		return errors.New("usage: xenibase-agent register|run|decrypt|pooler-seed|pooler-ini|keepalived-config|version [flags]")
 	}
 	switch args[0] {
 	case "version", "-version", "--version":
@@ -114,6 +118,8 @@ func run(args []string) error {
 		return decrypt(args[1:])
 	case "pooler-seed":
 		return poolerSeed(args[1:])
+	case "pooler-ini":
+		return poolerINI(args[1:])
 	case "keepalived-config":
 		return keepalivedConfig(args[1:])
 	case "register":
@@ -224,9 +230,16 @@ func serve(o *opts) error {
 	if err != nil {
 		return err
 	}
+	if o.dbAllow == defaultDBAllow && o.poolerDir == "" {
+		// The agent can't tell which private addresses are the platform's.
+		log.Warn("XENIBASE_AGENT_DB_ALLOW is not set: new instances accept SCRAM logins from every private range, "+
+			"past projects' IP allowlists; set it to the networks of xenibase-server, the poolers and the other nodes "+
+			"(docs/network-access.md)", "db_allow", o.dbAllow)
+	}
 	svc := agentsvc.New(agentsvc.Config{
 		Version: version.Get().Version, NodeID: st.NodeID, PGBinDir: o.pgBin, DiskPath: o.diskPath,
-		Instances: agentsvc.InstanceConfig{Docker: o.dockerHost, Image: o.image, Network: o.network, PublishAddr: o.publish, HBAAllow: cidrs, MoveAllow: moveCIDRs, EtcdImage: o.etcdImage},
+		Instances:   agentsvc.InstanceConfig{Docker: o.dockerHost, Image: o.image, Network: o.network, PublishAddr: o.publish, HBAAllow: cidrs, MoveAllow: moveCIDRs, EtcdImage: o.etcdImage},
+		ClientAllow: agentsvc.LoadClientAllow(st.Dir, st.CACert, log),
 	}, log)
 	if o.poolerDir != "" {
 		if err := enablePooler(ctx, svc, o, log); err != nil {
@@ -251,12 +264,9 @@ func enablePooler(ctx context.Context, svc *agentsvc.Service, o *opts, log *slog
 		}
 		serverID = id
 	}
-	var fip floatip.Provider = floatip.None{}
-	if o.floatingIP != "" {
-		if o.hetznerToken == "" || serverID == "" {
-			return errors.New("--floating-ip-id needs --hetzner-token and --server-id")
-		}
-		fip = &floatip.Hetzner{API: o.hetznerAPI, Token: o.hetznerToken, IPID: o.floatingIP}
+	fip, err := floatingIP(o, serverID, log)
+	if err != nil {
+		return err
 	}
 	var pidfiles []string
 	for _, f := range strings.Split(o.poolerPidFiles, ",") {
@@ -274,8 +284,27 @@ func enablePooler(ctx context.Context, svc *agentsvc.Service, o *opts, log *slog
 			log.Error("pooler local API stopped", "err", err)
 		}
 	}()
-	log.Info("pooler host mode", "dir", o.poolerDir, "local", o.poolerLocal, "server_id", serverID, "floating_ip", o.floatingIP)
+	log.Info("pooler host mode", "dir", o.poolerDir, "local", o.poolerLocal, "server_id", serverID, "assigns_floating_ip", o.assignIP)
 	return nil
+}
+
+// floatingIP is how this pooler host assigns the floating IP: not at all
+// by default. xenibase-server's arbiter moves it to the host keepalived
+// makes MASTER, so this internet-facing host needs no Hetzner token (one
+// cannot be narrowed to an IP: it opens the whole Hetzner project).
+// --assign-floating-ip assigns it from here too, which fails over while the
+// control plane is down, at the cost of that token living here.
+func floatingIP(o *opts, serverID string, log *slog.Logger) (floatip.Provider, error) {
+	switch {
+	case o.assignIP:
+		if o.floatingIP == "" || o.hetznerToken == "" || serverID == "" {
+			return nil, errors.New("--assign-floating-ip needs --floating-ip-id, --hetzner-token and --server-id")
+		}
+		return &floatip.Hetzner{API: o.hetznerAPI, Token: o.hetznerToken, IPID: o.floatingIP}, nil
+	case o.hetznerToken != "" || o.floatingIP != "":
+		log.Warn("XENIBASE_AGENT_HETZNER_TOKEN or XENIBASE_AGENT_FLOATING_IP_ID is set, but this host does not assign the floating IP: xenibase-server does. Remove the token from this host, or set XENIBASE_AGENT_ASSIGN_FLOATING_IP=true to assign from here as well")
+	}
+	return floatip.None{}, nil
 }
 
 // poolerSeed writes placeholder PgBouncer files on a pooler host so the
@@ -290,6 +319,33 @@ func poolerSeed(args []string) error {
 		return errors.New("pooler-seed: --dir is required")
 	}
 	return agentsvc.SeedPoolerDir(*dir, 0o640)
+}
+
+// poolerINI renders a pooler host's pgbouncer.ini from the shipped one with
+// how PgBouncer connects to the backends: server_tls_sslmode
+// (XENIBASE_POOLER_SERVER_TLS_SSLMODE, default prefer) and the backends' CA
+// (XENIBASE_POOLER_SERVER_TLS_CA_FILE) for verify-ca and verify-full.
+func poolerINI(args []string) error {
+	fs := flag.NewFlagSet("pooler-ini", flag.ContinueOnError)
+	in := fs.String("in", "", "the shipped pgbouncer.ini")
+	out := fs.String("out", "", "where to write the rendered file")
+	mode := fs.String("server-tls-sslmode", env("XENIBASE_POOLER_SERVER_TLS_SSLMODE", "prefer"), "sslmode to the backends: "+strings.Join(agentsvc.ServerTLSModes, ", "))
+	ca := fs.String("server-tls-ca-file", env("XENIBASE_POOLER_SERVER_TLS_CA_FILE", ""), "CA that signed the backends' certificates (verify-ca, verify-full)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" || *out == "" {
+		return errors.New("pooler-ini: --in and --out are required")
+	}
+	b, err := os.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	ini, err := agentsvc.PoolerINI(b, *mode, *ca)
+	if err != nil {
+		return fmt.Errorf("pooler-ini: %w", err)
+	}
+	return os.WriteFile(*out, ini, 0o640)
 }
 
 // keepalivedConfig prints keepalived.conf for this pooler host.
@@ -327,12 +383,14 @@ func keepalivedConfig(args []string) error {
 
 // decrypt turns a backup object back into a pg_dump archive with the
 // downloaded backup key, without xenibase-server: the disaster-recovery path
-// for metadata self-backups (docs/disaster-recovery.md).
+// for metadata self-backups (docs/disaster-recovery.md). With --out, a
+// wrong key or a damaged object leaves no file; on stdout, what was
+// written before the failure stays, and only the exit status says so.
 func decrypt(args []string) error {
 	fs := flag.NewFlagSet("decrypt", flag.ContinueOnError)
 	keyFile := fs.String("key-file", "", "the backup key file downloaded from Xenibase")
 	in := fs.String("in", "-", "encrypted object (- for stdin)")
-	out := fs.String("out", "-", "pg_dump archive to write (- for stdout)")
+	out := fs.String("out", "-", "pg_dump archive to write, only if it decrypts whole (- for stdout, which keeps a partial archive on failure)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

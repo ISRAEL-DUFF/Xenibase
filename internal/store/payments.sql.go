@@ -109,6 +109,44 @@ func (q *Queries) ChargesDeferredByOutage(ctx context.Context) ([]Invoice, error
 	return items, nil
 }
 
+const claimPaymentEvent = `-- name: ClaimPaymentEvent :one
+UPDATE payment_events SET outcome = NULL, error = NULL, processed_at = NULL, attempts = attempts + 1, claimed_at = now()
+WHERE provider = $1 AND provider_event_id = $2
+  AND (outcome = 'failed' OR (outcome IS NULL AND claimed_at < now() - interval '10 minutes'))
+RETURNING id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error, attempts, claimed_at
+`
+
+type ClaimPaymentEventParams struct {
+	Provider        string
+	ProviderEventID string
+}
+
+// tenant: system - takes a stored event for processing again: one that failed, or one
+// whose processing was cut off (unfinished and claimed over ten minutes ago).
+func (q *Queries) ClaimPaymentEvent(ctx context.Context, arg ClaimPaymentEventParams) (PaymentEvent, error) {
+	row := q.db.QueryRow(ctx, claimPaymentEvent, arg.Provider, arg.ProviderEventID)
+	var i PaymentEvent
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.ProviderEventID,
+		&i.Kind,
+		&i.OrgID,
+		&i.Reference,
+		&i.ProviderRef,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Payload,
+		&i.ReceivedAt,
+		&i.ProcessedAt,
+		&i.Outcome,
+		&i.Error,
+		&i.Attempts,
+		&i.ClaimedAt,
+	)
+	return i, err
+}
+
 const countInvoiceCharges = `-- name: CountInvoiceCharges :one
 SELECT count(*)::int FROM payment_intents WHERE invoice_id = $1 AND provider = $2
 `
@@ -385,7 +423,7 @@ func (q *Queries) GetPaymentByProviderRef(ctx context.Context, arg GetPaymentByP
 }
 
 const getPaymentEvent = `-- name: GetPaymentEvent :one
-SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error FROM payment_events WHERE id = $1
+SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error, attempts, claimed_at FROM payment_events WHERE id = $1
 `
 
 // tenant: system - one event of the admin's log.
@@ -407,6 +445,8 @@ func (q *Queries) GetPaymentEvent(ctx context.Context, id int64) (PaymentEvent, 
 		&i.ProcessedAt,
 		&i.Outcome,
 		&i.Error,
+		&i.Attempts,
+		&i.ClaimedAt,
 	)
 	return i, err
 }
@@ -530,7 +570,7 @@ const insertPaymentEvent = `-- name: InsertPaymentEvent :one
 INSERT INTO payment_events (provider, provider_event_id, kind, org_id, provider_ref, amount_minor, currency, payload)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (provider, provider_event_id) DO NOTHING
-RETURNING id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error
+RETURNING id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error, attempts, claimed_at
 `
 
 type InsertPaymentEventParams struct {
@@ -572,6 +612,8 @@ func (q *Queries) InsertPaymentEvent(ctx context.Context, arg InsertPaymentEvent
 		&i.ProcessedAt,
 		&i.Outcome,
 		&i.Error,
+		&i.Attempts,
+		&i.ClaimedAt,
 	)
 	return i, err
 }
@@ -838,7 +880,7 @@ func (q *Queries) ListOrgPayments(ctx context.Context, arg ListOrgPaymentsParams
 }
 
 const listPaymentEvents = `-- name: ListPaymentEvents :many
-SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error FROM payment_events WHERE ($1::text IS NULL OR outcome = $1)
+SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error, attempts, claimed_at FROM payment_events WHERE ($1::text IS NULL OR outcome = $1)
 ORDER BY id DESC LIMIT $2
 `
 
@@ -872,6 +914,8 @@ func (q *Queries) ListPaymentEvents(ctx context.Context, arg ListPaymentEventsPa
 			&i.ProcessedAt,
 			&i.Outcome,
 			&i.Error,
+			&i.Attempts,
+			&i.ClaimedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1561,6 +1605,50 @@ func (q *Queries) ReopenInvoice(ctx context.Context, arg ReopenInvoiceParams) (I
 	return i, err
 }
 
+const retryablePaymentEvents = `-- name: RetryablePaymentEvents :many
+SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error, attempts, claimed_at FROM payment_events WHERE provider = $1 AND received_at > now() - interval '30 days'
+  AND (outcome = 'failed' OR (outcome IS NULL AND claimed_at < now() - interval '10 minutes'))
+ORDER BY id LIMIT 200
+`
+
+// tenant: system - a provider's events of the last 30 days to process again (see ClaimPaymentEvent).
+func (q *Queries) RetryablePaymentEvents(ctx context.Context, provider string) ([]PaymentEvent, error) {
+	rows, err := q.db.Query(ctx, retryablePaymentEvents, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PaymentEvent
+	for rows.Next() {
+		var i PaymentEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.Provider,
+			&i.ProviderEventID,
+			&i.Kind,
+			&i.OrgID,
+			&i.Reference,
+			&i.ProviderRef,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.Payload,
+			&i.ReceivedAt,
+			&i.ProcessedAt,
+			&i.Outcome,
+			&i.Error,
+			&i.Attempts,
+			&i.ClaimedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setBalanceAlert = `-- name: SetBalanceAlert :exec
 UPDATE billing_accounts SET balance_alerted = $1, balance_month = $2, zero_balance_at = $3
 WHERE org_id = $4
@@ -1814,7 +1902,7 @@ func (q *Queries) UninvoicedPrepaidMonths(ctx context.Context, orgID uuid.UUID) 
 }
 
 const unmatchedPaymentEvents = `-- name: UnmatchedPaymentEvents :many
-SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error FROM payment_events WHERE outcome = 'unmatched' ORDER BY id DESC LIMIT 200
+SELECT id, provider, provider_event_id, kind, org_id, reference, provider_ref, amount_minor, currency, payload, received_at, processed_at, outcome, error, attempts, claimed_at FROM payment_events WHERE outcome = 'unmatched' ORDER BY id DESC LIMIT 200
 `
 
 // tenant: system - verified money that couldn't be attributed to an org.
@@ -1842,6 +1930,8 @@ func (q *Queries) UnmatchedPaymentEvents(ctx context.Context) ([]PaymentEvent, e
 			&i.ProcessedAt,
 			&i.Outcome,
 			&i.Error,
+			&i.Attempts,
+			&i.ClaimedAt,
 		); err != nil {
 			return nil, err
 		}

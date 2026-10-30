@@ -78,8 +78,11 @@ proposal is provisioned by itself only when all of these hold:
 
 - automatic provisioning is on;
 - the provider can create servers;
-- the nodes' monthly cost plus the new server's stays within the
-  **monthly infrastructure budget**.
+- the nodes' monthly cost, plus the servers that started proposals are
+  still setting up, plus the new server's, stays within the **monthly
+  infrastructure budget**. Proposals are checked and started one at a
+  time across the control-plane servers, so two at once can't both fit
+  into the same headroom.
 
 The budget is zero until you set one, so nothing is bought until then.
 When the budget is in another currency than the servers, Xenibase converts
@@ -156,10 +159,14 @@ The settings (Platform → Capacity → Settings) are:
   projects are never among them.
 - **Empty nodes:** a node with no projects, dedicated instances, HA
   members, etcd member, or move copies is marked empty. The copies a move
-  keeps are kept for 48 hours. A server from a provider is deleted after
-  24 hours empty, and the node is removed. Manual machines are only
-  flagged: decommission them yourself. Mark a node **Keep** (Capacity →
-  Cost) to leave it alone.
+  keeps are kept for 48 hours. After 24 hours empty a provider's node is
+  **retiring**: nothing new is placed on it. At least 10 minutes later the
+  next sweep counts again; if something landed there after all, or the
+  node is now marked keep, it goes back into service, and otherwise its
+  clusters are retired, its server is deleted and the node is removed (a
+  failed delete is tried again by the next sweep). Manual machines are
+  only flagged: decommission them yourself. Mark a node **Keep** (Capacity
+  → Cost) to leave it alone.
 
 ## Cost attribution
 

@@ -6,8 +6,13 @@
 package typegen
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"go/token"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -27,7 +32,11 @@ type Options struct {
 	Package string // Go's package name (default "pgdtypes")
 }
 
-// Generate renders cat in lang.
+// Generate renders cat in lang. Database names are data, never source:
+// they reach the output only escaped as string literals or comments, and
+// identifiers are made from their letters and digits alone (numbered when
+// two names come out the same). A name Go's encoding/json can't use as a
+// tag is refused for Go.
 func Generate(cat *datacat.Catalog, lang string, o Options) (string, error) {
 	switch lang {
 	case TS:
@@ -35,7 +44,7 @@ func Generate(cat *datacat.Catalog, lang string, o Options) (string, error) {
 	case Dart:
 		return genDart(cat, o), nil
 	case Go:
-		return genGo(cat, o), nil
+		return genGo(cat, o)
 	}
 	return "", fmt.Errorf("unknown language %q: ts, dart or go", lang)
 }
@@ -80,25 +89,36 @@ func writable(t *datacat.Table) bool {
 // optional reports whether an insert may leave c out.
 func optional(c *datacat.Column) bool { return c.Nullable || c.HasDefault }
 
-// camel turns snake_case into CamelCase (upper) or camelCase.
-func camel(s string, upper bool) string {
+// camel turns snake_case into CamelCase (upper) or camelCase. Only
+// letters and digits are kept (ASCII ones only with ascii, for Dart and
+// TypeScript); anything else starts a new word. The result starts with a
+// letter, upper-case when upper: X is put in front otherwise.
+func camel(s string, upper, ascii bool) string {
 	var b strings.Builder
 	up := upper
-	for i, r := range s {
+	for _, r := range s {
+		word := unicode.IsLetter(r) || unicode.IsDigit(r)
+		if ascii {
+			word = r < unicode.MaxASCII && word
+		}
 		switch {
-		case r == '_' || r == '-' || r == ' ' || r == '.':
-			up = true
+		case !word:
+			up = b.Len() > 0 || upper
 		case up:
 			b.WriteRune(unicode.ToUpper(r))
 			up = false
-		case i == 0 && !upper:
+		case b.Len() == 0 && !upper:
 			b.WriteRune(unicode.ToLower(r))
 		default:
 			b.WriteRune(r)
 		}
 	}
 	out := b.String()
-	if out == "" || !unicode.IsLetter([]rune(out)[0]) {
+	if out == "" {
+		return "X"
+	}
+	first := []rune(out)[0]
+	if !unicode.IsLetter(first) || (upper && !unicode.IsUpper(first)) {
 		out = "X" + out
 	}
 	return out
@@ -106,7 +126,7 @@ func camel(s string, upper bool) string {
 
 // goName also upper-cases common initialisms (ID, URL).
 func goName(s string) string {
-	n := camel(s, true)
+	n := camel(s, true, false)
 	for _, w := range []string{"Id", "Url", "Uuid", "Api", "Json", "Http", "Ip"} {
 		if strings.HasSuffix(n, w) {
 			n = strings.TrimSuffix(n, w) + strings.ToUpper(w)
@@ -114,6 +134,109 @@ func goName(s string) string {
 	}
 	return n
 }
+
+// namer hands out identifiers that are unique in one scope: a name already
+// taken (or reserved) gets 2, 3… after it. With suffixes, every name+suffix
+// must be free too (Go's Todos, TodosTable, TodosInsert, TodosUpdate).
+type namer map[string]bool
+
+func newNamer(reserved ...string) namer {
+	n := namer{}
+	for _, r := range reserved {
+		n[r] = true
+	}
+	return n
+}
+
+func (n namer) name(base string, suffixes ...string) string {
+	free := func(s string) bool {
+		if n[s] {
+			return false
+		}
+		for _, x := range suffixes {
+			if n[s+x] {
+				return false
+			}
+		}
+		return true
+	}
+	out := base
+	for i := 2; !free(out); i++ {
+		out = base + strconv.Itoa(i)
+	}
+	n[out] = true
+	for _, x := range suffixes {
+		n[out+x] = true
+	}
+	return out
+}
+
+// comment is text for a line comment: as it is when every character prints,
+// quoted otherwise, so a newline (or a JavaScript line separator) can't end
+// the comment.
+func comment(s string) string {
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return strconv.Quote(s)
+		}
+	}
+	return s
+}
+
+// jsString is s as a TypeScript string literal (JSON's escaping, which
+// also covers U+2028 and U+2029).
+func jsString(s string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s)
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// dartString is s as a Dart string literal: single-quoted, with $ escaped
+// so nothing is interpolated.
+func dartString(s string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range s {
+		switch {
+		case r == '\\' || r == '\'' || r == '$':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case !unicode.IsPrint(r):
+			fmt.Fprintf(&b, `\u{%x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
+
+// goTag is c's json tag name, or an error when encoding/json would ignore
+// it (it allows letters, digits, spaces and !#$%&()*+-./:;<=>?@[]^_{|}~),
+// which also keeps quotes, backquotes and backslashes out of the tag.
+func goTag(t *datacat.Table, c string) (string, error) {
+	ok := c != ""
+	for _, r := range c {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", r) {
+			ok = false
+		}
+	}
+	if !ok {
+		return "", fmt.Errorf("column %s of %s.%s can't be a Go JSON field: encoding/json allows letters, digits, spaces and !#$%%&()*+-./:;<=>?@[]^_{|}~ in a name; rename it, or generate TypeScript or Dart",
+			strconv.Quote(c), strconv.Quote(t.Schema), strconv.Quote(t.Name))
+	}
+	return c, nil
+}
+
+var goPackageRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // ---- TypeScript -------------------------------------------------------------
 
@@ -124,7 +247,7 @@ func tsType(c *datacat.Column) string {
 	case len(c.Enum) > 0:
 		var labels []string
 		for _, l := range c.Enum {
-			labels = append(labels, fmt.Sprintf("%q", l))
+			labels = append(labels, jsString(l))
 		}
 		t = strings.Join(labels, " | ")
 	case c.Category == 'A':
@@ -150,11 +273,16 @@ func tsScalar(typname string) string {
 	return "string"
 }
 
+// tsKey is a property name: bare when it is a plain identifier, a string
+// literal otherwise.
 func tsKey(name string) string {
 	for i, r := range name {
-		if !unicode.IsLetter(r) && r != '_' && r != '$' && (i == 0 || !unicode.IsDigit(r)) {
-			return fmt.Sprintf("%q", name)
+		if r >= unicode.MaxASCII || (!unicode.IsLetter(r) && r != '_' && r != '$' && (i == 0 || !unicode.IsDigit(r))) {
+			return jsString(name)
 		}
+	}
+	if name == "" {
+		return jsString(name)
 	}
 	return name
 }
@@ -249,16 +377,17 @@ func genTS(cat *datacat.Catalog, o Options) string {
 	b.WriteString("}\n\n")
 	// Shorthands: Tables<"todos">, and one alias per table.
 	if len(schemas) > 0 {
-		def := schemas[0]
-		fmt.Fprintf(&b, "export type Tables<T extends keyof Database[%q][\"Tables\"]> = Database[%q][\"Tables\"][T][\"Row\"];\n", def, def)
-		fmt.Fprintf(&b, "export type TablesInsert<T extends keyof Database[%q][\"Tables\"]> = Database[%q][\"Tables\"][T][\"Insert\"];\n", def, def)
-		fmt.Fprintf(&b, "export type TablesUpdate<T extends keyof Database[%q][\"Tables\"]> = Database[%q][\"Tables\"][T][\"Update\"];\n", def, def)
-		for _, t := range by[def] {
+		def := jsString(schemas[0])
+		fmt.Fprintf(&b, "export type Tables<T extends keyof Database[%s][\"Tables\"]> = Database[%s][\"Tables\"][T][\"Row\"];\n", def, def)
+		fmt.Fprintf(&b, "export type TablesInsert<T extends keyof Database[%s][\"Tables\"]> = Database[%s][\"Tables\"][T][\"Insert\"];\n", def, def)
+		fmt.Fprintf(&b, "export type TablesUpdate<T extends keyof Database[%s][\"Tables\"]> = Database[%s][\"Tables\"][T][\"Update\"];\n", def, def)
+		names := newNamer("Json", "Database", "Tables", "TablesInsert", "TablesUpdate")
+		for _, t := range by[schemas[0]] {
 			kind := "Tables"
 			if !writable(t) {
 				kind = "Views"
 			}
-			fmt.Fprintf(&b, "export type %s = Database[%q][%q][%q][\"Row\"];\n", camel(t.Name, true), def, kind, t.Name)
+			fmt.Fprintf(&b, "export type %s = Database[%s][%q][%s][\"Row\"];\n", names.name(camel(t.Name, true, true)), def, kind, jsString(t.Name))
 		}
 	}
 	return b.String()
@@ -331,20 +460,45 @@ func dartTo(c *datacat.Column, field string) string {
 	return field
 }
 
+// Dart's reserved words and built-in identifiers, and the members every
+// generated class has: a field may not take these names.
+var dartReserved = strings.Fields(`abstract as assert async await base break case catch class const continue covariant default
+	deferred do dynamic else enum export extends extension external factory false final finally for Function get hide if
+	implements import in interface is late library mixin new null of on operator part required rethrow return sealed set
+	show static super switch sync this throw true try type typedef var void when while with yield
+	table fromJson toJson hashCode runtimeType toString noSuchMethod`)
+
+// The types the generated Dart uses: a class may not take these names.
+var dartTypes = []string{"List", "Map", "String", "DateTime", "int", "num", "bool", "dynamic", "Object", "Null", "double",
+	"Function", "Type", "Never", "Iterable", "Set", "Symbol", "Record", "Enum", "Future", "Stream", "Duration", "Uri", "BigInt"}
+
 func genDart(cat *datacat.Catalog, o Options) string {
 	var b strings.Builder
 	b.WriteString(header("//", o.Ref))
 	b.WriteString("// ignore_for_file: type=lint\n\n")
 	schemas, by := relations(cat)
+	classes := newNamer(dartTypes...)
 	for _, s := range schemas {
 		for _, t := range by[s] {
-			name := camel(t.Name, true)
+			base := camel(t.Name, true, true)
 			if s != cat.Schemas[0] {
-				name = camel(s, true) + name
+				base = camel(s, true, true) + base
 			}
-			fmt.Fprintf(&b, "/// A row of %s.%s.\nclass %s {\n", t.Schema, t.Name, name)
+			name := classes.name(base)
+			fields := newNamer()
+			field := map[*datacat.Column]string{}
 			for _, c := range t.Columns {
-				fmt.Fprintf(&b, "  final %s %s;\n", dartType(c), camel(c.Name, false))
+				f := camel(c.Name, false, true)
+				for _, r := range dartReserved {
+					if f == r {
+						f += "_"
+					}
+				}
+				field[c] = fields.name(f)
+			}
+			fmt.Fprintf(&b, "/// A row of %s.\nclass %s {\n", comment(t.Schema+"."+t.Name), name)
+			for _, c := range t.Columns {
+				fmt.Fprintf(&b, "  final %s %s;\n", dartType(c), field[c])
 			}
 			fmt.Fprintf(&b, "\n  const %s({", name)
 			for i, c := range t.Columns {
@@ -352,23 +506,23 @@ func genDart(cat *datacat.Catalog, o Options) string {
 					b.WriteString(", ")
 				}
 				if c.Nullable {
-					fmt.Fprintf(&b, "this.%s", camel(c.Name, false))
+					fmt.Fprintf(&b, "this.%s", field[c])
 				} else {
-					fmt.Fprintf(&b, "required this.%s", camel(c.Name, false))
+					fmt.Fprintf(&b, "required this.%s", field[c])
 				}
 			}
 			b.WriteString("});\n\n")
-			fmt.Fprintf(&b, "  static const table = %q;\n\n", t.Name)
+			fmt.Fprintf(&b, "  static const table = %s;\n\n", dartString(t.Name))
 			fmt.Fprintf(&b, "  factory %s.fromJson(Map<String, dynamic> json) => %s(\n", name, name)
 			for _, c := range t.Columns {
-				fmt.Fprintf(&b, "        %s: %s,\n", camel(c.Name, false), dartFrom(c, "json['"+c.Name+"']"))
+				fmt.Fprintf(&b, "        %s: %s,\n", field[c], dartFrom(c, "json["+dartString(c.Name)+"]"))
 			}
 			b.WriteString("      );\n\n  Map<String, dynamic> toJson() => {\n")
 			for _, c := range t.Columns {
 				if c.Generated {
 					continue
 				}
-				fmt.Fprintf(&b, "        '%s': %s,\n", c.Name, dartTo(c, camel(c.Name, false)))
+				fmt.Fprintf(&b, "        %s: %s,\n", dartString(c.Name), dartTo(c, field[c]))
 			}
 			b.WriteString("      };\n}\n\n")
 		}
@@ -416,10 +570,13 @@ func goType(c *datacat.Column, ptr bool) string {
 	return t
 }
 
-func genGo(cat *datacat.Catalog, o Options) string {
+func genGo(cat *datacat.Catalog, o Options) (string, error) {
 	pkg := o.Package
 	if pkg == "" {
 		pkg = "pgdtypes"
+	}
+	if !goPackageRe.MatchString(pkg) || token.IsKeyword(pkg) {
+		return "", fmt.Errorf("%q is not a Go package name", pkg)
 	}
 	var body strings.Builder
 	usesTime, usesJSON := false, false
@@ -432,20 +589,32 @@ func genGo(cat *datacat.Catalog, o Options) string {
 		}
 	}
 	schemas, by := relations(cat)
+	types := newNamer()
 	for _, s := range schemas {
 		for _, t := range by[s] {
-			name := goName(t.Name)
+			base := goName(t.Name)
 			if s != cat.Schemas[0] {
-				name = goName(s) + name
+				base = goName(s) + base
 			}
-			fmt.Fprintf(&body, "// %s is a row of %s.%s.\ntype %s struct {\n", name, t.Schema, t.Name, name)
+			name := types.name(base, "Table", "Insert", "Update")
+			fields := newNamer()
+			field, tag := map[*datacat.Column]string{}, map[*datacat.Column]string{}
+			for _, c := range t.Columns {
+				field[c] = fields.name(goName(c.Name))
+				var err error
+				if tag[c], err = goTag(t, c.Name); err != nil {
+					return "", err
+				}
+			}
+			ref := comment(t.Schema + "." + t.Name)
+			fmt.Fprintf(&body, "// %s is a row of %s.\ntype %s struct {\n", name, ref, name)
 			for _, c := range t.Columns {
 				gt := goType(c, c.Nullable)
 				note(gt)
-				fmt.Fprintf(&body, "\t%s %s `json:%q`\n", goName(c.Name), gt, c.Name)
+				fmt.Fprintf(&body, "\t%s %s `json:%s`\n", field[c], gt, strconv.Quote(tag[c]))
 			}
 			body.WriteString("}\n\n")
-			fmt.Fprintf(&body, "// %sTable is the name to use in data API paths.\nconst %sTable = %q\n\n", name, name, tableRef(cat, t))
+			fmt.Fprintf(&body, "// %sTable is the name to use in data API paths.\nconst %sTable = %s\n\n", name, name, strconv.Quote(tableRef(cat, t)))
 			if !writable(t) {
 				continue
 			}
@@ -456,11 +625,11 @@ func genGo(cat *datacat.Catalog, o Options) string {
 				}
 				gt := goType(c, optional(c))
 				note(gt)
-				tag := c.Name
+				tg := tag[c]
 				if optional(c) {
-					tag += ",omitempty"
+					tg += ",omitempty"
 				}
-				fmt.Fprintf(&body, "\t%s %s `json:%q`\n", goName(c.Name), gt, tag)
+				fmt.Fprintf(&body, "\t%s %s `json:%s`\n", field[c], gt, strconv.Quote(tg))
 			}
 			body.WriteString("}\n\n")
 			fmt.Fprintf(&body, "// %sUpdate changes the non-nil fields.\ntype %sUpdate struct {\n", name, name)
@@ -470,7 +639,7 @@ func genGo(cat *datacat.Catalog, o Options) string {
 				}
 				gt := goType(c, true)
 				note(gt)
-				fmt.Fprintf(&body, "\t%s %s `json:\"%s,omitempty\"`\n", goName(c.Name), gt, c.Name)
+				fmt.Fprintf(&body, "\t%s %s `json:%s`\n", field[c], gt, strconv.Quote(tag[c]+",omitempty"))
 			}
 			body.WriteString("}\n\n")
 		}
@@ -487,7 +656,7 @@ func genGo(cat *datacat.Catalog, o Options) string {
 		b.WriteString("import \"encoding/json\"\n\n")
 	}
 	b.WriteString(body.String())
-	return b.String()
+	return b.String(), nil
 }
 
 func tableRef(cat *datacat.Catalog, t *datacat.Table) string {

@@ -348,7 +348,9 @@ func (q *Queries) EndExpiredBreakGlass(ctx context.Context) ([]BreakGlassSession
 
 const expireOrgFinalBackups = `-- name: ExpireOrgFinalBackups :exec
 UPDATE backups b SET expires_at = $1
-FROM projects p WHERE p.id = b.project_id AND p.org_id = $2 AND b.kind = 'final' AND b.status = 'succeeded'
+FROM projects p WHERE p.id = b.project_id AND p.org_id = $2 AND b.status IN ('succeeded', 'copied')
+  AND (b.kind = 'final' OR (b.kind IN ('logical', 'archive')
+    AND (b.storage_target_id IS NULL OR EXISTS (SELECT 1 FROM storage_targets t WHERE t.id = b.storage_target_id AND t.org_id IS NULL))))
 `
 
 type ExpireOrgFinalBackupsParams struct {
@@ -356,7 +358,9 @@ type ExpireOrgFinalBackupsParams struct {
 	OrgID     uuid.UUID
 }
 
-// Final backups of a deleted organisation's projects are kept 30 days (V2 s10.10).
+// Final backups of a deleted organisation's projects are kept 30 days (V2
+// s10.10), and their nightly and archive backups on platform targets go
+// with them; those on the organisation's own targets are left alone.
 func (q *Queries) ExpireOrgFinalBackups(ctx context.Context, arg ExpireOrgFinalBackupsParams) error {
 	_, err := q.db.Exec(ctx, expireOrgFinalBackups, arg.ExpiresAt, arg.OrgID)
 	return err
@@ -686,8 +690,8 @@ func (q *Queries) InsertPlan(ctx context.Context, arg InsertPlanParams) (QuotaPl
 }
 
 const insertReapedSession = `-- name: InsertReapedSession :exec
-INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO reaped_sessions (project_id, org_id, kind, role_name, duration_s, query, pid, started_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type InsertReapedSessionParams struct {
@@ -697,6 +701,8 @@ type InsertReapedSessionParams struct {
 	RoleName  string
 	DurationS int32
 	Query     *string
+	Pid       *int32
+	StartedAt *time.Time
 }
 
 func (q *Queries) InsertReapedSession(ctx context.Context, arg InsertReapedSessionParams) error {
@@ -707,6 +713,8 @@ func (q *Queries) InsertReapedSession(ctx context.Context, arg InsertReapedSessi
 		arg.RoleName,
 		arg.DurationS,
 		arg.Query,
+		arg.Pid,
+		arg.StartedAt,
 	)
 	return err
 }
@@ -832,7 +840,7 @@ func (q *Queries) ListPlans(ctx context.Context) ([]QuotaPlan, error) {
 }
 
 const listReapedSessions = `-- name: ListReapedSessions :many
-SELECT id, project_id, org_id, kind, role_name, duration_s, query, created_at FROM reaped_sessions WHERE project_id = $1 AND org_id = $2
+SELECT id, project_id, org_id, kind, role_name, duration_s, query, created_at, pid, started_at FROM reaped_sessions WHERE project_id = $1 AND org_id = $2
 ORDER BY created_at DESC, id DESC LIMIT $3
 `
 
@@ -860,6 +868,8 @@ func (q *Queries) ListReapedSessions(ctx context.Context, arg ListReapedSessions
 			&i.DurationS,
 			&i.Query,
 			&i.CreatedAt,
+			&i.Pid,
+			&i.StartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -912,6 +922,18 @@ func (q *Queries) ListSharedClusters(ctx context.Context) ([]ListSharedClustersR
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockOrgForQuota = `-- name: LockOrgForQuota :exec
+SELECT id FROM organizations WHERE id = $1 FOR UPDATE
+`
+
+// Takes the organisation's row lock for the rest of the transaction, so
+// quota checks and the inserts they guard run one at a time per
+// organisation (tenancy.claim).
+func (q *Queries) LockOrgForQuota(ctx context.Context, orgID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockOrgForQuota, orgID)
+	return err
 }
 
 const markOrgDeleted = `-- name: MarkOrgDeleted :exec
@@ -1048,13 +1070,30 @@ func (q *Queries) OrgDedicatedRequests(ctx context.Context, orgID uuid.UUID) ([]
 }
 
 const orgDedicatedUse = `-- name: OrgDedicatedUse :one
-SELECT count(*)::int AS instances, COALESCE(sum(i.cpu_limit), 0)::float8 AS cpus,
-       COALESCE(sum(i.mem_limit_mb), 0)::int AS mem_mb, COALESCE(sum(i.volume_gb), 0)::int AS disk_gb
-FROM instances i
-WHERE i.kind = 'dedicated' AND i.deleted_at IS NULL AND (
-  EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.org_id = $1 AND p.deleted_at IS NULL AND p.tier = 'dedicated')
-  OR EXISTS (SELECT 1 FROM retired_databases r JOIN projects p ON p.id = r.project_id
-             WHERE r.instance_id = i.id AND r.dropped_at IS NULL AND r.reason = 'demotion' AND p.org_id = $1))
+WITH sized AS (
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM instances i
+  WHERE i.kind = 'dedicated' AND i.deleted_at IS NULL AND (
+    EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.org_id = $1 AND p.deleted_at IS NULL AND p.tier = 'dedicated')
+    OR EXISTS (SELECT 1 FROM retired_databases r JOIN projects p ON p.id = r.project_id
+               WHERE r.instance_id = i.id AND r.dropped_at IS NULL AND r.reason = 'demotion' AND p.org_id = $1)
+    OR EXISTS (SELECT 1 FROM operations o JOIN projects p ON p.id = o.project_id
+               WHERE o.kind = 'promote' AND o.status IN ('queued', 'running') AND o.params->>'target_instance' = i.id::text
+                 AND p.org_id = $1 AND p.deleted_at IS NULL AND p.tier = 'shared'))
+  UNION ALL
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM read_replicas r JOIN projects p ON p.id = r.project_id JOIN instances i ON i.id = p.instance_id
+  WHERE p.org_id = $1 AND p.deleted_at IS NULL AND r.status NOT IN ('detached', 'failed', 'deleted')
+    AND NOT EXISTS (SELECT 1 FROM instances x WHERE x.id = r.id)
+  UNION ALL
+  SELECT i.cpu_limit, i.mem_limit_mb, i.volume_gb
+  FROM operations o JOIN projects p ON p.id = o.project_id JOIN instances i ON i.id = p.instance_id
+  WHERE p.org_id = $1 AND p.deleted_at IS NULL AND o.kind = 'create_replica' AND o.status IN ('queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM read_replicas r WHERE r.id::text = o.params->>'replica')
+)
+SELECT count(*)::int AS instances, COALESCE(sum(cpu_limit), 0)::float8 AS cpus,
+       COALESCE(sum(mem_limit_mb), 0)::int AS mem_mb, COALESCE(sum(volume_gb), 0)::int AS disk_gb
+FROM sized
 `
 
 type OrgDedicatedUseRow struct {
@@ -1065,8 +1104,12 @@ type OrgDedicatedUseRow struct {
 }
 
 // The org's live dedicated instances and their total size: its dedicated
-// projects' instances, and those a demotion keeps stopped for 48 hours (the
-// allowance is released once they are destroyed, V2 s5.2).
+// projects' instances, those a demotion keeps stopped for 48 hours (the
+// allowance is released once they are destroyed, V2 s5.2), the target of
+// a promotion queued or running (its project is still shared), and its read
+// replicas, each the size of its primary (V4 s7), from the operation that
+// creates one until it is deleted, failed or detached (a detached
+// replica's instance is its new project's, counted above).
 func (q *Queries) OrgDedicatedUse(ctx context.Context, orgID uuid.UUID) (OrgDedicatedUseRow, error) {
 	row := q.db.QueryRow(ctx, orgDedicatedUse, orgID)
 	var i OrgDedicatedUseRow
@@ -1096,7 +1139,7 @@ func (q *Queries) OrgLargestProject(ctx context.Context, orgID uuid.UUID) (float
 }
 
 const orgLiveProjects = `-- name: OrgLiveProjects :many
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at
 `
 
 func (q *Queries) OrgLiveProjects(ctx context.Context, orgID uuid.UUID) ([]Project, error) {
@@ -1153,6 +1196,9 @@ func (q *Queries) OrgLiveProjects(ctx context.Context, orgID uuid.UUID) ([]Proje
 			&i.ForwardRegion,
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -1496,6 +1542,33 @@ func (q *Queries) ProjectPoolerNames(ctx context.Context) ([]ProjectPoolerNamesR
 	return items, nil
 }
 
+const reapedStatementCancelled = `-- name: ReapedStatementCancelled :one
+SELECT EXISTS (SELECT 1 FROM reaped_sessions
+  WHERE project_id = $1 AND org_id = $2 AND kind = 'statement'
+    AND pid = $3 AND started_at = $4)::bool
+`
+
+type ReapedStatementCancelledParams struct {
+	ProjectID uuid.UUID
+	OrgID     uuid.UUID
+	Pid       *int32
+	StartedAt *time.Time
+}
+
+// Whether the reaper already cancelled this backend's statement (the same
+// pid and query_start), so a statement still running caught the cancel.
+func (q *Queries) ReapedStatementCancelled(ctx context.Context, arg ReapedStatementCancelledParams) (bool, error) {
+	row := q.db.QueryRow(ctx, reapedStatementCancelled,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Pid,
+		arg.StartedAt,
+	)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const reinstateOrg = `-- name: ReinstateOrg :execrows
 UPDATE organizations SET status = 'active', suspended_reason = NULL, suspended_at = NULL,
   delete_after = NULL, delete_requested_by = NULL
@@ -1610,7 +1683,7 @@ func (q *Queries) SharedInstanceProjects(ctx context.Context) ([]SharedInstanceP
 
 const sharedProjectSizes = `-- name: SharedProjectSizes :many
 
-SELECT p.id, p.org_id, p.name, p.db_name, p.storage_state,
+SELECT p.id, p.org_id, p.name, p.db_name, p.instance_id, p.storage_state,
        COALESCE((SELECT m.value FROM metric_points m
         WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'size_bytes' AND m.resolution = '1m'
           AND m.ts > now() - interval '30 minutes'
@@ -1629,6 +1702,7 @@ type SharedProjectSizesRow struct {
 	OrgID        uuid.UUID
 	Name         string
 	DbName       string
+	InstanceID   uuid.UUID
 	StorageState string
 	SizeBytes    float64
 	NodeDiskUsed float64
@@ -1652,6 +1726,7 @@ func (q *Queries) SharedProjectSizes(ctx context.Context) ([]SharedProjectSizesR
 			&i.OrgID,
 			&i.Name,
 			&i.DbName,
+			&i.InstanceID,
 			&i.StorageState,
 			&i.SizeBytes,
 			&i.NodeDiskUsed,

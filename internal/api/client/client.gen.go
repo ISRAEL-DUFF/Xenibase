@@ -1778,6 +1778,7 @@ const (
 	NodeLifecycleActive       NodeLifecycle = "active"
 	NodeLifecycleDraining     NodeLifecycle = "draining"
 	NodeLifecycleProvisioning NodeLifecycle = "provisioning"
+	NodeLifecycleRetiring     NodeLifecycle = "retiring"
 )
 
 // Valid indicates whether the value is a known member of the NodeLifecycle enum.
@@ -1788,6 +1789,8 @@ func (e NodeLifecycle) Valid() bool {
 	case NodeLifecycleDraining:
 		return true
 	case NodeLifecycleProvisioning:
+		return true
+	case NodeLifecycleRetiring:
 		return true
 	default:
 		return false
@@ -2276,8 +2279,9 @@ func (e ReadReplicaStatus) Valid() bool {
 
 // Defines values for ReapedSessionKind.
 const (
-	IdleInTransaction ReapedSessionKind = "idle_in_transaction"
-	Statement         ReapedSessionKind = "statement"
+	IdleInTransaction   ReapedSessionKind = "idle_in_transaction"
+	Statement           ReapedSessionKind = "statement"
+	StatementTerminated ReapedSessionKind = "statement_terminated"
 )
 
 // Valid indicates whether the value is a known member of the ReapedSessionKind enum.
@@ -2286,6 +2290,8 @@ func (e ReapedSessionKind) Valid() bool {
 	case IdleInTransaction:
 		return true
 	case Statement:
+		return true
+	case StatementTerminated:
 		return true
 	default:
 		return false
@@ -4138,10 +4144,19 @@ type AdminOrgSummaryStatus string
 
 // AdminRegion defines model for AdminRegion.
 type AdminRegion struct {
+	// ApiDomain The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN).
+	ApiDomain string `json:"api_domain"`
+
 	// CopyTargetId Where backups on platform targets are copied (V3 §2.5).
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      string              `json:"country"`
 	CreatedAt    time.Time           `json:"created_at"`
+
+	// EarlyAccessOrgIds Organisations that may create projects while the region is hidden.
+	EarlyAccessOrgIds []openapi_types.UUID `json:"early_access_org_ids"`
+
+	// FilesTargetId Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
+	FilesTargetId *openapi_types.UUID `json:"files_target_id,omitempty"`
 
 	// FloatingIpId The region's pooler floating IP at the provider.
 	FloatingIpId *string `json:"floating_ip_id,omitempty"`
@@ -4188,11 +4203,19 @@ type AdminRegionListCopiesStatus string
 
 // AdminRegionRequest defines model for AdminRegionRequest.
 type AdminRegionRequest struct {
+	// ApiDomain The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects.
+	ApiDomain    *string             `json:"api_domain,omitempty"`
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      *string             `json:"country,omitempty"`
-	FloatingIpId *string             `json:"floating_ip_id,omitempty"`
 
-	// Hidden Hidden regions take no new projects.
+	// EarlyAccessOrgIds Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
+
+	// FilesTargetId A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
+	FilesTargetId *openapi_types.UUID `json:"files_target_id,omitempty"`
+	FloatingIpId  *string             `json:"floating_ip_id,omitempty"`
+
+	// Hidden Hidden regions take new projects only from their early-access organisations.
 	Hidden     *bool   `json:"hidden,omitempty"`
 	Location   *string `json:"location,omitempty"`
 	Name       string  `json:"name"`
@@ -4247,6 +4270,34 @@ type AdvisorFindingLevel string
 // AdvisorFindings defines model for AdvisorFindings.
 type AdvisorFindings struct {
 	Items []AdvisorFinding `json:"items"`
+}
+
+// AgentClientCert defines model for AgentClientCert.
+type AgentClientCert struct {
+	// Current The certificate the answering server is using.
+	Current   bool       `json:"current"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	IssuedAt  time.Time  `json:"issued_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+
+	// Serial The certificate's serial, lower-case hex.
+	Serial string `json:"serial"`
+
+	// Server The xenibase-server it was issued to (its host name).
+	Server string `json:"server"`
+}
+
+// AgentClientCertRevoke Exactly one of serial and server.
+type AgentClientCertRevoke struct {
+	Serial *string `json:"serial,omitempty"`
+	Server *string `json:"server,omitempty"`
+}
+
+// AgentClientCertRevoked defines model for AgentClientCertRevoked.
+type AgentClientCertRevoked struct {
+	// NotPushed Agents the new list did not reach now; each gets it at its next health check.
+	NotPushed []string          `json:"not_pushed"`
+	Revoked   []AgentClientCert `json:"revoked"`
 }
 
 // AgentRegisterRequest defines model for AgentRegisterRequest.
@@ -4482,9 +4533,12 @@ type AuthConfig struct {
 	// HookRole The role Postgres hooks run as; grant it what they read.
 	HookRole *string `json:"hook_role,omitempty"`
 
-	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
-	HookSecret         *string `json:"hook_secret,omitempty"`
-	MonthlyActiveUsers int64   `json:"monthly_active_users"`
+	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+	HookSecret *string `json:"hook_secret,omitempty"`
+
+	// HookSecretSet Whether the project has a hook secret (for those who aren't shown it).
+	HookSecretSet      *bool `json:"hook_secret_set,omitempty"`
+	MonthlyActiveUsers int64 `json:"monthly_active_users"`
 
 	// OauthCallbackUrl The redirect URI to register with OAuth providers.
 	OauthCallbackUrl *string          `json:"oauth_callback_url,omitempty"`
@@ -5056,6 +5110,9 @@ type BillingContact struct {
 
 	// StatusEmails Gets the status page's incident emails while the organisation is on a paid plan (default true).
 	StatusEmails *bool `json:"status_emails,omitempty"`
+
+	// Verified A member's verified address, or confirmed from the emailed link. Only a verified contact's email to support opens tickets for the organisation; billing email goes to every contact.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 // BillingDetailsUpdate defines model for BillingDetailsUpdate.
@@ -5343,6 +5400,9 @@ type CategoryCost struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+
+	// RevokeTokens Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+	RevokeTokens *bool `json:"revoke_tokens,omitempty"`
 }
 
 // ColumnRef A column's foreign key.
@@ -6385,16 +6445,21 @@ type InstanceState struct {
 
 // InstanceSummary defines model for InstanceSummary.
 type InstanceSummary struct {
-	Cpus  *float32 `json:"cpus,omitempty"`
-	Error *string  `json:"error,omitempty"`
+	// ConnectionLimitMax Dedicated only. The highest connection limit the project can have on this instance: max_connections less what Xenibase keeps for its own connections (backups, replication, probes, backend services).
+	ConnectionLimitMax *int     `json:"connection_limit_max,omitempty"`
+	Cpus               *float32 `json:"cpus,omitempty"`
+	Error              *string  `json:"error,omitempty"`
 
 	// HaEnabled A primary and a streaming standby on another node (V3 §2.2).
 	HaEnabled *bool               `json:"ha_enabled,omitempty"`
 	Id        openapi_types.UUID  `json:"id"`
 	Kind      InstanceSummaryKind `json:"kind"`
-	MemoryMb  *int                `json:"memory_mb,omitempty"`
-	NodeId    openapi_types.UUID  `json:"node_id"`
-	NodeName  string              `json:"node_name"`
+
+	// MaxConnections Dedicated only. Postgres's max_connections, which grows with the instance's memory (50 per GB, 100 to 500).
+	MaxConnections *int               `json:"max_connections,omitempty"`
+	MemoryMb       *int               `json:"memory_mb,omitempty"`
+	NodeId         openapi_types.UUID `json:"node_id"`
+	NodeName       string             `json:"node_name"`
 
 	// PgRelease The release the instance runs ("18.1"), as its agent last reported.
 	PgRelease *string `json:"pg_release,omitempty"`
@@ -6994,6 +7059,29 @@ type MaintenanceWindow struct {
 	Weekday int `json:"weekday"`
 }
 
+// ManageRoles defines model for ManageRoles.
+type ManageRoles struct {
+	// Enabled The owner role has CREATEROLE.
+	Enabled bool `json:"enabled"`
+
+	// Logins The owner's logins the poolers accept.
+	Logins []struct {
+		Name     string    `json:"name"`
+		SyncedAt time.Time `json:"synced_at"`
+	} `json:"logins"`
+
+	// Skipped After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password).
+	Skipped *[]struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"skipped,omitempty"`
+}
+
+// ManageRolesRequest defines model for ManageRolesRequest.
+type ManageRolesRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Margins defines model for Margins.
 type Margins struct {
 	Categories        []CategoryCost     `json:"categories"`
@@ -7115,8 +7203,10 @@ type Node struct {
 	Id                 openapi_types.UUID `json:"id"`
 
 	// Keep Never deleted for being empty.
-	Keep             *bool          `json:"keep,omitempty"`
-	LastHeartbeat    *time.Time     `json:"last_heartbeat,omitempty"`
+	Keep          *bool      `json:"keep,omitempty"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+
+	// Lifecycle retiring is an empty node out of placement whose server is about to be deleted.
 	Lifecycle        *NodeLifecycle `json:"lifecycle,omitempty"`
 	MonthlyCostMinor *int64         `json:"monthly_cost_minor,omitempty"`
 	Name             string         `json:"name"`
@@ -7133,7 +7223,7 @@ type Node struct {
 	Status     string  `json:"status"`
 }
 
-// NodeLifecycle defines model for Node.Lifecycle.
+// NodeLifecycle retiring is an empty node out of placement whose server is about to be deleted.
 type NodeLifecycle string
 
 // NodeCost defines model for NodeCost.
@@ -7205,6 +7295,9 @@ type OAuthAuthorizeInfo struct {
 	CodeChallenge       string `json:"code_challenge"`
 	CodeChallengeMethod string `json:"code_challenge_method"`
 
+	// Consent The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
+	Consent string `json:"consent"`
+
 	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
 	Organisations []OAuthGrantOrg `json:"organisations"`
 	RedirectUri   string          `json:"redirect_uri"`
@@ -7243,16 +7336,19 @@ type OAuthClientList struct {
 
 // OAuthDecision defines model for OAuthDecision.
 type OAuthDecision struct {
-	Approve             bool                  `json:"approve"`
-	ClientId            string                `json:"client_id"`
-	CodeChallenge       string                `json:"code_challenge"`
-	CodeChallengeMethod string                `json:"code_challenge_method"`
-	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
-	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
-	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
-	RedirectUri         string                `json:"redirect_uri"`
+	Approve             bool   `json:"approve"`
+	ClientId            string `json:"client_id"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
 
-	// Scopes Within what the app asked for; the request's scopes by default.
+	// Consent The `consent` the consent page was given; required to approve.
+	Consent       *string               `json:"consent,omitempty"`
+	ExpiresInDays *int                  `json:"expires_in_days,omitempty"`
+	OrgId         *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds    *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri   string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
 	Scopes *[]TokenScope `json:"scopes,omitempty"`
 	State  *string       `json:"state,omitempty"`
 }
@@ -7948,8 +8044,10 @@ type ProfileList struct {
 
 // Project defines model for Project.
 type Project struct {
-	ArchivedAt *time.Time  `json:"archived_at,omitempty"`
-	Branch     *BranchInfo `json:"branch,omitempty"`
+	// AllowedCidrs The project's IP allowlist; empty allows any address.
+	AllowedCidrs *[]string   `json:"allowed_cidrs,omitempty"`
+	ArchivedAt   *time.Time  `json:"archived_at,omitempty"`
+	Branch       *BranchInfo `json:"branch,omitempty"`
 
 	// BranchCount Live branches of this project.
 	BranchCount *int `json:"branch_count,omitempty"`
@@ -7980,11 +8078,14 @@ type Project struct {
 	LegacyCredentialsUntil *time.Time `json:"legacy_credentials_until,omitempty"`
 
 	// Lifecycle A Free project paused or archived for inactivity (V3 §4).
-	Lifecycle *ProjectLifecycle  `json:"lifecycle,omitempty"`
-	MyRole    *ProjectRole       `json:"my_role,omitempty"`
-	Name      string             `json:"name"`
-	OrgId     openapi_types.UUID `json:"org_id"`
-	OwnerRole string             `json:"owner_role"`
+	Lifecycle *ProjectLifecycle `json:"lifecycle,omitempty"`
+
+	// ManageRoles A dedicated project's owner role has CREATEROLE (role management).
+	ManageRoles *bool              `json:"manage_roles,omitempty"`
+	MyRole      *ProjectRole       `json:"my_role,omitempty"`
+	Name        string             `json:"name"`
+	OrgId       openapi_types.UUID `json:"org_id"`
+	OwnerRole   string             `json:"owner_role"`
 
 	// ParentProjectId Set for a branch (V2 §8).
 	ParentProjectId *openapi_types.UUID `json:"parent_project_id,omitempty"`
@@ -8092,6 +8193,24 @@ type ProjectMembership struct {
 	ProjectId   openapi_types.UUID `json:"project_id"`
 	ProjectName string             `json:"project_name"`
 	Role        ProjectRole        `json:"role"`
+}
+
+// ProjectNetwork defines model for ProjectNetwork.
+type ProjectNetwork struct {
+	// AllowedCidrs The networks, normalised; empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
+
+	// YourIp The address this request came from, as Xenibase sees it (your database client's address may differ).
+	YourIp *string `json:"your_ip,omitempty"`
+
+	// YourIpAllowed Whether your_ip is in the allowlist (always true when the list is empty).
+	YourIpAllowed *bool `json:"your_ip_allowed,omitempty"`
+}
+
+// ProjectNetworkRequest defines model for ProjectNetworkRequest.
+type ProjectNetworkRequest struct {
+	// AllowedCidrs Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
 }
 
 // ProjectResidencyRequest defines model for ProjectResidencyRequest.
@@ -8235,20 +8354,28 @@ type QuotaItem struct {
 
 // ReadReplica defines model for ReadReplica.
 type ReadReplica struct {
-	CreatedAt time.Time          `json:"created_at"`
-	Error     *string            `json:"error,omitempty"`
-	Id        openapi_types.UUID `json:"id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	Error              *string            `json:"error,omitempty"`
+	HotStandbyFeedback bool               `json:"hot_standby_feedback"`
+	Id                 openapi_types.UUID `json:"id"`
 
 	// InRotation The read-only route sends reads to it.
 	InRotation bool   `json:"in_rotation"`
 	LagBytes   *int64 `json:"lag_bytes,omitempty"`
 
 	// LagMs How long ago the primary wrote what it has not replayed yet.
-	LagMs             *int64             `json:"lag_ms,omitempty"`
-	NodeId            openapi_types.UUID `json:"node_id"`
-	NodeName          string             `json:"node_name"`
-	Region            string             `json:"region"`
-	RotationChangedAt *time.Time         `json:"rotation_changed_at,omitempty"`
+	LagMs                  *int64             `json:"lag_ms,omitempty"`
+	MaxStandbyDelaySeconds int                `json:"max_standby_delay_seconds"`
+	NodeId                 openapi_types.UUID `json:"node_id"`
+	NodeName               string             `json:"node_name"`
+	Region                 string             `json:"region"`
+	RotationChangedAt      *time.Time         `json:"rotation_changed_at,omitempty"`
+
+	// SettingsAppliedAt When the replica last confirmed its settings.
+	SettingsAppliedAt *time.Time `json:"settings_applied_at,omitempty"`
+
+	// SettingsError Why the settings couldn't be applied yet (retried).
+	SettingsError *string `json:"settings_error,omitempty"`
 
 	// Size The instance profile it runs with (the primary's).
 	Size   string            `json:"size"`
@@ -8292,14 +8419,16 @@ type RealtimeTable struct {
 
 // ReapedSession defines model for ReapedSession.
 type ReapedSession struct {
-	CreatedAt time.Time         `json:"created_at"`
-	DurationS int               `json:"duration_s"`
-	Kind      ReapedSessionKind `json:"kind"`
-	Query     *string           `json:"query,omitempty"`
-	Role      string            `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	DurationS int       `json:"duration_s"`
+
+	// Kind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+	Kind  ReapedSessionKind `json:"kind"`
+	Query *string           `json:"query,omitempty"`
+	Role  string            `json:"role"`
 }
 
-// ReapedSessionKind defines model for ReapedSession.Kind.
+// ReapedSessionKind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
 type ReapedSessionKind string
 
 // ReapedSessionList defines model for ReapedSessionList.
@@ -8393,6 +8522,9 @@ type RecoveryCodesStatus struct {
 type Region struct {
 	// Country ISO 3166 two-letter code; empty when not tied to one.
 	Country string `json:"country"`
+
+	// EarlyAccessOrgIds Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
 
 	// Home The platform's home region, where projects go by default.
 	Home bool `json:"home"`
@@ -8512,6 +8644,12 @@ type ReplayResult struct {
 
 // ReplicaCreateRequest defines model for ReplicaCreateRequest.
 type ReplicaCreateRequest struct {
+	// HotStandbyFeedback See ReplicaSettings (default false).
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds See ReplicaSettings (default 30).
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
+
 	// NodeId Where the replica goes (default the least loaded eligible node in the region).
 	NodeId *openapi_types.UUID `json:"node_id,omitempty"`
 
@@ -8537,6 +8675,15 @@ type ReplicaList struct {
 	// ReadUrl The read-only route's connection string, without a password.
 	ReadUrl  *string       `json:"read_url,omitempty"`
 	Replicas []ReadReplica `json:"replicas"`
+}
+
+// ReplicaSettings A read replica's standby settings. Omitted fields keep their value.
+type ReplicaSettings struct {
+	// HotStandbyFeedback The replica tells the primary which rows its running queries still read, so the primary's vacuum keeps them and long queries on the replica aren't cancelled for it. The cost is on the primary: dead rows stay longer, so a long query on the replica can bloat tables.
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds How long replay waits for a query that conflicts with it before cancelling the query (max_standby_streaming_delay and max_standby_archive_delay). Longer lets long queries finish but lets the replica fall further behind; one behind by more than the rotation threshold leaves the read route until it catches up.
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
 }
 
 // ResizePlan defines model for ResizePlan.
@@ -9423,8 +9570,14 @@ type SupportOperation struct {
 
 // SupportPhone defines model for SupportPhone.
 type SupportPhone struct {
-	CreatedAt time.Time `json:"created_at"`
-	Phone     string    `json:"phone"`
+	// Code While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678.
+	Code          *string    `json:"code,omitempty"`
+	CodeExpiresAt *time.Time `json:"code_expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	Phone         string     `json:"phone"`
+
+	// Verified The code was sent from the number; only then do its messages open tickets.
+	Verified bool `json:"verified"`
 }
 
 // SupportProject defines model for SupportProject.
@@ -9579,7 +9732,10 @@ type Ticket struct {
 	RespondBy *time.Time   `json:"respond_by,omitempty"`
 	Status    TicketStatus `json:"status"`
 	Subject   string       `json:"subject"`
-	UpdatedAt time.Time    `json:"updated_at"`
+
+	// UnverifiedSender An email whose sender the provider didn't authenticate (no DMARC pass, nor aligned DKIM and SPF passes): the From address may be forged, so the ticket has no organisation.
+	UnverifiedSender bool      `json:"unverified_sender"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // TicketChannel defines model for Ticket.Channel.
@@ -10873,6 +11029,9 @@ type SupportWhatsAppVerifyParams struct {
 // SupportWhatsAppWebhookJSONBody defines parameters for SupportWhatsAppWebhook.
 type SupportWhatsAppWebhookJSONBody map[string]interface{}
 
+// RevokeAgentClientCertsJSONRequestBody defines body for RevokeAgentClientCerts for application/json ContentType.
+type RevokeAgentClientCertsJSONRequestBody = AgentClientCertRevoke
+
 // PutBillingSettingsJSONRequestBody defines body for PutBillingSettings for application/json ContentType.
 type PutBillingSettingsJSONRequestBody = BillingSettings
 
@@ -11058,6 +11217,9 @@ type ResendVerificationJSONRequestBody = EmailRequest
 
 // RestoreBackupJSONRequestBody defines body for RestoreBackup for application/json ContentType.
 type RestoreBackupJSONRequestBody = RestoreRequest
+
+// ConfirmBillingContactJSONRequestBody defines body for ConfirmBillingContact for application/json ContentType.
+type ConfirmBillingContactJSONRequestBody = TokenRequest
 
 // CreateDevOperationJSONRequestBody defines body for CreateDevOperation for application/json ContentType.
 type CreateDevOperationJSONRequestBody = NoopParams
@@ -11266,6 +11428,9 @@ type CreateJobJSONRequestBody = JobRequest
 // UpdateJobJSONRequestBody defines body for UpdateJob for application/json ContentType.
 type UpdateJobJSONRequestBody = JobUpdate
 
+// SetProjectManageRolesJSONRequestBody defines body for SetProjectManageRoles for application/json ContentType.
+type SetProjectManageRolesJSONRequestBody = ManageRolesRequest
+
 // AddProjectMemberJSONRequestBody defines body for AddProjectMember for application/json ContentType.
 type AddProjectMemberJSONRequestBody = ProjectMemberRequest
 
@@ -11274,6 +11439,9 @@ type UpdateProjectMemberJSONRequestBody = ProjectRoleRequest
 
 // MigrateSupabaseJSONRequestBody defines body for MigrateSupabase for application/json ContentType.
 type MigrateSupabaseJSONRequestBody = SupabaseMigrationRequest
+
+// SetProjectNetworkJSONRequestBody defines body for SetProjectNetwork for application/json ContentType.
+type SetProjectNetworkJSONRequestBody = ProjectNetworkRequest
 
 // RestoreProjectPITRJSONRequestBody defines body for RestoreProjectPITR for application/json ContentType.
 type RestoreProjectPITRJSONRequestBody = PitrRequest
@@ -11301,6 +11469,9 @@ type ReclaimSpaceJSONRequestBody = ReclaimSpaceRequest
 
 // CreateProjectReplicaJSONRequestBody defines body for CreateProjectReplica for application/json ContentType.
 type CreateProjectReplicaJSONRequestBody = ReplicaCreateRequest
+
+// UpdateProjectReplicaJSONRequestBody defines body for UpdateProjectReplica for application/json ContentType.
+type UpdateProjectReplicaJSONRequestBody = ReplicaSettings
 
 // DetachProjectReplicaJSONRequestBody defines body for DetachProjectReplica for application/json ContentType.
 type DetachProjectReplicaJSONRequestBody = ReplicaDetachRequest
@@ -11480,6 +11651,44 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+
+	// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+	//
+	// Each xenibase-server issues itself a client certificate for its
+	// agents, a day long and renewed at half-life, and records its
+	// serial. The live ones (unexpired, unrevoked) are the allow list
+	// every agent is given; an agent that has a list accepts no other.
+	// Listed: live certificates, and those expired or revoked in the
+	// last week.
+	//
+	// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+	ListAgentClientCerts(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeAgentClientCertsWithBody Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCertsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCerts(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListPlatformAudit The platform audit log, newest first (platform admin)
 	//
@@ -12866,6 +13075,24 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/backups/{id}/restore (the `RestoreBackup` operationId).
 	RestoreBackup(ctx context.Context, id BackupID, body RestoreBackupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ConfirmBillingContactWithBody Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContactWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContact(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// CreateDevOperationWithBody Enqueue a dummy operation (development only)
 	//
 	// Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -13127,14 +13354,14 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/me/invitations/{invitation_id}/accept (the `AcceptMyInvitation` operationId).
 	AcceptMyInvitation(ctx context.Context, invitationId InvitationID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ChangePasswordWithBody Change your password; ends your other sessions
+	// ChangePasswordWithBody Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /api/v1/me/password (the `ChangePassword` operationId).
 	ChangePasswordWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ChangePassword Change your password; ends your other sessions
+	// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -13553,12 +13780,16 @@ type ClientInterface interface {
 
 	// AddBillingContactWithBody Add a billing contact
 	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
 	AddBillingContactWithBody(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AddBillingContact Add a billing contact
+	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -13859,12 +14090,16 @@ type ClientInterface interface {
 
 	// AddSupportPhoneWithBody Register a WhatsApp number (E.164) for the organisation's support
 	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
 	AddSupportPhoneWithBody(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AddSupportPhone Register a WhatsApp number (E.164) for the organisation's support
+	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -14062,6 +14297,11 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/rotate (the `RotateSigningKey` operationId).
 	RotateSigningKey(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+	//
+	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+	RevokeSigningKey(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// TestAuthSMTPWithBody Send a test email through the project's SMTP server (or the settings given)
 	//
@@ -14632,6 +14872,46 @@ type ClientInterface interface {
 	// Corresponds with GET /api/v1/projects/{id}/jobs/{job_id}/runs (the `ListJobRuns` operationId).
 	ListJobRuns(ctx context.Context, id ProjectID, jobId JobID, params *ListJobRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+	//
+	// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+	GetProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectManageRolesWithBody Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRolesWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRoles(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SyncProjectManageRoles Sync the owner's logins to the poolers now
+	//
+	// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+	//
+	// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+	SyncProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListProjectMembers Project members (org owners and admins are implicit admins)
 	//
 	// Corresponds with GET /api/v1/projects/{id}/members (the `ListProjectMembers` operationId).
@@ -14715,6 +14995,39 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /api/v1/projects/{id}/moves (the `ListProjectMoves` operationId).
 	ListProjectMoves(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetProjectNetwork The project's IP allowlist
+	//
+	// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+	GetProjectNetwork(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectNetworkWithBody Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetworkWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetProjectNetwork Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetwork(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RestoreProjectPITRWithBody Point-in-time recovery of a dedicated project into a new one
 	//
@@ -14919,6 +15232,24 @@ type ClientInterface interface {
 	//
 	// Corresponds with DELETE /api/v1/projects/{id}/replicas/{replica_id} (the `DeleteProjectReplica` operationId).
 	DeleteProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateProjectReplicaWithBody Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplicaWithBody(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateProjectReplica Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DetachProjectReplicaWithBody Promote a read replica into a standalone project
 	//
@@ -15755,6 +16086,12 @@ type ClientInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -15766,6 +16103,12 @@ type ClientInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -15854,6 +16197,74 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /readyz (the `GetReadyz` operationId).
 	GetReadyz(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+//
+// Each xenibase-server issues itself a client certificate for its
+// agents, a day long and renewed at half-life, and records its
+// serial. The live ones (unexpired, unrevoked) are the allow list
+// every agent is given; an agent that has a list accepts no other.
+// Listed: live certificates, and those expired or revoked in the
+// last week.
+//
+// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+func (c *Client) ListAgentClientCerts(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAgentClientCertsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeAgentClientCertsWithBody Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *Client) RevokeAgentClientCertsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeAgentClientCertsRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *Client) RevokeAgentClientCerts(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeAgentClientCertsRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 // ListPlatformAudit The platform audit log, newest first (platform admin)
@@ -19201,6 +19612,44 @@ func (c *Client) RestoreBackup(ctx context.Context, id BackupID, body RestoreBac
 	return c.Client.Do(req)
 }
 
+// ConfirmBillingContactWithBody Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *Client) ConfirmBillingContactWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewConfirmBillingContactRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *Client) ConfirmBillingContact(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewConfirmBillingContactRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // CreateDevOperationWithBody Enqueue a dummy operation (development only)
 //
 // Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -19812,7 +20261,7 @@ func (c *Client) AcceptMyInvitation(ctx context.Context, invitationId Invitation
 	return c.Client.Do(req)
 }
 
-// ChangePasswordWithBody Change your password; ends your other sessions
+// ChangePasswordWithBody Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes any type of body and a specified content type.
 //
@@ -19829,7 +20278,7 @@ func (c *Client) ChangePasswordWithBody(ctx context.Context, contentType string,
 	return c.Client.Do(req)
 }
 
-// ChangePassword Change your password; ends your other sessions
+// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes a body of the `application/json` content type.
 //
@@ -20788,6 +21237,8 @@ func (c *Client) ListBillingContacts(ctx context.Context, org OrgID, reqEditors 
 
 // AddBillingContactWithBody Add a billing contact
 //
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
@@ -20804,6 +21255,8 @@ func (c *Client) AddBillingContactWithBody(ctx context.Context, org OrgID, conte
 }
 
 // AddBillingContact Add a billing contact
+//
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -21574,6 +22027,8 @@ func (c *Client) ListSupportPhones(ctx context.Context, org OrgID, reqEditors ..
 
 // AddSupportPhoneWithBody Register a WhatsApp number (E.164) for the organisation's support
 //
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
@@ -21590,6 +22045,8 @@ func (c *Client) AddSupportPhoneWithBody(ctx context.Context, org OrgID, content
 }
 
 // AddSupportPhone Register a WhatsApp number (E.164) for the organisation's support
+//
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -22088,6 +22545,21 @@ func (c *Client) ListSigningKeys(ctx context.Context, id ProjectID, reqEditors .
 // Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/rotate (the `RotateSigningKey` operationId).
 func (c *Client) RotateSigningKey(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRotateSigningKeyRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+//
+// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+func (c *Client) RevokeSigningKey(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeSigningKeyRequest(c.Server, id, keyId)
 	if err != nil {
 		return nil, err
 	}
@@ -23377,6 +23849,86 @@ func (c *Client) ListJobRuns(ctx context.Context, id ProjectID, jobId JobID, par
 	return c.Client.Do(req)
 }
 
+// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+//
+// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+func (c *Client) GetProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetProjectManageRolesRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectManageRolesWithBody Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *Client) SetProjectManageRolesWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectManageRolesRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *Client) SetProjectManageRoles(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectManageRolesRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SyncProjectManageRoles Sync the owner's logins to the poolers now
+//
+// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+//
+// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+func (c *Client) SyncProjectManageRoles(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSyncProjectManageRolesRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // ListProjectMembers Project members (org owners and admins are implicit admins)
 //
 // Corresponds with GET /api/v1/projects/{id}/members (the `ListProjectMembers` operationId).
@@ -23551,6 +24103,69 @@ func (c *Client) MigrateSupabase(ctx context.Context, id ProjectID, body Migrate
 // Corresponds with GET /api/v1/projects/{id}/moves (the `ListProjectMoves` operationId).
 func (c *Client) ListProjectMoves(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListProjectMovesRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetProjectNetwork The project's IP allowlist
+//
+// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+func (c *Client) GetProjectNetwork(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetProjectNetworkRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectNetworkWithBody Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *Client) SetProjectNetworkWithBody(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectNetworkRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SetProjectNetwork Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *Client) SetProjectNetwork(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetProjectNetworkRequest(c.Server, id, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24015,6 +24630,44 @@ func (c *Client) CreateProjectReplica(ctx context.Context, id ProjectID, body Cr
 // Corresponds with DELETE /api/v1/projects/{id}/replicas/{replica_id} (the `DeleteProjectReplica` operationId).
 func (c *Client) DeleteProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteProjectReplicaRequest(c.Server, id, replicaId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateProjectReplicaWithBody Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *Client) UpdateProjectReplicaWithBody(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateProjectReplicaRequestWithBody(c.Server, id, replicaId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateProjectReplica Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *Client) UpdateProjectReplica(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateProjectReplicaRequest(c.Server, id, replicaId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -25860,6 +26513,12 @@ func (c *Client) TestStorageTarget(ctx context.Context, params *TestStorageTarge
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes any type of body and a specified content type.
 //
@@ -25881,6 +26540,12 @@ func (c *Client) SupportInboundEmailWithBody(ctx context.Context, contentType st
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -26098,6 +26763,73 @@ func (c *Client) GetReadyz(ctx context.Context, reqEditors ...RequestEditorFn) (
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewListAgentClientCertsRequest constructs an http.Request for the ListAgentClientCerts method
+func NewListAgentClientCertsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/agent-client-certs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRevokeAgentClientCertsRequest calls the generic RevokeAgentClientCerts builder with application/json body
+func NewRevokeAgentClientCertsRequest(server string, body RevokeAgentClientCertsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRevokeAgentClientCertsRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewRevokeAgentClientCertsRequestWithBody constructs an http.Request for the RevokeAgentClientCerts method, with any body, and a specified content type
+func NewRevokeAgentClientCertsRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/admin/agent-client-certs/revoke")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
 }
 
 // NewListPlatformAuditRequest constructs an http.Request for the ListPlatformAudit method
@@ -31644,6 +32376,46 @@ func NewRestoreBackupRequestWithBody(server string, id BackupID, contentType str
 	return req, nil
 }
 
+// NewConfirmBillingContactRequest calls the generic ConfirmBillingContact builder with application/json body
+func NewConfirmBillingContactRequest(server string, body ConfirmBillingContactJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewConfirmBillingContactRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewConfirmBillingContactRequestWithBody constructs an http.Request for the ConfirmBillingContact method, with any body, and a specified content type
+func NewConfirmBillingContactRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/billing/contacts/confirm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewCreateDevOperationRequest calls the generic CreateDevOperation builder with application/json body
 func NewCreateDevOperationRequest(server string, body CreateDevOperationJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -36843,6 +37615,47 @@ func NewRotateSigningKeyRequest(server string, id ProjectID) (*http.Request, err
 	return req, nil
 }
 
+// NewRevokeSigningKeyRequest constructs an http.Request for the RevokeSigningKey method
+func NewRevokeSigningKeyRequest(server string, id ProjectID, keyId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "keyId", keyId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/auth/signing-keys/%s/revoke", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewTestAuthSMTPRequest calls the generic TestAuthSMTP builder with application/json body
 func NewTestAuthSMTPRequest(server string, id ProjectID, body TestAuthSMTPJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -39265,6 +40078,121 @@ func NewListJobRunsRequest(server string, id ProjectID, jobId JobID, params *Lis
 	return req, nil
 }
 
+// NewGetProjectManageRolesRequest constructs an http.Request for the GetProjectManageRoles method
+func NewGetProjectManageRolesRequest(server string, id ProjectID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/manage-roles", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetProjectManageRolesRequest calls the generic SetProjectManageRoles builder with application/json body
+func NewSetProjectManageRolesRequest(server string, id ProjectID, body SetProjectManageRolesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetProjectManageRolesRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewSetProjectManageRolesRequestWithBody constructs an http.Request for the SetProjectManageRoles method, with any body, and a specified content type
+func NewSetProjectManageRolesRequestWithBody(server string, id ProjectID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/manage-roles", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewSyncProjectManageRolesRequest constructs an http.Request for the SyncProjectManageRoles method
+func NewSyncProjectManageRolesRequest(server string, id ProjectID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/manage-roles/sync", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListProjectMembersRequest constructs an http.Request for the ListProjectMembers method
 func NewListProjectMembersRequest(server string, id ProjectID) (*http.Request, error) {
 	var err error
@@ -39591,6 +40519,87 @@ func NewListProjectMovesRequest(server string, id ProjectID) (*http.Request, err
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewGetProjectNetworkRequest constructs an http.Request for the GetProjectNetwork method
+func NewGetProjectNetworkRequest(server string, id ProjectID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/network", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetProjectNetworkRequest calls the generic SetProjectNetwork builder with application/json body
+func NewSetProjectNetworkRequest(server string, id ProjectID, body SetProjectNetworkJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetProjectNetworkRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewSetProjectNetworkRequestWithBody constructs an http.Request for the SetProjectNetwork method, with any body, and a specified content type
+func NewSetProjectNetworkRequestWithBody(server string, id ProjectID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/network", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -40335,6 +41344,60 @@ func NewDeleteProjectReplicaRequest(server string, id ProjectID, replicaId Repli
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUpdateProjectReplicaRequest calls the generic UpdateProjectReplica builder with application/json body
+func NewUpdateProjectReplicaRequest(server string, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateProjectReplicaRequestWithBody(server, id, replicaId, "application/json", bodyReader)
+}
+
+// NewUpdateProjectReplicaRequestWithBody constructs an http.Request for the UpdateProjectReplica method, with any body, and a specified content type
+func NewUpdateProjectReplicaRequestWithBody(server string, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "replica_id", replicaId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: "uuid"})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/projects/%s/replicas/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -43957,6 +45020,46 @@ func WithBaseURL(baseURL string) ClientOption {
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
 
+	// ListAgentClientCertsWithResponse The client certificates xenibase-servers issued themselves for agents
+	//
+	// Each xenibase-server issues itself a client certificate for its
+	// agents, a day long and renewed at half-life, and records its
+	// serial. The live ones (unexpired, unrevoked) are the allow list
+	// every agent is given; an agent that has a list accepts no other.
+	// Listed: live certificates, and those expired or revoked in the
+	// last week.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+	ListAgentClientCertsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListAgentClientCertsResponse, error)
+
+	// RevokeAgentClientCertsWithBodyWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCertsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error)
+
+	// RevokeAgentClientCertsWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+	//
+	// Removes the certificates from the allow list and pushes the new
+	// list to every agent at once, so a copied certificate stops working
+	// (agents that do not answer get it at their next health check). A
+	// server whose own certificate is revoked issues and registers a new
+	// one and keeps its agents.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+	RevokeAgentClientCertsWithResponse(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error)
+
 	// ListPlatformAuditWithResponse The platform audit log, newest first (platform admin)
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -45482,6 +46585,24 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /api/v1/backups/{id}/restore (the `RestoreBackup` operationId).
 	RestoreBackupWithResponse(ctx context.Context, id BackupID, body RestoreBackupJSONRequestBody, reqEditors ...RequestEditorFn) (*RestoreBackupResponse, error)
 
+	// ConfirmBillingContactWithBodyWithResponse Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContactWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error)
+
+	// ConfirmBillingContactWithResponse Confirm a billing contact from the emailed link (public)
+	//
+	// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+	ConfirmBillingContactWithResponse(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error)
+
 	// CreateDevOperationWithBodyWithResponse Enqueue a dummy operation (development only)
 	//
 	// Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -45757,14 +46878,14 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /api/v1/me/invitations/{invitation_id}/accept (the `AcceptMyInvitation` operationId).
 	AcceptMyInvitationWithResponse(ctx context.Context, invitationId InvitationID, reqEditors ...RequestEditorFn) (*AcceptMyInvitationResponse, error)
 
-	// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions
+	// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/me/password (the `ChangePassword` operationId).
 	ChangePasswordWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ChangePasswordResponse, error)
 
-	// ChangePasswordWithResponse Change your password; ends your other sessions
+	// ChangePasswordWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -46225,12 +47346,16 @@ type ClientWithResponsesInterface interface {
 
 	// AddBillingContactWithBodyWithResponse Add a billing contact
 	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
 	AddBillingContactWithBodyWithResponse(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AddBillingContactResponse, error)
 
 	// AddBillingContactWithResponse Add a billing contact
+	//
+	// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -46585,12 +47710,16 @@ type ClientWithResponsesInterface interface {
 
 	// AddSupportPhoneWithBodyWithResponse Register a WhatsApp number (E.164) for the organisation's support
 	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
 	AddSupportPhoneWithBodyWithResponse(ctx context.Context, org OrgID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AddSupportPhoneResponse, error)
 
 	// AddSupportPhoneWithResponse Register a WhatsApp number (E.164) for the organisation's support
+	//
+	// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -46824,6 +47953,13 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/rotate (the `RotateSigningKey` operationId).
 	RotateSigningKeyWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*RotateSigningKeyResponse, error)
+
+	// RevokeSigningKeyWithResponse Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+	RevokeSigningKeyWithResponse(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeSigningKeyResponse, error)
 
 	// TestAuthSMTPWithBodyWithResponse Send a test email through the project's SMTP server (or the settings given)
 	//
@@ -47454,6 +48590,50 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /api/v1/projects/{id}/jobs/{job_id}/runs (the `ListJobRuns` operationId).
 	ListJobRunsWithResponse(ctx context.Context, id ProjectID, jobId JobID, params *ListJobRunsParams, reqEditors ...RequestEditorFn) (*ListJobRunsResponse, error)
 
+	// GetProjectManageRolesWithResponse Role management on a dedicated project, and the owner's logins the poolers accept
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+	GetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectManageRolesResponse, error)
+
+	// SetProjectManageRolesWithBodyWithResponse Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRolesWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error)
+
+	// SetProjectManageRolesWithResponse Turn role management on or off (organisation owners; step-up)
+	//
+	// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+	// and later that lets it create roles and manage only those it created;
+	// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+	// owner creates, named <database>_<name>, connect through the poolers
+	// within about 30 seconds (or at once after a sync), with the project's
+	// connection limit. Off removes CREATEROLE; roles already created stay.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+	SetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error)
+
+	// SyncProjectManageRolesWithResponse Sync the owner's logins to the poolers now
+	//
+	// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+	SyncProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*SyncProjectManageRolesResponse, error)
+
 	// ListProjectMembersWithResponse Project members (org owners and admins are implicit admins)
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -47545,6 +48725,41 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /api/v1/projects/{id}/moves (the `ListProjectMoves` operationId).
 	ListProjectMovesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*ListProjectMovesResponse, error)
+
+	// GetProjectNetworkWithResponse The project's IP allowlist
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+	GetProjectNetworkWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectNetworkResponse, error)
+
+	// SetProjectNetworkWithBodyWithResponse Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetworkWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error)
+
+	// SetProjectNetworkWithResponse Replace the project's IP allowlist (project admins)
+	//
+	// With networks listed, the poolers accept the project's logins (the
+	// owner, members' and its own) only from those addresses; an empty list
+	// allows any address. Xenibase's own logins for the project (backend
+	// services, the SLA probe) aren't limited. Takes effect within seconds
+	// on every pooler of the project's region; existing connections stay
+	// until they close.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+	SetProjectNetworkWithResponse(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error)
 
 	// RestoreProjectPITRWithBodyWithResponse Point-in-time recovery of a dedicated project into a new one
 	//
@@ -47765,6 +48980,24 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with DELETE /api/v1/projects/{id}/replicas/{replica_id} (the `DeleteProjectReplica` operationId).
 	DeleteProjectReplicaWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, reqEditors ...RequestEditorFn) (*DeleteProjectReplicaResponse, error)
+
+	// UpdateProjectReplicaWithBodyWithResponse Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplicaWithBodyWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error)
+
+	// UpdateProjectReplicaWithResponse Change a read replica's standby settings
+	//
+	// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+	UpdateProjectReplicaWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error)
 
 	// DetachProjectReplicaWithBodyWithResponse Promote a read replica into a standalone project
 	//
@@ -48673,6 +49906,12 @@ type ClientWithResponsesInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -48684,6 +49923,12 @@ type ClientWithResponsesInterface interface {
 	// Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 	// password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 	// inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+	// The sender is trusted only on the provider's verdicts: DMARC pass, or
+	// DKIM and SPF passes aligned with From's domain, read from the
+	// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+	// API's `authentication_results` (the provider's Authentication-Results
+	// value, a string or an array). Other mail opens a ticket with no
+	// organisation, flagged unverified_sender, that never joins a thread.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -48788,6 +50033,106 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /readyz (the `GetReadyz` operationId).
 	GetReadyzWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetReadyzResponse, error)
+}
+
+type ListAgentClientCertsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *struct {
+		Items []AgentClientCert `json:"items"`
+	}
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListAgentClientCertsResponse) GetJSON200() *struct {
+	Items []AgentClientCert `json:"items"`
+} {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ListAgentClientCertsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ListAgentClientCertsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAgentClientCertsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAgentClientCertsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListAgentClientCertsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type RevokeAgentClientCertsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AgentClientCertRevoked
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r RevokeAgentClientCertsResponse) GetJSON200() *AgentClientCertRevoked {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r RevokeAgentClientCertsResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r RevokeAgentClientCertsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeAgentClientCertsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeAgentClientCertsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RevokeAgentClientCertsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
 }
 
 type ListPlatformAuditResponse struct {
@@ -55192,6 +56537,60 @@ func (r RestoreBackupResponse) ContentType() string {
 	return ""
 }
 
+type ConfirmBillingContactResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *struct {
+		Email   string `json:"email"`
+		OrgName string `json:"org_name"`
+	}
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ConfirmBillingContactResponse) GetJSON200() *struct {
+	Email   string `json:"email"`
+	OrgName string `json:"org_name"`
+} {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r ConfirmBillingContactResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r ConfirmBillingContactResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ConfirmBillingContactResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ConfirmBillingContactResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ConfirmBillingContactResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type CreateDevOperationResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -60835,6 +62234,54 @@ func (r RotateSigningKeyResponse) ContentType() string {
 	return ""
 }
 
+type RevokeSigningKeyResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *SigningKeyList
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r RevokeSigningKeyResponse) GetJSON200() *SigningKeyList {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r RevokeSigningKeyResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r RevokeSigningKeyResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeSigningKeyResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeSigningKeyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r RevokeSigningKeyResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type TestAuthSMTPResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -63251,6 +64698,150 @@ func (r ListJobRunsResponse) ContentType() string {
 	return ""
 }
 
+type GetProjectManageRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ManageRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetProjectManageRolesResponse) GetJSON200() *ManageRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetProjectManageRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetProjectManageRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetProjectManageRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetProjectManageRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetProjectManageRolesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetProjectManageRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ManageRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetProjectManageRolesResponse) GetJSON200() *ManageRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetProjectManageRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetProjectManageRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetProjectManageRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetProjectManageRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetProjectManageRolesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SyncProjectManageRolesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ManageRoles
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SyncProjectManageRolesResponse) GetJSON200() *ManageRoles {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SyncProjectManageRolesResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SyncProjectManageRolesResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SyncProjectManageRolesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SyncProjectManageRolesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SyncProjectManageRolesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListProjectMembersResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -63567,6 +65158,102 @@ func (r ListProjectMovesResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ListProjectMovesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetProjectNetworkResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ProjectNetwork
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetProjectNetworkResponse) GetJSON200() *ProjectNetwork {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r GetProjectNetworkResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r GetProjectNetworkResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetProjectNetworkResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetProjectNetworkResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetProjectNetworkResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetProjectNetworkResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ProjectNetwork
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r SetProjectNetworkResponse) GetJSON200() *ProjectNetwork {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r SetProjectNetworkResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r SetProjectNetworkResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SetProjectNetworkResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetProjectNetworkResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetProjectNetworkResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -64369,6 +66056,54 @@ func (r DeleteProjectReplicaResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r DeleteProjectReplicaResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type UpdateProjectReplicaResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ReadReplica
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r UpdateProjectReplicaResponse) GetJSON200() *ReadReplica {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r UpdateProjectReplicaResponse) GetJSONDefault() *Error {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r UpdateProjectReplicaResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateProjectReplicaResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateProjectReplicaResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r UpdateProjectReplicaResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -68104,6 +69839,64 @@ func (r GetReadyzResponse) ContentType() string {
 	return ""
 }
 
+// ListAgentClientCertsWithResponse The client certificates xenibase-servers issued themselves for agents
+//
+// Each xenibase-server issues itself a client certificate for its
+// agents, a day long and renewed at half-life, and records its
+// serial. The live ones (unexpired, unrevoked) are the allow list
+// every agent is given; an agent that has a list accepts no other.
+// Listed: live certificates, and those expired or revoked in the
+// last week.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/admin/agent-client-certs (the `ListAgentClientCerts` operationId).
+func (c *ClientWithResponses) ListAgentClientCertsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListAgentClientCertsResponse, error) {
+	rsp, err := c.ListAgentClientCerts(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAgentClientCertsResponse(rsp)
+}
+
+// RevokeAgentClientCertsWithBodyWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *ClientWithResponses) RevokeAgentClientCertsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error) {
+	rsp, err := c.RevokeAgentClientCertsWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeAgentClientCertsResponse(rsp)
+}
+
+// RevokeAgentClientCertsWithResponse Revoke a server's agent client certificate, by serial or every live one of a server
+//
+// Removes the certificates from the allow list and pushes the new
+// list to every agent at once, so a copied certificate stops working
+// (agents that do not answer get it at their next health check). A
+// server whose own certificate is revoked issues and registers a new
+// one and keeps its agents.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/admin/agent-client-certs/revoke (the `RevokeAgentClientCerts` operationId).
+func (c *ClientWithResponses) RevokeAgentClientCertsWithResponse(ctx context.Context, body RevokeAgentClientCertsJSONRequestBody, reqEditors ...RequestEditorFn) (*RevokeAgentClientCertsResponse, error) {
+	rsp, err := c.RevokeAgentClientCerts(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeAgentClientCertsResponse(rsp)
+}
+
 // ListPlatformAuditWithResponse The platform audit log, newest first (platform admin)
 //
 // Returns a wrapper object for the known response body format(s).
@@ -70805,6 +72598,36 @@ func (c *ClientWithResponses) RestoreBackupWithResponse(ctx context.Context, id 
 	return ParseRestoreBackupResponse(rsp)
 }
 
+// ConfirmBillingContactWithBodyWithResponse Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *ClientWithResponses) ConfirmBillingContactWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error) {
+	rsp, err := c.ConfirmBillingContactWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseConfirmBillingContactResponse(rsp)
+}
+
+// ConfirmBillingContactWithResponse Confirm a billing contact from the emailed link (public)
+//
+// An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/billing/contacts/confirm (the `ConfirmBillingContact` operationId).
+func (c *ClientWithResponses) ConfirmBillingContactWithResponse(ctx context.Context, body ConfirmBillingContactJSONRequestBody, reqEditors ...RequestEditorFn) (*ConfirmBillingContactResponse, error) {
+	rsp, err := c.ConfirmBillingContact(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseConfirmBillingContactResponse(rsp)
+}
+
 // CreateDevOperationWithBodyWithResponse Enqueue a dummy operation (development only)
 //
 // Available only when the server runs with XENIBASE_DEV_ENDPOINTS=true;
@@ -71290,7 +73113,7 @@ func (c *ClientWithResponses) AcceptMyInvitationWithResponse(ctx context.Context
 	return ParseAcceptMyInvitationResponse(rsp)
 }
 
-// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions
+// ChangePasswordWithBodyWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -71303,7 +73126,7 @@ func (c *ClientWithResponses) ChangePasswordWithBodyWithResponse(ctx context.Con
 	return ParseChangePasswordResponse(rsp)
 }
 
-// ChangePasswordWithResponse Change your password; ends your other sessions
+// ChangePasswordWithResponse Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -72088,6 +73911,8 @@ func (c *ClientWithResponses) ListBillingContactsWithResponse(ctx context.Contex
 
 // AddBillingContactWithBodyWithResponse Add a billing contact
 //
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /api/v1/orgs/{org}/billing/contacts (the `AddBillingContact` operationId).
@@ -72100,6 +73925,8 @@ func (c *ClientWithResponses) AddBillingContactWithBodyWithResponse(ctx context.
 }
 
 // AddBillingContactWithResponse Add a billing contact
+//
+// Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -72736,6 +74563,8 @@ func (c *ClientWithResponses) ListSupportPhonesWithResponse(ctx context.Context,
 
 // AddSupportPhoneWithBodyWithResponse Register a WhatsApp number (E.164) for the organisation's support
 //
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /api/v1/orgs/{org}/support/phones (the `AddSupportPhone` operationId).
@@ -72748,6 +74577,8 @@ func (c *ClientWithResponses) AddSupportPhoneWithBodyWithResponse(ctx context.Co
 }
 
 // AddSupportPhoneWithResponse Register a WhatsApp number (E.164) for the organisation's support
+//
+// The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -73166,6 +74997,19 @@ func (c *ClientWithResponses) RotateSigningKeyWithResponse(ctx context.Context, 
 		return nil, err
 	}
 	return ParseRotateSigningKeyResponse(rsp)
+}
+
+// RevokeSigningKeyWithResponse Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke (the `RevokeSigningKey` operationId).
+func (c *ClientWithResponses) RevokeSigningKeyWithResponse(ctx context.Context, id ProjectID, keyId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeSigningKeyResponse, error) {
+	rsp, err := c.RevokeSigningKey(ctx, id, keyId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeSigningKeyResponse(rsp)
 }
 
 // TestAuthSMTPWithBodyWithResponse Send a test email through the project's SMTP server (or the settings given)
@@ -74223,6 +76067,74 @@ func (c *ClientWithResponses) ListJobRunsWithResponse(ctx context.Context, id Pr
 	return ParseListJobRunsResponse(rsp)
 }
 
+// GetProjectManageRolesWithResponse Role management on a dedicated project, and the owner's logins the poolers accept
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/projects/{id}/manage-roles (the `GetProjectManageRoles` operationId).
+func (c *ClientWithResponses) GetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectManageRolesResponse, error) {
+	rsp, err := c.GetProjectManageRoles(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetProjectManageRolesResponse(rsp)
+}
+
+// SetProjectManageRolesWithBodyWithResponse Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *ClientWithResponses) SetProjectManageRolesWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error) {
+	rsp, err := c.SetProjectManageRolesWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectManageRolesResponse(rsp)
+}
+
+// SetProjectManageRolesWithResponse Turn role management on or off (organisation owners; step-up)
+//
+// On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+// and later that lets it create roles and manage only those it created;
+// it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+// owner creates, named <database>_<name>, connect through the poolers
+// within about 30 seconds (or at once after a sync), with the project's
+// connection limit. Off removes CREATEROLE; roles already created stay.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/manage-roles (the `SetProjectManageRoles` operationId).
+func (c *ClientWithResponses) SetProjectManageRolesWithResponse(ctx context.Context, id ProjectID, body SetProjectManageRolesJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectManageRolesResponse, error) {
+	rsp, err := c.SetProjectManageRoles(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectManageRolesResponse(rsp)
+}
+
+// SyncProjectManageRolesWithResponse Sync the owner's logins to the poolers now
+//
+// Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /api/v1/projects/{id}/manage-roles/sync (the `SyncProjectManageRoles` operationId).
+func (c *ClientWithResponses) SyncProjectManageRolesWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*SyncProjectManageRolesResponse, error) {
+	rsp, err := c.SyncProjectManageRoles(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSyncProjectManageRolesResponse(rsp)
+}
+
 // ListProjectMembersWithResponse Project members (org owners and admins are implicit admins)
 //
 // Returns a wrapper object for the known response body format(s).
@@ -74373,6 +76285,59 @@ func (c *ClientWithResponses) ListProjectMovesWithResponse(ctx context.Context, 
 		return nil, err
 	}
 	return ParseListProjectMovesResponse(rsp)
+}
+
+// GetProjectNetworkWithResponse The project's IP allowlist
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/projects/{id}/network (the `GetProjectNetwork` operationId).
+func (c *ClientWithResponses) GetProjectNetworkWithResponse(ctx context.Context, id ProjectID, reqEditors ...RequestEditorFn) (*GetProjectNetworkResponse, error) {
+	rsp, err := c.GetProjectNetwork(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetProjectNetworkResponse(rsp)
+}
+
+// SetProjectNetworkWithBodyWithResponse Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *ClientWithResponses) SetProjectNetworkWithBodyWithResponse(ctx context.Context, id ProjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error) {
+	rsp, err := c.SetProjectNetworkWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectNetworkResponse(rsp)
+}
+
+// SetProjectNetworkWithResponse Replace the project's IP allowlist (project admins)
+//
+// With networks listed, the poolers accept the project's logins (the
+// owner, members' and its own) only from those addresses; an empty list
+// allows any address. Xenibase's own logins for the project (backend
+// services, the SLA probe) aren't limited. Takes effect within seconds
+// on every pooler of the project's region; existing connections stay
+// until they close.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PUT /api/v1/projects/{id}/network (the `SetProjectNetwork` operationId).
+func (c *ClientWithResponses) SetProjectNetworkWithResponse(ctx context.Context, id ProjectID, body SetProjectNetworkJSONRequestBody, reqEditors ...RequestEditorFn) (*SetProjectNetworkResponse, error) {
+	rsp, err := c.SetProjectNetwork(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetProjectNetworkResponse(rsp)
 }
 
 // RestoreProjectPITRWithBodyWithResponse Point-in-time recovery of a dedicated project into a new one
@@ -74749,6 +76714,36 @@ func (c *ClientWithResponses) DeleteProjectReplicaWithResponse(ctx context.Conte
 		return nil, err
 	}
 	return ParseDeleteProjectReplicaResponse(rsp)
+}
+
+// UpdateProjectReplicaWithBodyWithResponse Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *ClientWithResponses) UpdateProjectReplicaWithBodyWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error) {
+	rsp, err := c.UpdateProjectReplicaWithBody(ctx, id, replicaId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateProjectReplicaResponse(rsp)
+}
+
+// UpdateProjectReplicaWithResponse Change a read replica's standby settings
+//
+// Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /api/v1/projects/{id}/replicas/{replica_id} (the `UpdateProjectReplica` operationId).
+func (c *ClientWithResponses) UpdateProjectReplicaWithResponse(ctx context.Context, id ProjectID, replicaId ReplicaID, body UpdateProjectReplicaJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateProjectReplicaResponse, error) {
+	rsp, err := c.UpdateProjectReplica(ctx, id, replicaId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateProjectReplicaResponse(rsp)
 }
 
 // DetachProjectReplicaWithBodyWithResponse Promote a read replica into a standalone project
@@ -76258,6 +78253,12 @@ func (c *ClientWithResponses) TestStorageTargetWithResponse(ctx context.Context,
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -76275,6 +78276,12 @@ func (c *ClientWithResponses) SupportInboundEmailWithBodyWithResponse(ctx contex
 // Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
 // password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
 // inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+// The sender is trusted only on the provider's verdicts: DMARC pass, or
+// DKIM and SPF passes aligned with From's domain, read from the
+// Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+// API's `authentication_results` (the provider's Authentication-Results
+// value, a string or an array). Other mail opens a ticket with no
+// organisation, flagged unverified_sender, that never joins a thread.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -76456,6 +78463,74 @@ func (c *ClientWithResponses) GetReadyzWithResponse(ctx context.Context, reqEdit
 		return nil, err
 	}
 	return ParseGetReadyzResponse(rsp)
+}
+
+// ParseListAgentClientCertsResponse parses an HTTP response from a ListAgentClientCertsWithResponse call
+func ParseListAgentClientCertsResponse(rsp *http.Response) (*ListAgentClientCertsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAgentClientCertsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Items []AgentClientCert `json:"items"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeAgentClientCertsResponse parses an HTTP response from a RevokeAgentClientCertsWithResponse call
+func ParseRevokeAgentClientCertsResponse(rsp *http.Response) (*RevokeAgentClientCertsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeAgentClientCertsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentClientCertRevoked
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseListPlatformAuditResponse parses an HTTP response from a ListPlatformAuditWithResponse call
@@ -80865,6 +82940,42 @@ func ParseRestoreBackupResponse(rsp *http.Response) (*RestoreBackupResponse, err
 	return response, nil
 }
 
+// ParseConfirmBillingContactResponse parses an HTTP response from a ConfirmBillingContactWithResponse call
+func ParseConfirmBillingContactResponse(rsp *http.Response) (*ConfirmBillingContactResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ConfirmBillingContactResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Email   string `json:"email"`
+			OrgName string `json:"org_name"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseCreateDevOperationResponse parses an HTTP response from a CreateDevOperationWithResponse call
 func ParseCreateDevOperationResponse(rsp *http.Response) (*CreateDevOperationResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -84762,6 +86873,39 @@ func ParseRotateSigningKeyResponse(rsp *http.Response) (*RotateSigningKeyRespons
 	return response, nil
 }
 
+// ParseRevokeSigningKeyResponse parses an HTTP response from a RevokeSigningKeyWithResponse call
+func ParseRevokeSigningKeyResponse(rsp *http.Response) (*RevokeSigningKeyResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeSigningKeyResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SigningKeyList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseTestAuthSMTPResponse parses an HTTP response from a TestAuthSMTPWithResponse call
 func ParseTestAuthSMTPResponse(rsp *http.Response) (*TestAuthSMTPResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -86420,6 +88564,105 @@ func ParseListJobRunsResponse(rsp *http.Response) (*ListJobRunsResponse, error) 
 	return response, nil
 }
 
+// ParseGetProjectManageRolesResponse parses an HTTP response from a GetProjectManageRolesWithResponse call
+func ParseGetProjectManageRolesResponse(rsp *http.Response) (*GetProjectManageRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetProjectManageRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ManageRoles
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetProjectManageRolesResponse parses an HTTP response from a SetProjectManageRolesWithResponse call
+func ParseSetProjectManageRolesResponse(rsp *http.Response) (*SetProjectManageRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetProjectManageRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ManageRoles
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSyncProjectManageRolesResponse parses an HTTP response from a SyncProjectManageRolesWithResponse call
+func ParseSyncProjectManageRolesResponse(rsp *http.Response) (*SyncProjectManageRolesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SyncProjectManageRolesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ManageRoles
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListProjectMembersResponse parses an HTTP response from a ListProjectMembersWithResponse call
 func ParseListProjectMembersResponse(rsp *http.Response) (*ListProjectMembersResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -86626,6 +88869,72 @@ func ParseListProjectMovesResponse(rsp *http.Response) (*ListProjectMovesRespons
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest MoveList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetProjectNetworkResponse parses an HTTP response from a GetProjectNetworkWithResponse call
+func ParseGetProjectNetworkResponse(rsp *http.Response) (*GetProjectNetworkResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetProjectNetworkResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ProjectNetwork
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetProjectNetworkResponse parses an HTTP response from a SetProjectNetworkWithResponse call
+func ParseSetProjectNetworkResponse(rsp *http.Response) (*SetProjectNetworkResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetProjectNetworkResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ProjectNetwork
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -87186,6 +89495,39 @@ func ParseDeleteProjectReplicaResponse(rsp *http.Response) (*DeleteProjectReplic
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateProjectReplicaResponse parses an HTTP response from a UpdateProjectReplicaWithResponse call
+func ParseUpdateProjectReplicaResponse(rsp *http.Response) (*UpdateProjectReplicaResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateProjectReplicaResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ReadReplica
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

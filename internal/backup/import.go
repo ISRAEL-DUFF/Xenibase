@@ -2,8 +2,10 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/pgsource"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -31,9 +34,6 @@ var SupabaseManagedSchemas = []string{
 
 // SupabaseRoles are the roles Supabase grants and policies refer to.
 var SupabaseRoles = []string{"anon", "authenticated", "service_role"}
-
-// sourceTTL bounds how long a source connection string stays in memory.
-const sourceTTL = 12 * time.Hour
 
 // Preflight is what an import would copy (spec §6.8 step 2).
 type Preflight struct {
@@ -74,21 +74,45 @@ type RoleReference struct {
 	Roles  []string `json:"roles"`
 }
 
-func connectSource(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGConn, error) {
-	pg, err := agentapi.ParseURL(raw)
-	if err != nil {
-		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, err)
+// SourceGuard is the address check for a source chosen on behalf of
+// orgs: the source must pass outbound.CheckSource for one of them (an
+// import's own organisation; for a preflight, any the caller belongs to).
+func (s *Service) SourceGuard(orgs ...uuid.UUID) pgsource.Guard {
+	if len(orgs) == 0 {
+		orgs = []uuid.UUID{uuid.Nil}
 	}
-	cfg, err := pgx.ParseConfig(strings.TrimSpace(raw))
+	return func(ctx context.Context, host string, port int) (netip.Addr, error) {
+		if s.CheckSource == nil {
+			return netip.Addr{}, errors.New("no address check is configured for import sources")
+		}
+		var err error
+		for _, org := range orgs {
+			var a netip.Addr
+			if a, err = s.CheckSource(ctx, org, host, port); err == nil {
+				return a, nil
+			}
+		}
+		return netip.Addr{}, err
+	}
+}
+
+// connectSource connects to an import's source, read-only, after guard
+// has checked its address, and pinned to that address. The PGConn it
+// returns carries the address too, for the agent's copy.
+func connectSource(ctx context.Context, raw string, guard pgsource.Guard) (*pgx.Conn, agentapi.PGConn, error) {
+	cfg, pg, err := pgsource.Config(ctx, raw, guard)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, pg.Password))
 	}
 	cfg.ConnectTimeout = 15 * time.Second
 	cfg.RuntimeParams["application_name"] = "xenibase-import"
-	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: cannot connect to the source: %w", ErrInvalid, redactErr(err, pg.Password))
+	}
+	if err := pgsource.ReadOnly(ctx, conn); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, pg.Password))
 	}
 	return conn, pg, nil
 }
@@ -102,13 +126,31 @@ func redactErr(err error, password string) error {
 }
 
 // Preflight inspects a source database without changing it.
-func (s *Service) Preflight(ctx context.Context, sourceURL string) (Preflight, error) {
-	conn, _, err := connectSource(ctx, sourceURL)
+// orgs are the organisations the caller belongs to, for the platform
+// admin's outbound allow-lists.
+func (s *Service) Preflight(ctx context.Context, orgs []uuid.UUID, sourceURL string) (Preflight, error) {
+	conn, pg, err := connectSource(ctx, sourceURL, s.SourceGuard(orgs...))
 	if err != nil {
 		return Preflight{}, err
 	}
 	defer conn.Close(context.Background())
-	return preflight(ctx, conn)
+	pf, err := preflight(ctx, conn)
+	return pf, sourceReadError(ctx, err, pg.Password)
+}
+
+// sourceReadError says what went wrong reading the source, as something the
+// user can act on: a source that never answered (behind a pooler with no free
+// connection for the login, say) or a query it refused, rather than an
+// "internal error".
+func sourceReadError(ctx context.Context, err error, password string) error {
+	switch {
+	case err == nil, errors.Is(err, ErrInvalid):
+		return err
+	case ctx.Err() != nil, errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return fmt.Errorf("%w: the source did not answer in time. If it is behind a connection pooler such as PgBouncer, the pooler may have no free connection for this login: free some, raise its pool size, or use a direct connection", ErrInvalid)
+	default:
+		return fmt.Errorf("%w: reading the source failed: %w", ErrInvalid, redactErr(err, password))
+	}
 }
 
 func preflight(ctx context.Context, conn *pgx.Conn) (Preflight, error) {
@@ -247,14 +289,14 @@ func (s *Service) Import(ctx context.Context, p ImportParams) (provision.Created
 	if _, err := s.nodes.Any(ctx); err != nil {
 		return provision.Created{}, fmt.Errorf("%w: no agent is available to copy the data: %w", ErrConflict, err)
 	}
-	conn, pg, err := connectSource(ctx, p.SourceURL)
+	conn, pg, err := connectSource(ctx, p.SourceURL, s.SourceGuard(p.OrgID))
 	if err != nil {
 		return provision.Created{}, err
 	}
 	pf, err := preflight(ctx, conn)
 	_ = conn.Close(context.Background())
 	if err != nil {
-		return provision.Created{}, err
+		return provision.Created{}, sourceReadError(ctx, err, pg.Password)
 	}
 	schemas := slices.Clone(p.Schemas)
 	sort.Strings(schemas)
@@ -276,17 +318,32 @@ func (s *Service) Import(ctx context.Context, p ImportParams) (provision.Created
 		AuthShim: pf.Supabase && !slices.Contains(schemas, "auth"),
 		RoleRefs: pf.Supabase || len(pf.RoleReferences) > 0,
 	}
-	s.ephemeral.Put(ref, strings.TrimSpace(p.SourceURL), sourceTTL)
-	created, err := s.projects.Create(ctx, provision.CreateParams{
-		OrgID: p.OrgID, CreatorRole: p.CreatorRole,
-		Name: p.Name, Description: p.Description, CreatedBy: p.CreatedBy, Kind: KindImport,
-		Params: map[string]any{"import": params},
-	})
+	sealed, err := SealOpSecret(s.keyring, importSourcePurpose, ref, []byte(strings.TrimSpace(p.SourceURL)))
 	if err != nil {
-		s.ephemeral.Delete(ref)
 		return provision.Created{}, err
 	}
-	return created, nil
+	return s.projects.Create(ctx, provision.CreateParams{
+		OrgID: p.OrgID, CreatorRole: p.CreatorRole,
+		Name: p.Name, Description: p.Description, CreatedBy: p.CreatedBy, Kind: KindImport,
+		Params: map[string]any{"import": params}, Secrets: map[string]string{"source_url": sealed},
+	})
+}
+
+// importSourcePurpose binds an import's sealed source URL to its use.
+const importSourcePurpose = "import_source"
+
+// importSource opens the source URL an import's operation carries.
+func (s *Service) importSource(op store.Operation, ref uuid.UUID) (string, error) {
+	var p struct {
+		Secrets struct {
+			SourceURL string `json:"source_url"`
+		} `json:"secrets"`
+	}
+	if err := json.Unmarshal(op.Params, &p); err != nil {
+		return "", err
+	}
+	url, err := OpenOpSecret(s.keyring, importSourcePurpose, ref, p.Secrets.SourceURL)
+	return string(url), err
 }
 
 // runImport copies the source into the new project (spec §6.8 steps 3-5).
@@ -298,18 +355,19 @@ func (s *Service) runImport(ctx context.Context, op store.Operation, log *jobs.S
 		return err
 	}
 	params := wrapper.Import
-	sourceURL, ok := s.ephemeral.Get(params.SourceRef)
-	if !ok {
-		return jobs.Permanent(errors.New("the source connection string is no longer in memory (xenibase-server restarted?); start the import again"))
-	}
-	defer s.ephemeral.Delete(params.SourceRef)
-	source, err := agentapi.ParseURL(sourceURL)
+	sourceURL, err := s.importSource(op, params.SourceRef)
 	if err != nil {
-		return jobs.Permanent(err)
+		return jobs.Permanent(fmt.Errorf("the source connection string: %w; start the import again", err))
 	}
 	p, err := s.projects.ProjectFor(ctx, op)
 	if err != nil {
 		return err
+	}
+	// Checked again, now, and pinned: the agent copies from the address
+	// that passed, not whatever the name resolves to by then.
+	_, source, err := pgsource.Config(ctx, sourceURL, s.SourceGuard(p.OrgID))
+	if err != nil {
+		return jobs.Permanent(fmt.Errorf("%w: %w", ErrInvalid, redactErr(err, source.Password)))
 	}
 	password, err := s.projects.Password(op)
 	if err != nil {
@@ -367,7 +425,7 @@ func (s *Service) runImport(ctx context.Context, op store.Operation, log *jobs.S
 		}
 	}
 
-	if err := s.verifyImport(ctx, sourceURL, p, params.Schemas, log); err != nil {
+	if err := s.verifyImport(ctx, sourceURL, s.SourceGuard(p.OrgID), p, params.Schemas, log); err != nil {
 		return err
 	}
 	if err := s.projects.ResetWebhooks(ctx, p, log); err != nil {
@@ -511,8 +569,8 @@ func relevantWarnings(lines, precreated []string) []string {
 // verifyImport compares per-table row counts and sequence values between
 // source and target (spec §6.8 step 5). Differences are reported; tables
 // missing on the target fail the import.
-func (s *Service) verifyImport(ctx context.Context, sourceURL string, p store.Project, schemas []string, log *jobs.StepLogger) error {
-	src, srcPG, err := connectSource(ctx, sourceURL)
+func (s *Service) verifyImport(ctx context.Context, sourceURL string, guard pgsource.Guard, p store.Project, schemas []string, log *jobs.StepLogger) error {
+	src, srcPG, err := connectSource(ctx, sourceURL, guard)
 	if err != nil {
 		return err
 	}
@@ -527,11 +585,12 @@ func (s *Service) verifyImport(ctx context.Context, sourceURL string, p store.Pr
 		schema, _, _ := strings.Cut(table, ".")
 		return slices.Contains(schemas, schema)
 	}
-	srcCounts, err := tableCounts(ctx, src)
+	// Only the chosen schemas: the source login may read nothing else.
+	srcCounts, err := tableCounts(ctx, src, schemas)
 	if err != nil {
 		return jobs.Permanent(fmt.Errorf("count source rows: %w", redactErr(err, srcPG.Password)))
 	}
-	dstCounts, err := tableCounts(ctx, dst)
+	dstCounts, err := tableCounts(ctx, dst, schemas)
 	if err != nil {
 		return fmt.Errorf("count target rows: %w", err)
 	}

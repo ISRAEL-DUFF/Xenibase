@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
+	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/mail"
@@ -67,7 +68,8 @@ type Config struct {
 // (the services service, V4.1 §9.5).
 type API interface {
 	PrepareBranch(ctx context.Context, parentID, branchID uuid.UUID, by *uuid.UUID) (*services.BranchAPI, error)
-	EnableBranch(ctx context.Context, branch store.Project, parentID uuid.UUID, copyFiles bool, log *jobs.StepLogger) error
+	EnableBranch(ctx context.Context, branch store.Project, log *jobs.StepLogger) error
+	BranchFiles(ctx context.Context, branch store.Project, parentID uuid.UUID, f services.BranchFiles, log *jobs.StepLogger) error
 }
 
 // Service manages branches.
@@ -200,9 +202,9 @@ func (s *Service) Create(ctx context.Context, p CreateParams, r Resolved) (provi
 	c, err := s.projects.Create(ctx, provision.CreateParams{
 		PgVersion: int(parentInst.PgVersion),
 		OrgID:     r.Parent.OrgID, CreatorRole: p.CreatorRole, Name: p.Name, CreatedBy: p.CreatedBy,
-		Kind: KindCreate, Tier: provision.TierShared, Sensitive: r.Parent.SensitiveData,
+		Kind: KindCreate, Tier: provision.TierShared, Sensitive: r.Parent.SensitiveData, Derived: true,
 		Params: map[string]any{"branch": fillParams{Parent: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, CopyFiles: p.CopyFiles}},
-		Branch: &provision.BranchSpec{ParentID: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, ExpiresAt: r.ExpiresAt},
+		Branch: &provision.BranchSpec{ParentID: r.Parent.ID, Source: r.Source, SchemaOnly: r.SchemaOnly, ExpiresAt: r.ExpiresAt, CopyFiles: p.CopyFiles},
 	})
 	if err != nil || s.API == nil {
 		return c, nil, err
@@ -233,6 +235,11 @@ func (s *Service) runCreate(ctx context.Context, op store.Operation, log *jobs.S
 	if err != nil {
 		return err
 	}
+	// A retry after Publish finds the branch filled, routed and serving:
+	// it is never recreated under its clients, only what follows runs.
+	if p.Status == provision.StatusActive {
+		return s.created(ctx, p, params, log)
+	}
 	password, err := s.projects.Password(op)
 	if err != nil {
 		return err
@@ -249,12 +256,24 @@ func (s *Service) runCreate(ctx context.Context, op store.Operation, log *jobs.S
 	if err := s.fill(ctx, p, params, log); err != nil {
 		return err
 	}
+	// The API goes on before the branch is published: a failure is retried
+	// on a database no one uses yet, and rolled back with the branch.
+	if s.API != nil {
+		if err := s.API.EnableBranch(ctx, p, log); err != nil {
+			return fmt.Errorf("backend services: %w", err)
+		}
+	}
 	if err := s.projects.Publish(ctx, p, password, log); err != nil {
 		return err
 	}
+	return s.created(ctx, p, params, log)
+}
+
+// created finishes a published branch: its files, in the background.
+func (s *Service) created(ctx context.Context, p store.Project, params fillParams, log *jobs.StepLogger) error {
 	if s.API != nil {
-		if err := s.API.EnableBranch(ctx, p, params.Parent, params.CopyFiles, log); err != nil {
-			return fmt.Errorf("backend services: %w", err)
+		if err := s.API.BranchFiles(ctx, p, params.Parent, services.BranchFiles{Copy: params.CopyFiles}, log); err != nil {
+			return fmt.Errorf("files: %w", err)
 		}
 	}
 	return log.Info(ctx, "done", "branch %s ready", p.Name)
@@ -269,6 +288,11 @@ func (s *Service) fill(ctx context.Context, p store.Project, params fillParams, 
 	}
 	if parent.DeletedAt != nil {
 		return jobs.Permanent(fmt.Errorf("the parent %s was deleted", parent.Name))
+	}
+	// A branch and its parent share an organisation (V2 §8.1); one that
+	// doesn't is never filled from the other organisation's data.
+	if parent.OrgID != p.OrgID {
+		return jobs.Permanent(fmt.Errorf("the parent %s is in another organisation", parent.Name))
 	}
 	if err := s.copyExtensions(ctx, parent, p, log); err != nil {
 		return err
@@ -386,6 +410,11 @@ type ResetParams struct {
 	BranchID uuid.UUID
 	Source   string
 	By       *uuid.UUID
+	// Actor is who asks. A reset copies the parent again, so they must
+	// still be allowed to branch it, and only its project admin may refill
+	// a full-data branch of a parent that contains sensitive data (V2
+	// §8.5), as for a new branch.
+	Actor authz.Actor
 }
 
 // Reset queues re-creating a branch's data from its parent, keeping its
@@ -395,6 +424,28 @@ func (s *Service) Reset(ctx context.Context, p ResetParams) (store.Operation, er
 		func(tx pgx.Tx, b store.Project) (any, error) {
 			if b.ParentProjectID == nil {
 				return nil, fmt.Errorf("%w: %w", provision.ErrInvalid, ErrNotBranch)
+			}
+			q := store.New(tx)
+			parent, err := q.GetProject(ctx, *b.ParentProjectID)
+			if err != nil {
+				return nil, err
+			}
+			if parent.DeletedAt != nil {
+				return nil, fmt.Errorf("%w: the parent %s was deleted; detach or delete the branch", ErrConflict, parent.Name)
+			}
+			if parent.OrgID != b.OrgID {
+				return nil, fmt.Errorf("%w: the parent is in another organisation; detach or delete the branch", ErrConflict)
+			}
+			d, err := authz.Can(ctx, q, p.Actor, authz.BranchManage, authz.Resource{OrgID: parent.OrgID, ProjectID: parent.ID})
+			if err != nil {
+				return nil, err
+			}
+			if !d.Allowed {
+				return nil, fmt.Errorf("%w: a reset copies %s again, which needs the developer role (or above) on it", ErrForbidden, parent.Name)
+			}
+			schemaOnly := b.BranchSchemaOnly != nil && *b.BranchSchemaOnly
+			if !schemaOnly && parent.SensitiveData && d.ProjectRole != authz.ProjectAdmin {
+				return nil, fmt.Errorf("%w: %s contains sensitive data; refilling a full-data branch needs the project admin role on it", ErrForbidden, parent.Name)
 			}
 			src := p.Source
 			if src == "" && b.BranchSource != nil {
@@ -408,14 +459,13 @@ func (s *Service) Reset(ctx context.Context, p ResetParams) (store.Operation, er
 				return nil, fmt.Errorf("%w: source must be backup or live", provision.ErrInvalid)
 			}
 			if src == SourceBackup {
-				if _, err := store.New(tx).LatestSucceededBackup(ctx, b.ParentProjectID); errors.Is(err, pgx.ErrNoRows) {
+				if _, err := q.LatestSucceededBackup(ctx, b.ParentProjectID); errors.Is(err, pgx.ErrNoRows) {
 					return nil, fmt.Errorf("%w: the parent has no backup yet; reset from live instead", provision.ErrConflict)
 				} else if err != nil {
 					return nil, err
 				}
 			}
-			schemaOnly := b.BranchSchemaOnly != nil && *b.BranchSchemaOnly
-			return map[string]any{"branch": fillParams{Parent: *b.ParentProjectID, Source: src, SchemaOnly: schemaOnly}}, nil
+			return map[string]any{"branch": fillParams{Parent: *b.ParentProjectID, Source: src, SchemaOnly: schemaOnly, CopyFiles: b.BranchCopyFiles}}, nil
 		})
 }
 
@@ -436,6 +486,9 @@ func (s *Service) runReset(ctx context.Context, op store.Operation, log *jobs.St
 	if err := log.Info(ctx, "pooler", "clients disconnected; new connections wait"); err != nil {
 		return err
 	}
+	// The files stored until now that the refilled rows don't name are the
+	// branch's to tidy (the garbage list went with the old database).
+	droppedAt := time.Now()
 	if err := s.projects.RecreateDatabase(ctx, p, log); err != nil {
 		return err
 	}
@@ -448,10 +501,15 @@ func (s *Service) runReset(ctx context.Context, op store.Operation, log *jobs.St
 		return err
 	}
 	// The branch's API, if it has one, keeps its ref and keys; the copy's
-	// sessions go and its roles and schemas are checked again.
+	// sessions go and its roles and schemas are checked again. A branch
+	// made with copy_files gets the parent's files again, and the files no
+	// row names any more are removed.
 	if s.API != nil {
-		if err := s.API.EnableBranch(ctx, p, params.Parent, false, log); err != nil {
+		if err := s.API.EnableBranch(ctx, p, log); err != nil {
 			return fmt.Errorf("backend services: %w", err)
+		}
+		if err := s.API.BranchFiles(ctx, p, params.Parent, services.BranchFiles{Copy: params.CopyFiles, ResetAt: droppedAt}, log); err != nil {
+			return fmt.Errorf("files: %w", err)
 		}
 	}
 	if err := s.reopen(ctx, p, provision.StatusActive); err != nil {
@@ -478,13 +536,48 @@ func (s *Service) reopen(ctx context.Context, p store.Project, status string) er
 	return store.New(s.db).SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: status})
 }
 
-// Detach turns a branch into an ordinary standalone project.
-func (s *Service) Detach(ctx context.Context, id uuid.UUID) (store.Project, error) {
-	p, err := store.New(s.db).DetachBranch(ctx, id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return p, fmt.Errorf("%w: %w", provision.ErrInvalid, ErrNotBranch)
-	}
-	return p, err
+// DetachParams asks for a branch to become a standalone project.
+type DetachParams struct {
+	ID uuid.UUID
+	// Actor is who asks. Detaching makes a new project of the organisation,
+	// so they need org.create_project, as for any new project.
+	Actor authz.Actor
+	// CheckCreateProject, when set, applies the projects quota (tenancy),
+	// which branches don't count towards.
+	CheckCreateProject func(ctx context.Context, orgID uuid.UUID) error
+}
+
+// Detach turns a branch into an ordinary standalone project, under its
+// row lock: it must be active with no operation pending (a reset in flight
+// would refill it from its former parent).
+func (s *Service) Detach(ctx context.Context, p DetachParams) (store.Project, error) {
+	var out store.Project
+	err := s.projects.WithIdleProject(ctx, p.ID, []string{provision.StatusActive}, func(tx pgx.Tx, b store.Project) error {
+		if b.ParentProjectID == nil {
+			return fmt.Errorf("%w: %w", provision.ErrInvalid, ErrNotBranch)
+		}
+		q := store.New(tx)
+		d, err := authz.Can(ctx, q, p.Actor, authz.OrgCreateProject, authz.Resource{OrgID: b.OrgID})
+		if err != nil {
+			return err
+		}
+		if !d.Allowed {
+			return fmt.Errorf("%w: detaching makes a standalone project, which needs permission to create projects in the organisation", ErrForbidden)
+		}
+		if p.CheckCreateProject != nil {
+			if err := p.CheckCreateProject(ctx, b.OrgID); err != nil {
+				return err
+			}
+		}
+		// The projects quota again, under the organisation's lock, so
+		// branches detached in parallel cannot all pass.
+		if err := s.projects.Claim(ctx, tx, provision.Claim{OrgID: b.OrgID, Project: true}); err != nil {
+			return err
+		}
+		out, err = q.DetachBranch(ctx, b.ID)
+		return err
+	})
+	return out, err
 }
 
 // SetExpiry moves a branch's expiry (nil: keep it); the 24-hour warning
@@ -524,7 +617,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 		return err
 	}
 	for _, b := range expired {
-		if _, err := s.projects.Delete(ctx, b.ID, b.Name, !b.BranchBackups, nil); err != nil && !errors.Is(err, provision.ErrConflict) {
+		if _, err := s.expire(ctx, b.ID, now); err != nil && !errors.Is(err, provision.ErrConflict) {
 			errs = append(errs, fmt.Errorf("expire branch %s: %w", b.ID, err))
 		} else if err == nil {
 			s.log.Info("branch expired; deleting", "project_id", b.ID, "expired_at", b.ExpiresAt)
@@ -540,7 +633,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 			Title:     fmt.Sprintf("Branch %s expires soon", b.Name),
 			Blocks: []mail.Block{
 				mail.P("Hello,"),
-				mail.P(fmt.Sprintf("Your branch %q of %s will be deleted on %s.", b.Name, b.ParentName, b.ExpiresAt.UTC().Format("2 January 2006 at 15:04 MST"))),
+				mail.P(fmt.Sprintf("Your branch %q of %s will be deleted on %s.", mail.Inert(b.Name), mail.Inert(b.ParentName), b.ExpiresAt.UTC().Format("2 January 2006 at 15:04 MST"))),
 				mail.P("To keep it a little longer, extend it from the branches page, or with `xenibase branch extend`. To keep it for good, detach it from its parent."),
 				mail.Button("Open the branches", fmt.Sprintf("%s/projects/%s/branches", s.cfg.PublicURL, b.ID)),
 			},
@@ -555,6 +648,18 @@ func (s *Service) Sweep(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// expire deletes a branch the sweep listed as expired, if its locked row
+// still is one: a branch extended or detached since the list was read is
+// skipped (ErrConflict). Whether it takes a final backup is the row's too.
+func (s *Service) expire(ctx context.Context, id uuid.UUID, now time.Time) (store.Operation, error) {
+	return s.projects.DeleteChecked(ctx, id, nil, func(p store.Project) (bool, error) {
+		if p.ParentProjectID == nil || p.ExpiresAt == nil || p.ExpiresAt.After(now) {
+			return false, fmt.Errorf("%w: %s is no longer an expired branch", provision.ErrConflict, p.Name)
+		}
+		return !p.BranchBackups, nil
+	})
 }
 
 // Run sweeps every interval until ctx ends.

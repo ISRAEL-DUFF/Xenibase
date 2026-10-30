@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"github.com/israel-duff/xenibase/internal/api/gen"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/regions"
@@ -29,20 +31,53 @@ func (s *Server) ListRegions(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "list regions", err)
 		return
 	}
+	// A hidden region is listed to members of its early-access
+	// organisations (a token: its own organisation only).
+	sess, _ := sessionFrom(r.Context())
+	q := store.New(s.db)
+	mine := map[uuid.UUID]bool{}
+	if orgs, err := q.ListUserOrgs(r.Context(), sess.UserID); err == nil {
+		for _, o := range orgs {
+			if sess.Token == nil || o.ID == sess.Token.OrgID {
+				mine[o.ID] = true
+			}
+		}
+	} else {
+		s.internalError(w, "list regions", err)
+		return
+	}
 	out := gen.RegionList{Items: []gen.Region{}}
 	for _, g := range list {
+		item := gen.Region{Id: g.ID, Name: g.Name, Country: g.Country, Residency: g.Residency, Home: g.ID == rs.Home()}
 		if g.Status != "active" {
-			continue
+			ids, err := q.RegionEarlyAccessOrgs(r.Context(), g.ID)
+			if err != nil {
+				s.internalError(w, "list regions", err)
+				return
+			}
+			allowed := []uuid.UUID{}
+			for _, id := range ids {
+				if mine[id] {
+					allowed = append(allowed, id)
+				}
+			}
+			if len(allowed) == 0 {
+				continue
+			}
+			item.EarlyAccessOrgIds = &allowed
 		}
-		out.Items = append(out.Items, gen.Region{Id: g.ID, Name: g.Name, Country: g.Country, Residency: g.Residency, Home: g.ID == rs.Home()})
+		out.Items = append(out.Items, item)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) toAPIAdminRegion(g store.Region, home string, u store.RegionUsageRow) gen.AdminRegion {
+func (s *Server) toAPIAdminRegion(g store.Region, home string, u store.RegionUsageRow, early []uuid.UUID) gen.AdminRegion {
+	if early == nil {
+		early = []uuid.UUID{}
+	}
 	return gen.AdminRegion{
-		Id: g.ID, Name: g.Name, Country: g.Country, PoolerHost: g.PoolerHost, Provider: g.Provider,
-		Location: g.Location, StorageTargetId: g.StorageTargetID, CopyTargetId: g.CopyTargetID, FloatingIpId: g.FloatingIpID,
+		Id: g.ID, Name: g.Name, Country: g.Country, PoolerHost: g.PoolerHost, ApiDomain: g.ApiDomain, EarlyAccessOrgIds: early, Provider: g.Provider,
+		Location: g.Location, StorageTargetId: g.StorageTargetID, CopyTargetId: g.CopyTargetID, FilesTargetId: g.FilesTargetID, FloatingIpId: g.FloatingIpID,
 		Residency: g.Residency, Status: gen.AdminRegionStatus(g.Status), Home: g.ID == home, CreatedAt: g.CreatedAt,
 		Nodes: int(u.Nodes), PoolerHosts: int(u.PoolerHosts), Projects: int(u.Projects), ResidencyProjects: int(u.ResidencyProjects),
 	}
@@ -75,7 +110,12 @@ func (s *Server) ListAdminRegions(w http.ResponseWriter, r *http.Request) {
 		Status gen.AdminRegionListCopiesStatus `json:"status"`
 	}{}}
 	for _, g := range list {
-		out.Items = append(out.Items, s.toAPIAdminRegion(g, rs.Home(), byID[g.ID]))
+		early, err := rs.EarlyAccess(ctx, g.ID)
+		if err != nil {
+			s.internalError(w, "region early access", err)
+			return
+		}
+		out.Items = append(out.Items, s.toAPIAdminRegion(g, rs.Home(), byID[g.ID], early))
 	}
 	counts, err := q.CopyStatusCounts(ctx)
 	if err != nil {
@@ -104,13 +144,19 @@ func (s *Server) PutAdminRegion(w http.ResponseWriter, r *http.Request, regionID
 	a := auditFrom(r.Context())
 	a.target("region", regionID)
 	in := regions.Input{
-		ID: regionID, Name: req.Name, Country: valueOr(req.Country, ""), PoolerHost: valueOr(req.PoolerHost, ""),
+		ID: regionID, Name: req.Name, Country: valueOr(req.Country, ""), PoolerHost: valueOr(req.PoolerHost, ""), APIDomain: valueOr(req.ApiDomain, ""),
 		Provider: valueOr(req.Provider, ""), Location: valueOr(req.Location, ""),
-		StorageTargetID: req.StorageTargetId, CopyTargetID: req.CopyTargetId, FloatingIPID: req.FloatingIpId,
+		StorageTargetID: req.StorageTargetId, CopyTargetID: req.CopyTargetId, FilesTargetID: req.FilesTargetId, FloatingIPID: req.FloatingIpId,
 		Residency: valueOr(req.Residency, false), Hidden: valueOr(req.Hidden, false),
 	}
 	a.set("residency", in.Residency)
 	a.set("pooler_host", in.PoolerHost)
+	a.set("api_domain", in.APIDomain)
+	a.set("files_target_id", in.FilesTargetID)
+	if req.EarlyAccessOrgIds != nil {
+		in.EarlyAccess = *req.EarlyAccessOrgIds
+		a.set("early_access_org_ids", in.EarlyAccess)
+	}
 	g, err := rs.Save(r.Context(), in)
 	switch {
 	case errors.Is(err, regions.ErrInvalid):
@@ -130,7 +176,12 @@ func (s *Server) PutAdminRegion(w http.ResponseWriter, r *http.Request, regionID
 			u = x
 		}
 	}
-	writeJSON(w, http.StatusOK, s.toAPIAdminRegion(g, rs.Home(), u))
+	early, err := rs.EarlyAccess(r.Context(), g.ID)
+	if err != nil {
+		s.internalError(w, "region early access", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.toAPIAdminRegion(g, rs.Home(), u, early))
 }
 
 // SetProjectResidency implements PUT /api/v1/projects/{id}/residency:

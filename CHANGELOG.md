@@ -5,6 +5,1399 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+### Added
+- **A leaked project signing key can be revoked at once.** Rotation was the
+  only control, and it keeps the old key verifying for a day, so tokens
+  forged with a leaked key (after an edge compromise, say) stayed valid
+  that long. `POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke`
+  (project admins), or **Revoke** under Authentication → Signing keys,
+  retires the key now: it leaves the JWKS and the edges with their next
+  feed read, and every token it signed is refused. Revoking the active key
+  makes a new one, which signs every user out.
+- **Connections grow with a dedicated instance's memory.** `max_connections`
+  was 100 for every size; it is now 50 per GB, from 100 (2 GB or less) to 500
+  (10 GB or more): 200 on a 4 GB instance, 400 on 8 GB. A dedicated project's
+  connection limit can go up to that less 10 that Xenibase keeps for its own
+  connections (190 on 4 GB); more is refused with the ceiling named, which the
+  Connections and timeouts panel and `instance.connection_limit_max` show. A resize changes
+  `max_connections` with the restart, in Patroni's cluster configuration for HA
+  and replica clusters, and lowers the project's limit when the new size holds
+  fewer. A point-in-time restore or a detached replica never gets fewer than
+  its source, which Postgres needs to replay the source's WAL. See
+  `docs/user-guide.md` ("Connections").
+- **An alert when a dedicated project's WAL archiving fails or falls
+  behind.** Nothing watched archiving: a failing `wal-push` (rotated
+  credentials, a full bucket) let WAL pile up until the volume filled,
+  while base backups still succeeded, and recovery past it was impossible.
+  The metrics collector now samples each dedicated instance's archiver
+  (`wal_archive_*` on `/metrics`), and the critical `wal_archive` alert
+  fires when archiving failed in the last 15 minutes or a finished segment
+  has waited longer; it turns the status page's Backups component to
+  degraded. And every other week the restore test recovers a random
+  dedicated project's base backup and WAL to the present into a scratch
+  instance on its node, reads every table and removes it (no project is
+  created); a restore test run for a dedicated project does the same.
+
+### Fixed
+- **The security review no longer overstates sign-out.** `docs/security-review.md`
+  (ASVS 3.3.1) said an ended session's access tokens are refused at once.
+  That holds for `/auth/v1` only: the data API, storage and realtime accept
+  an access token until it expires (an hour by default, up to a day). The
+  review now says so and lists it under Accepted. Stale text elsewhere is
+  corrected too: the branch sweep runs every 10 minutes, not hourly
+  (`docs/operations.md` and a comment), and `docs/load-test.md` describes
+  the realtime load test it pointed to.
+- **A copied server certificate can be withdrawn, and lasts a day.** Every
+  xenibase-server presented the same kind of client certificate to agents,
+  `CN=xenibase-server`, valid 30 days, and agents accepted any the agent CA
+  signed with that name, so a copy of one server's certificate and key
+  commanded every agent (root on each node, with the Docker socket) until
+  it expired, with no way to withdraw it. Each server now issues itself a
+  certificate with its own key, valid 24 hours and renewed at half-life,
+  that names the server (the subject's OU and a
+  `xenibase://server/<host>` URI) and keeps the `xenibase-server` subject.
+  Its serial is recorded in the metadata database (migration 00101), and
+  the live serials of every server sharing it (unexpired, unrevoked) are
+  the allow list each agent is given, signed by the agent CA, over the
+  agent API (`PUT /v1/client-serials`) before the server's first call with
+  a new certificate. An agent with a list checks every request against
+  it, so a revoked serial is refused even on a connection it already has
+  open, and keeps the list in its state directory across restarts. `POST
+  /api/v1/admin/agent-client-certs/revoke` (platform admins, audited as
+  `node.client_cert_revoke`) revokes a serial or every live certificate of
+  a server and pushes the new list to every agent at once; the revoked
+  server issues itself a new certificate and keeps its agents. `GET
+  /api/v1/admin/agent-client-certs` lists them. The `agent_client_cert`
+  alert now fires with under 6 hours left, renewal having failed for 6.
+- **A status page push is bound to its endpoint.** The push signature
+  covered the timestamp and body only, so a signed heartbeat replayed to
+  `PUT /api/v1/subscribers/managed` decoded as an empty list and deleted
+  every managed subscriber, and to `/api/v1/sla/targets` removed every SLA
+  target; a heartbeat replayed within five minutes also overwrote a newer
+  one. xenibase-server now adds `v2` to `Xenibase-Signature`, an HMAC of
+  `<t>.<METHOD> <path>\n<body>`, which xenibase-status requires, and the
+  status page refuses (409) a heartbeat sent before the newest it accepted.
+  Customer webhook signatures are unchanged.
+- **The public status page no longer quotes probe errors.** An automatic
+  incident and a degraded component's line showed the probes' error text,
+  and a postgres probe's names the probe's user, database and the address
+  it reached. The page now says only the class (connection refused,
+  timeout, authentication failed, query failed, HTTP 503, …); the full
+  error is in xenibase-status's log.
+- **One broken alert channel no longer resends to the working one.** A
+  failure on either the webhook or SMTP retried the whole notification on
+  both, so with email misconfigured the webhook got each firing again every
+  30 minutes for 7 days (about 340 times). Delivery is now recorded per
+  channel, and only the failing one is retried, with its own backoff.
+- **An alert that resolves before its first delivery is announced.** While
+  delivery failed, an alert shorter than the backoff vanished unsent; it is
+  now sent as `alert.resolved` (with `started_at` and `resolved_at`) on
+  each channel that never got its firing. A long-running alert's resolution
+  is retried for 7 days from when it resolved, not from when it fired.
+- **Alerts have hysteresis and survive several servers.** One good
+  evaluation resolved an alert, so a disk hovering at its threshold fired
+  and resolved at every crossing, and with several servers the grace
+  clocks (pooler, waker, pooler hosts, split brain) were per process, so
+  one server resolved what another fired. An alert now resolves after 3
+  clear evaluations in a row, counted in the database; the grace clocks
+  are shared there too; and resolved alerts are deleted after 90 days.
+- **One failing source no longer silences every alert.** When any
+  condition query failed, nothing fired or resolved. What was read now
+  fires; nothing resolves that round.
+- **A failed restore test of a deleted project no longer alerts for
+  good.** It fired `restore_test_failed` forever and kept the public status
+  page's Backups component degraded; only live projects' on-demand tests
+  count now.
+- **Announced maintenance ends without a status page.** Without
+  `XENIBASE_STATUS_URL` the incidents loop never ran, so a maintenance
+  window was never resolved and an unconfirmed draft never lapsed: every
+  covered organisation's dashboard showed finished maintenance as in
+  progress. The loop now always runs.
+- **The empty-node sweep no longer deletes a server something was just
+  placed on.** It read what was on each node once, then deleted the
+  server, retired its clusters and removed the node, while placement still
+  offered the node (an empty one first, as the emptiest), so a project
+  created in between lost its database. Now the sweep first takes the
+  node out of placement (lifecycle **retiring**, under the node's row
+  lock, which a new project's placement also takes), and on a sweep at
+  least 10 minutes later counts again under the lock: if anything is
+  there, or the node was marked keep, it goes back into service;
+  otherwise its clusters are retired, then its server deleted (retried by
+  the next sweep if that fails), then the node removed.
+- **The capacity budget is a ceiling across proposals.** The budget check
+  added a proposal's server to the nodes' monthly cost only, and a started
+  proposal has no node until its operation runs, so one evaluation over
+  several regions and tiers, or dedicated creations finding no host at
+  the same time, all saw the same headroom and all started: with nodes at
+  1,500 a month and a budget of 3,000, four servers of 1,000 made 5,500.
+  The check now counts approved and provisioning proposals without a node
+  yet, in the same statement as the nodes, and holds a lock across the
+  check and the start, so only what fits starts and the rest wait for
+  approval.
+- **A Free project whose organisation upgrades is no longer paused or
+  archived on the way.** A pause or archive operation queued by the sweep
+  re-checked only the project's activity when it ran, so an organisation
+  that moved to a paid plan (or was suspended) in between had the project
+  paused, or archived and its database dropped, and then woken or restored
+  by the next sweep. Both now check that the organisation is still active,
+  on the Free plan and not on the Unlimited quota plan, and skip
+  otherwise; the archive checks again after its backup, before the
+  database is dropped, and a pause retried after an earlier attempt paused
+  the project wakes it again. The sweep no longer archives the projects of
+  a suspended organisation either.
+- **An archive retry no longer drops a Free project's database on an
+  unverified backup.** The archive backup was marked succeeded before its
+  restore test ran, and deleted only if the test failed and the delete
+  worked. When the server stopped during the test (a deploy, a crash), or
+  the delete failed, the next attempt found the backup and dropped the
+  database on it unverified. A backup now records when its restore test
+  passed (`backups.verified_at`), the archive drops the database only on a
+  verified one, and a retry that finds an unverified backup tests it again
+  first; if that fails the database stays and the project stays paused.
+- **OAuth consent narrows scopes on the server, not just the page.** The
+  consent page's answer was checked only against the scopes the app may
+  ever ask for, so the narrowing to what this request asked for (decision
+  OAuth #4) was the page's alone. `GET /api/v1/oauth/authorize` now also
+  returns `consent`, the validated request sealed for the user (30
+  minutes); approving must send it back, and a scope beyond what the app
+  asked for is refused (`400 invalid`). A consent page left open across the
+  upgrade must be reloaded.
+- **A billing member stays billing.** Accepting an invitation, or a
+  project transfer, turned a billing member into a plain member, so an
+  admin could invite a billing member's address with a project and take
+  their billing access while giving them the project, which only owners
+  may do. An existing member now keeps their role unless the new one is
+  higher (owner, then admin); inviting someone who is already a member is
+  refused (`409 conflict`: change their role or add them to a project
+  instead); and a project transferred into an organisation where one of
+  its members is billing leaves that member, with their database login on
+  it.
+- **A read-scoped token can no longer cut its user off.** Leaving an
+  organisation (`POST /orgs/{org}/leave`) and revoking a token
+  (`DELETE /tokens/{token_id}`) took only the `read` scope, so a leaked
+  read-only CI token or a read-only connected app could make its user
+  leave, losing every token and database login there, or revoke their
+  admin tokens. Both now need `write` from a token (`403
+  insufficient_scope`); any token may still revoke itself, as
+  `xenibase logout` does.
+- **Disconnecting an app no longer leaves tokens it made for itself.** An
+  OAuth app's token with `write` could create a token of its own, which
+  carried no record of the app, so **Disconnect** and disabling the app left
+  it working for up to a year. A token created by a token now records its
+  parent, and revoking a token, however it is revoked, revokes the tokens
+  it made and theirs; and an OAuth app's token can't create tokens at all
+  (`403 token_not_allowed`).
+- **Taking an account back now revokes its API tokens, and a session mints
+  them only after a step-up.** A password reset, a password change and a
+  two-factor reset ended sessions but left every API token working, though
+  the reset email promised to sign you out everywhere; and creating a token
+  or approving a CLI login needed no step-up, so a stolen session cookie
+  could mint a 365-day admin token that outlived the owner's reset, and a
+  `/device?code=…` link was one click from a 90-day token. A password reset
+  and a two-factor reset now revoke every token the user has (the emails
+  say so); a password change does too unless **Also revoke my API tokens**
+  is unticked (`revoke_tokens: false`). `POST /api/v1/tokens` from a
+  session, and approving a device login, now need a step-up in the last
+  10 minutes (`403 reauth_required`; the web UI asks); denying one doesn't.
+- **Invitations are no longer an unlimited mail relay with linked names.**
+  Nothing counted invitations, every account owns an organisation, and the
+  organisation's and inviter's names were linkified in the email, so anyone
+  with an account could send Xenibase-branded email to any address with a
+  link of their choosing beside the real button. An organisation may now
+  send 100 invitations in any 24 hours and an inviter 50 across their
+  organisations (`XENIBASE_INVITES_PER_ORG_DAY`,
+  `XENIBASE_INVITES_PER_USER_DAY`; 0 turns a cap off); past either,
+  inviting answers `429 rate_limited` with `Retry-After`. Names someone
+  chose (the organisation's, the inviter's, a token's, the first name in a
+  greeting) go into email through the new `mail.Inert`, which keeps a web
+  address in them from becoming a link, here or in most mail clients.
+- **The sign-in lockout no longer reveals accounts, grows, and tells the
+  owner.** Five wrong passwords for a registered address answered
+  `429 locked` while an unknown address only ever answered `401`, so five
+  requests told anyone whether an address had an account; the lock was a
+  fixed 15 minutes that reset the count, so someone with the password could
+  try about 480 TOTP codes a day; and the owner was never told. An address
+  without an enabled account is now counted and locked exactly as an
+  account is; each failure after the fifth locks for twice as long as the
+  last, up to a day (`429 locked` now carries `Retry-After`); and the owner
+  is emailed when a lock starts, at most once an hour. Signup in approval
+  and open mode now hashes the password and sends one email for an
+  existing address as for a new one, so it takes as long either way.
+- **Break-glass can no longer become permanent membership.** Under
+  break-glass a platform admin acts as an org admin, and could invite their
+  own address as admin and accept it, keeping the access after the session
+  expired or an owner ended it, with nothing after that flagged
+  `break_glass`. Invitations (to the organisation or a project), role
+  changes and ownership transfers made under break-glass now answer 403
+  `break_glass`; everything else it allows is unchanged. Nobody can invite
+  their own address, and an invitation sent by the account accepting it is
+  refused, so one sent before this release can't be used either.
+- **A new delivering server no longer starts with a full webhook rate.**
+  The per-organisation delivery rate was a token bucket in the delivering
+  server's memory, so a server that took over after a failover or a restart
+  gave every organisation a fresh minute's allowance on top of what had just
+  been sent. A new bucket now starts with the last minute's attempts from
+  the delivery log already spent.
+- **Scheduled jobs keep to their time across daylight saving.** A job's
+  next run was found by stepping through wall-clock hours, which went wrong
+  at both changes. When the clocks went back, a once-a-day job in the
+  repeated hour (`30 1 * * *` in New York on 1 November) ran at 01:30 EDT
+  and again an hour later at 01:30 EST. When they went forward, a job in a
+  zone behind UTC whose time fell in the skipped hour (`30 2 * * *` in New
+  York) sent the search backwards in a loop that never ended, which hung
+  the scheduler and any request that saved the job; in London or Berlin
+  the run was dropped for the day. The schedule is now matched
+  one offset period at a time: a fixed time (minute and hour both given)
+  runs once on the day an hour repeats, and a fixed time the clocks skip
+  runs at the first minute after the gap, as in cronie; schedules with `*`
+  in the minute or hour run by the clock through both. No run is ever less
+  than a minute after the one before. See `docs/webhooks.md` ("Scheduled
+  jobs").
+- **"Run now" no longer runs a job twice.** The overlap check read the
+  job's active runs and then inserted a running one with nothing to stop
+  another server doing the same, and "Run now" is served by any API
+  server, not only the scheduler's. A manual run that met the scheduled
+  one, or two manual runs, could both start, so an `overlap: skip` job ran
+  alongside itself. The check and the insert now hold the job's row lock,
+  as does starting a queued run when the one before ends (a run queued at
+  that moment could otherwise wait until the next scheduler restart failed
+  it), and the database allows one running and one queued run per job;
+  migration 00086 fails any duplicates the race left before adding that
+  rule.
+- **The HTTP job runs per hour limit holds across servers.** It was a
+  token bucket in the memory of the server that dispatched the run, so a
+  new scheduler leader after a failover started with a full hour's
+  allowance, and so did every API server serving "Run now". The limit is
+  now counted from the organisation's HTTP job runs in the last hour, under
+  a per-organisation lock, when each run is dispatched.
+- **The Personal plan's monthly realtime messages now stop connections
+  already open.** Using them up (or the month's API requests) only refused
+  new connections, so clients that stayed connected kept sending and
+  receiving for the rest of the month. The edge now closes the project's
+  open connections when either limit is reached (WebSocket code 1008) and
+  refuses HTTP broadcasts with `429 realtime_quota_exceeded`.
+- **Revoking a key, suspending an organisation or turning services off now
+  closes open realtime connections.** They were checked only when they
+  opened: a connection made with a since-revoked secret key kept receiving
+  every change and could join private channels, a suspended organisation's
+  clients carried on, and turning services off left broadcasts and the
+  edge's database connection running. The edge now closes such connections
+  (WebSocket code 1008, with the reason) as soon as the change reaches it,
+  within 10 seconds at most, and stops listening to a project whose
+  services are off. A spend cap still leaves open connections alone.
+- **Realtime channels follow their user's token and the channel policies
+  while open.** A private channel's policies were asked only at join, so a
+  member removed from a room kept hearing it, and a new `access_token`
+  switched user without asking them; an expired token closed a channel only
+  at its table's next change, never for broadcast or presence, and never on
+  a connection opened with a bearer token. Now a channel is closed within
+  10 seconds of its token expiring (at once if a message is due to it or
+  it sends one), a connection's bearer token expires its channels too, a new
+  token is checked against the policies, and private channels are checked
+  again every minute.
+- **A realtime connection's memory is bounded.** A join could bind any
+  number of database-change subscriptions, each remembering up to 10,000
+  rows for deletes, so one client with the publishable key could make the
+  edge hold gigabytes; and a client that stopped reading could have 64 MB
+  queued for it. A channel now binds at most **20** subscriptions and a
+  connection **100** (refused in the join's reply), a connection's
+  subscriptions remember 20,000 rows between them, a frame is at most
+  **64 KB** (256 KB before; the connection is closed with 1009), and a
+  client with 4 MB waiting is disconnected as too slow.
+- **Realtime broadcasts can no longer fill the project's database.** With
+  the publishable key, a client could send 600 broadcasts of 256 KB a
+  minute, and with a second edge process listening each one over 7,800
+  bytes was written to `xb_realtime.relay` (about 150 MB a minute per
+  connection through the shared cluster's WAL), and to `broadcast_history`
+  on a persisted topic. A broadcast or presence message is now at most
+  **32 KB** (from clients and over HTTP; 256 KB before), a project's
+  clients may send at most 1 MB of them a second through each edge
+  process, and a persisted topic keeps at most 256 KB a minute per process;
+  past these the sender gets `too_large` or `rate_limited` (`413` or `429`
+  over HTTP). Large messages now cross between edge processes as several
+  `NOTIFY`s, with no table row.
+- **Realtime subscriptions no longer outlive their table's row-level
+  security.** It was checked only when a client subscribed, so after the
+  owner turned it off (a migration that does so for a moment was enough)
+  every anon and user subscriber received every row until they
+  disconnected. Each batch of changes now checks it again; when it is off,
+  and the table isn't listed as public, those subscriptions are closed
+  with a `system` error and the channel stays joined.
+- **A private channel's broadcast history is no longer readable with the
+  publishable key.** History was kept by topic name alone and checked the
+  read policy only when asked for `private=true`, so
+  `GET /realtime/v1/history/<topic>` without it returned a private
+  channel's messages and senders to anyone. Each kept broadcast now records
+  which channel it was sent on: the plain request reads the public
+  channel's, `private=true` the private channel's, after its read policy.
+  Broadcasts kept before this release don't say, so they are treated as
+  private until they expire. The secret key can now read a private
+  channel's history (it got 403).
+- **Heartbeats are no longer billed as realtime messages.** Every frame a
+  client sent and every message queued to it counted, heartbeats and their
+  replies included, so an idle connection cost about 207,000 messages a
+  month and five idle browser tabs used up a Personal organisation's
+  million. Only broadcasts, presence and database changes count now;
+  heartbeats, joins, leaves, token updates, replies and status messages
+  are free, so `realtime_messages` drops for most projects.
+- **The publishable key could reset `pg_stat_statements` for the whole
+  instance.** Backend services granted the request roles `EXECUTE` on every
+  function in `public` and each exposed schema, including extensions'
+  functions locked from `PUBLIC`; with `pg_stat_statements` installed, anon
+  could call `POST /data/v1/rpc/pg_stat_statements_reset` and empty every
+  tenant's Query Insights on a shared cluster. Functions are now granted one
+  by one, leaving out any an extension owns (the owner's later functions
+  still get `EXECUTE` from the default privileges), schema version 7 takes
+  back the grants already made, and the data API, type generation and the
+  advisor leave extensions' functions out (`404 unknown_function`).
+- **A table without row-level security could be read through a view or a
+  function.** The edge refused such a table only when a URL named it, while
+  anon and user held every privilege on it, so a `security_invoker` view over
+  it, or any function running as the caller, returned every row to the
+  publishable key. Now anon and user lose their privileges on a relation
+  nothing protects (a table without row-level security, a materialized view,
+  a view running as its owner; a public table keeps `SELECT`) as soon as an
+  edge sees it, through the new `xb_auth.sync_grants`, and get back exactly
+  what was taken once it has row-level security (`xb_auth.withheld` records
+  it). The edge also refuses an invoker view that reads such a relation, and
+  any invoker function while the caller's role still reaches one (`403
+  rls_required`, naming it). Running version 1 again after a move or restore
+  no longer re-grants a table the owner narrowed. The advisor's
+  `rls_disabled` message says what is now true, and `view_reads_unprotected`
+  names an invoker view over such a table.
+- **The documented way to hide a column did nothing.** The guide and the
+  advisor's `secret_column` fix said `REVOKE SELECT (email) ON profiles FROM
+  "<db>_anon"`, which Postgres ignores while anon holds `SELECT` on the whole
+  table, as it does from the request roles' grants. Both now give
+  `REVOKE SELECT ON profiles FROM …; GRANT SELECT (id, name, …) ON profiles
+  TO …` (the advisor lists the table's other columns, or gives the column
+  `REVOKE` when anon has only column grants), and re-applying the grants
+  after a move or restore no longer undoes it.
+- **The data API's cost guard could be bypassed with a cheap value
+  first.** It planned each SQL text once and kept the estimate, and filter
+  values are parameters, so a request for a common value admitted a later one
+  that scans the whole table (about 100 times the cost), and a plan made for
+  the service role admitted anon. Every read is now planned with its own
+  values as its own role (planning costs a small fraction of the read).
+  Set-returning functions now go through the guard too, and an exact count
+  over the limit is not run (`count: null`, as when it times out).
+- **Generated types could carry code from a column's name.** `xenibase gen
+  types` wrote table and column names into the Go, TypeScript and Dart files
+  as they were, in identifiers, tags, comments and strings, so whoever could
+  create a column could, with a 37-byte name, add `init` functions to every
+  program built with the generated Go package, and a `$` or `'` broke the
+  Dart file. Names now appear only escaped, identifiers are made from their
+  letters and digits (numbered when two clash, kept off reserved words), and
+  Go generation refuses, with a `400` naming it, a column its JSON tags can't
+  carry.
+- **Closing a policy didn't empty the anonymous-read cache.** The schema
+  fingerprint behind the cache key left out policies, and a cache hit never
+  checked it, so after `DROP POLICY`, `ALTER POLICY` or a `REVOKE` a popular
+  cached URL kept serving the rows for up to its TTL (an hour). The
+  fingerprint now covers policies, grants and row-level security, a hit
+  waits for the catalog check every 2 seconds, and a changed fingerprint
+  drops the project's cached answers.
+- **`return=minimal` writes needed a `SELECT` policy.** Every data API
+  write asked for its rows back (`RETURNING *`) even with `return=minimal`,
+  and Postgres checks returned rows against the table's `SELECT` policies, so
+  a table anon may insert into but not read (a contact form, a waitlist)
+  refused every insert with `403 permission_denied`. Minimal inserts,
+  updates and deletes now leave `RETURNING` out and count from the command
+  tag. (An upsert still needs `SELECT`, which Postgres requires.)
+- **Only project admins see the auth hook signing secret.** The auth
+  settings (`GET …/auth/config`) are readable by developers and `read`
+  tokens, and they carried the `whsec_` secret in full, so anyone with
+  them could forge hook events the project's servers trust. The secret is
+  now included only for callers who may change the settings
+  (`project.services`); everyone else gets the new `hook_secret_set`, and
+  Authentication → Hooks shows "Set".
+- **Email codes are capped per address.** Beyond one a minute an address
+  could be sent codes without limit, so with the project's own SMTP a
+  chosen user's sign-in code could take 7,200 guesses a day. An address
+  now gets at most five codes an hour and twenty a day, every kind
+  together (`429 over_email_send_rate_limit` with `Retry-After`), counted
+  on requests whether or not it has a user, as phone numbers have five an
+  hour.
+- **The one-code-a-minute limit no longer tells which addresses have
+  users.** It counted codes sent, and only a real user is sent one, so two
+  `POST /recover` calls in a minute answered 200 then 429 for an address
+  with an account and 200 twice for one without; `signin/otp` without user
+  creation did the same for addresses and phone numbers. Requests for
+  codes are now recorded (as hashes of the address or number, kept a day,
+  in `xb_auth.code_requests`, project schema version 10) before the user
+  is looked up, and the limit counts requests, so every address gets 200
+  then 429.
+- **A project's own SMTP server and SMS provider go through the outbound
+  rules.** Webhooks could reach only public addresses, but a project
+  admin could point the project's SMTP host at a private address (say
+  `10.0.0.5:5432`) and read the dial error from **Send test** to map the
+  control plane's network, or set a provider `base_url` that made the
+  worker POST to an internal service. Both are now checked like webhooks
+  (public addresses only unless the platform admin allows the host, never
+  link-local or metadata) and connected to at the address checked, with no
+  redirects followed. The SMTP test answers 400 for a refused address and
+  otherwise a generic 502, with the reason in the server's log.
+- **TOTP codes can no longer be guessed at the request rate.** Five wrong
+  codes used up a challenge, but a new one could be had at once, and the
+  `/factors`, `/mfa/*`, `/user` and sign-out routes had no auth rate
+  limit, so only the gateway's per-key limit bounded guesses (one in
+  under an hour). Those routes now have per-IP groups (`mfa` 30 a minute,
+  `user` 60), and five wrong codes in a row on a factor, across
+  challenges, lock it for a minute, doubling with each further one up to
+  a day: its challenges and codes answer `429 mfa_factor_locked` with
+  `Retry-After`, and a right code clears the count (project schema
+  version 10 adds `failed_attempts` and `locked_until` to
+  `xb_auth.mfa_factors`).
+- **A password alone no longer reaches `aal2`.** A session at `aal1`
+  could enrol a TOTP factor of its own and verify it, which raised the
+  session to `aal2`, past `mfa_required` and policies on `xb_auth.aal()`;
+  it could also change the password or email. Once a user has a verified
+  factor, an `aal1` session is now refused enrolment (`403
+  insufficient_aal`), password and email changes (`401
+  insufficient_aal`), and verifying a factor enrolled before the user's
+  first was verified, as GoTrue does. The check reads the session's level
+  from the database, not the token; a user's first factor still raises the
+  session that verifies it.
+- **Wildcard redirect URLs no longer allow other hosts.** A pattern was
+  matched against the whole URL as text, so `*` also matched `?` and `#`:
+  with `https://*.example.com/**`, `https://evil.test?.example.com/` was
+  allowed, and a magic link or reset requested with it sent the session to
+  `evil.test`. Redirects are now parsed and matched part by part: the
+  scheme exactly, the host label by label (`*` stands for one label or
+  part of one), the port exactly or `:*`, and the path with `*` and `**`.
+  A query or fragment needs a pattern whose path ends in `**`. URLs with a
+  user part are still refused, and a page under the site URL must be the
+  site's path or below it (`/app` no longer allows `/application`).
+- **A squatter's password no longer survives the owner's sign-up.**
+  Someone who signed up first with another person's address kept their
+  password: when the owner signed up too, the unconfirmed row was only
+  sent a new code, the owner's password was dropped, and confirming kept
+  the squatter's, who could then sign in. The same held for an admin-API
+  invitation of a squatted address and for phone sign-up. Signing up again
+  before confirming (by email or phone, or a sign-up link from the admin
+  API) now replaces the password and ends the row's sessions, and each
+  code records the password its request set (project schema version 10
+  adds `xb_auth.one_time_codes.password_sha`). A `signup`, `invite` or
+  `phone_signup` code that first proves the address or number clears any
+  other password and ends the sessions; `/resend` keeps the password of
+  the sign-up it repeats.
+- **A branch reset no longer copies a parent the caller has lost.** Reset
+  checked only the branch, so someone removed from the parent could keep
+  refilling a branch with its current data, and a full-data branch of a
+  parent marked sensitive afterwards kept refilling for any developer. A
+  reset now needs `project.branch` on the parent too, and its admin role
+  for a full copy of sensitive data (403 otherwise); a token restricted to
+  the parent still covers its branches. Removing someone from a project
+  also removes them from its live branches and drops their logins there.
+- **A transfer can no longer split a branch from its parent's
+  organisation.** Transferring a branch, or a project with live branches,
+  is refused with a 409; before, the other organisation's admins could
+  reset a moved branch and keep receiving the parent's data. A branch whose
+  parent is in another organisation is no longer filled or reset (detach
+  or delete it), and a parent's branch count only counts its own
+  organisation's branches.
+- **Detaching a branch now gets a new project's checks.** It needed only
+  the developer role on the branch, so create-then-detach went past the
+  projects quota, and a developer could own a project in an organisation
+  whose members may not create them. Detach now needs `org.create_project`
+  and room in the projects quota (409 `quota_exceeded`), and runs under the
+  branch's lock: it is refused (409) while a reset or anything else is in
+  progress, or the branch isn't active.
+- **A branch's file copy no longer succeeds with files left out.** Every
+  copy error (throttling, the network, the operation's deadline) counted
+  as "not found in the parent". Only a file the parent no longer has
+  counts as missing now; other failures fail the attempt once the rest were
+  tried, and the retry copies only what is left.
+- **A branch reset now copies files again and removes the ones it
+  orphaned.** A reset of a branch made with `copy_files` brought the
+  parent's file rows but not their files, and the files already under the
+  branch's prefix (earlier copies, its own uploads) were left unbilled with
+  no row naming them. Branches now remember `copy_files` (**migration
+  00077** adds `projects.branch_copy_files`, filled from the create
+  operation while that is kept); after every reset the background
+  `copy_branch_files` puts the files no refilled row names on the garbage
+  list for the storage sweep, then copies the parent's files again.
+- **The branch expiry sweep no longer deletes a branch saved at the last
+  minute.** It deleted from a list read at the start of the pass, so a
+  branch extended or detached in between was deleted anyway, without the
+  final backup turned on meanwhile. Each delete now checks the locked row
+  is still an expired branch, and takes the final-backup choice from it.
+- **Branch resets count against operations in flight.** They were counted
+  but never checked, so every branch could be reset at once, each a full
+  dump of the parent with a live source. A reset beyond the plan's limit
+  is refused with 409 `quota_exceeded`, as a new branch is.
+- **A branch create that failed after it went live no longer drops it.**
+  Backend services were turned on after the branch was published, so a
+  failure there retried the whole create, dropping the live database under
+  its clients, and a second failure left an active branch whose API keys
+  never worked. They are now turned on before the branch is published, and
+  a retry that finds the branch active only queues its file copy.
+- **A Postgres version notice whose email failed was never resent:** its
+  record was written before the send. It is now kept only when the mail
+  goes, still once across servers, so the next hourly check sends it
+  again; the deprecation notice is retried too, until the first reminder.
+- **The instance image did not pin the Postgres minor release:** it was
+  built from the moving `postgres:<major>` tag, so nodes ran whatever
+  release they last pulled, and a rebuild left the previous release
+  untagged. Each major is now built from a pinned release (17.11 and 18.6,
+  `PG17_RELEASE`/`PG18_RELEASE` in `deploy/images/postgres/Dockerfile`)
+  and tagged with it as well (`xenibase-postgres:18.6-walg3.0.9`); the
+  `{major}` tag the agent uses is unchanged. `make pg-image` and
+  `install.sh` build through `deploy/images/postgres/build.sh`. See
+  `docs/upgrade.md` ("PostgreSQL minor versions").
+- **A point-in-time recovery to before a major upgrade could not start:**
+  it used the project's new major on data from the old one. The restore now
+  starts on the major of the instance that took the base backup, so an
+  owner whose app breaks on the new major can go back to before the
+  upgrade (writes made since are not in it). See `docs/moves.md` ("Major
+  upgrades").
+- **A project on a retired or preview Postgres major could not be restored
+  to a point in time, branched, or have a replica detached:** each made its
+  new project as a new project would, which those majors refuse. They now
+  take any major the server has an image for, so a retired project keeps
+  its safety net.
+- **Minor upgrades took no lock, weren't operations, and weren't
+  crash-safe.** Two servers could restart the same instance twice, an
+  owner could queue `ha_disable` or a resize during an HA upgrade, and a
+  server stopped between pause and resume left PgBouncer paused. Each
+  minor upgrade is now a `minor_upgrade` operation, exclusive with the
+  project's other operations (a shared cluster's keeps its projects'
+  exclusive operations off until it ends); its OnFail resumes the poolers,
+  a crashed attempt is retried once and resumes them first, and the sweep
+  runs on one server at a time under an advisory lock and finishes any run
+  an older server left unfinished. **Upgrade now** queues the same
+  operation and waits for it.
+- **A failed minor upgrade left the instance down and then looked done.**
+  The agent removed the old container before creating the new one, so a
+  release that would not start left nothing running, the sweep retried the
+  same instance every 5 minutes, and the next release check read the
+  missing or crash-looping container as upgraded. The agent now keeps the
+  old container, stopped, until the new one is ready and starts it again
+  otherwise; a release is reported only for a running container. The
+  failure is recorded, a **Minor upgrade failed** alert fires, and the
+  sweep moves on to other instances, trying that one again only for a
+  newer release or **Upgrade now**. See `docs/moves.md` ("Minor upgrades
+  and the maintenance window").
+- **The HA watcher paused healthy projects when xenibase-server lost sight
+  of their primary,** and ran on every server without a lock. It now pauses
+  the poolers only when the members that answer agree there is no running
+  leader, and leaves them alone when none answers. One server at a time
+  watches, under a Postgres advisory lock; a server that loses it resumes
+  the poolers it paused, and the next one resumes any left paused. A
+  switchover marks its instance (**migration 00073**) so the watcher on
+  another server leaves it alone instead of recording a failover. See
+  `docs/ha.md` ("Failover").
+- **A read-only member could read as the project owner in the SQL console.**
+  Read-only sessions, read-scope tokens and the table browser's raw filter
+  now log in as `<db>_console_ro`, granted only `<db>_ro`. Existing projects
+  get the login on their first read-only session.
+- **Imports could connect to any address,** including the clusters and nodes
+  that trust Xenibase's own addresses, which bypassed IP allowlists. Sources
+  now pass the outbound rules (public addresses, or hosts the platform admin
+  allow-listed for the organisation; never loopback or a node), pinned to
+  the checked address for the agent's copy.
+- Tenants on a shared cluster could read each other's activity counters
+  (`pg_stat_database` and the `pg_stat_get_db_*`/`pg_stat_get_backend_*`
+  functions). They are revoked; **migration 00066 queues `apply_settings`
+  for every active shared project** to apply this to existing databases.
+- Narrowing an IP allowlist now drops the project's pooled clients from
+  addresses no longer on it; PgBouncer's admin console is limited to private
+  networks (`XENIBASE_POOLER_ADMIN_ALLOW`); a pooler host whose PgBouncer is
+  not on `auth_type = hba` is marked not ready; the waker admits only the
+  poolers (`XENIBASE_WAKER_ALLOW`), and the edge wakes a paused project only
+  for a request with one of its keys; one invalid route or node address is
+  skipped and alerted (`pooler_config_skipped`) instead of blocking every
+  region's pooler sync.
+- **Master-key rotation re-encrypts everything sealed.** It skipped
+  per-project backup keys, Patroni secrets, webhook secrets and headers,
+  scheduled jobs, projects' auth SMTP settings and queued messages, device
+  sign-in tokens and the etcd CA key, and still reported success. If you
+  rotated before, run the rotation again with the old key in
+  `XENIBASE_MASTER_KEY_PREVIOUS` (`docs/operations.md`, "Secrets").
+- **xenibase-server renews its certificate for agents.** It was issued at
+  start for 30 days and never renewed, so a server that ran longer lost
+  every agent. It is now reissued with 7 days left, and the new
+  `agent_client_cert` alert fires if under 3 days remain.
+- **The agent bootstrap token registers the local node once.**
+  `XENIBASE_AGENT_BOOTSTRAP_TOKEN` could claim any node without an agent by
+  name, including one just added and a removed one. It now registers only
+  the bundle's local node (`XENIBASE_SHARED_NODE_NAME`), never a removed
+  node, and only once; afterwards use a token from Nodes → Re-register.
+- **Each edge can have its own credential, bound to a region.** One
+  platform-wide `XENIBASE_EDGE_SECRET` authenticated every edge, and the edge
+  chose its region, so any edge (and every edge node's cloud-init) could
+  read every region's projects. `xenibase-server -issue-edge-credential
+  <name> -edge-region <region>` issues a credential the server binds to its
+  region; edge nodes Xenibase creates get one. The platform-wide secret now
+  serves only regions without their own API domain
+  (`XENIBASE_EDGE_SECRET_ALL_REGIONS=true` restores the old scope,
+  deprecated). See `docs/upgrade.md` before upgrading an install with a
+  region API domain.
+- **A region's pooler hostname gets its own certificate.** Pooler hosts of a
+  region with its own hostname were sent the home region's certificate,
+  which doesn't name theirs. xenibase-server now keeps one per region, in the
+  `XENIBASE_POOLER_TLS` mode, in the region's directory. In `files` mode
+  the certificate must name every region's hostname (`docs/regions.md`).
+- **No Hetzner token on pooler hosts.** The agent on each internet-facing
+  pooler host held a full-access Hetzner token to assign the floating IP.
+  xenibase-server's arbiter now moves it to keepalived's MASTER and the
+  agent only reports its state; `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`
+  keeps agent-side assignment (faster failover while the control plane is
+  down). See `docs/upgrade.md`.
+- **Password rotations no longer keep SCRAM verifiers.** A rotation kept the
+  owner's new and previous verifiers in its parameters forever (a credential
+  switch the new owner's), and the API returned them to anyone who could
+  view the project. They now travel with the operation's secrets, removed
+  when it ends; migration 00062 removes those already stored.
+- `TestHASwitchoverAndFailover` asked for a switchover before Patroni reported
+  the new standby streaming, and failed on a busy host; it now waits.
+- An audit row the metadata database refused was only logged. It is now
+  retried until written (in order, with the request's time), and `/metrics`
+  counts failures, the backlog and rows given up on, which are logged in full
+  (`docs/operations.md`, "The audit log").
+- The audit log's append-only triggers were said to hold "even against
+  xenibase-server itself"; the server owns the table and could disable them.
+  The migration's comment and `docs/security-review.md` now say what they
+  guarantee.
+- The tenant lint's table list missed every backend services table and more,
+  and any mention of `org_id` passed. It now reads the tables from the
+  migrations and requires a real `org_id` predicate.
+- Transferring a project left its reaped sessions, editor preferences and
+  dedicated requests under the old organisation. Every child that carries the
+  project's `org_id` now follows it by a foreign key.
+- Reaped statements (with the tenant's statement text) and finished
+  operations' parameters and step logs were kept forever. Reaped statements
+  now go after 30 days and with their project, and operations keep a summary
+  after 90 days (`docs/operations.md`, "What is kept").
+- A server already running when a newer release migrated the database kept
+  taking operations. It now stops, and answers `/readyz` with 503, within 30
+  seconds. `docs/migrations.md` sets the expand-then-contract rule.
+- Each call to a node's agent opened a new TLS connection; calls now reuse one
+  per node.
+- **The orphan reaper could destroy a move's, promotion's or major
+  upgrade's target mid-copy.** They insert the target when they are queued
+  and the project points at it only at the cutover, so after five minutes
+  the reaper took it for a failed create's leftover. It now skips an
+  instance a queued or running operation names as its target, and an
+  upgrade preflight's scratch instance in its first hour, and checks each
+  instance again just before destroying it. A retry no longer starts a new
+  container under an instance already marked deleted.
+- **A move's rollback that could not reach the source left the project
+  frozen for good.** It returned before resuming the poolers, and the
+  project stayed `moving` (or `promoting`, `demoting`, `upgrading`) with
+  its logins `NOLOGIN` until someone repaired it by hand. The poolers now
+  resume whatever happens, and a sweep every minute gives the logins back
+  and sets such a project active once its instance answers; one still
+  frozen after 10 minutes raises a `project_stuck` alert.
+- **A retry after a move's freeze copied everything again with the source
+  still frozen.** An error, crash or deploy between the freeze and the
+  cutover started the second attempt with the logins `NOLOGIN` and the
+  poolers paused, so a dump-mode move or promotion was down for a second
+  whole copy. A move, promotion, demotion or major upgrade now opens writes
+  again at the start of any attempt after the first that finds the project
+  not yet cut over.
+- **A resized project could not be restored to a point in time or have a
+  read replica detached.** Both copied the source's profile name, `custom`
+  after a resize to a size no profile has, and the create refused it as an
+  unknown profile. They now pass the source's CPUs and memory as the size,
+  as a node move does; a node move's capacity check is now of the real size
+  too.
+- **A dedicated project's major upgrade skipped the capacity check and
+  dropped the PITR add-on.** Its new instance went onto the project's node
+  whether or not there was room for a second one, and with 7 days of
+  point-in-time recovery (and billing) whatever the project paid for. The
+  preflight and the upgrade now refuse a node without room for it, and the
+  new instance keeps the project's window.
+- **A region move left the project's WAL archive in the old region.** The
+  new instance's archive was placed from the project before the cutover,
+  so it went to the old region's storage. It now goes by the region of the
+  new instance's node.
+- **Replication objects a move's cleanup could not remove stayed for
+  ever.** A slot with no consumer kept WAL until the disk filled (on a
+  shared cluster, for every tenant there), and the DDL block kept refusing
+  the tenant's schema changes. An hourly sweep now removes the
+  `xenibase_move_*` subscriptions, publications, inactive slots, logins
+  and DDL blocks in project databases that no queued or running operation
+  owns, and instances cap slot WAL (`max_slot_wal_keep_size`: a quarter of
+  a dedicated volume, 10 GB on an agent-run shared cluster) from their next
+  restart.
+- **A deleted project's nightly backups were kept forever.** Only its final
+  backup was given an expiry, so up to 11 earlier backups (82 with the long
+  add-on) stayed on platform storage, listed and restorable. A delete now
+  dates its nightly and archive backups with the final backup (30 days), as
+  does an organisation's deletion, and the hourly expiry removes them with
+  their cross-region copies; backups in an organisation's own bucket are
+  left alone. **Migration 00075** dates those of projects already deleted,
+  at least a week from the upgrade.
+- **Copying backups between two targets at one place deleted them.** Two
+  storage targets could name the same endpoint, bucket and prefix
+  (`backups` and `backups/` included); a switch between them with "delete
+  the originals" copied each object onto itself and then deleted it, and
+  turning on data residency could delete a backup as its own cross-region
+  copy. Such a target is now refused, and copies, and deletes of an
+  original or a copy, between two existing ones are refused too. If two of
+  your targets already share a place, send new backups to one of them;
+  don't change either's prefix, which leaves the backups on it unreachable.
+- **One failed WAL-G listing forgot every base backup.** The agent read a
+  failed `wal-g backup-list` as an empty archive, and the base backup that
+  followed it marked all of the project's base backups deleted, so its
+  point-in-time window restarted at the next night's backup. A failed
+  listing is now an error, and a listing without the backup just taken
+  forgets nothing.
+- **A storage or key switch cut a paid 14- or 30-day recovery window to
+  7.** The archive a switch retires (enabling or rotating a project key is
+  one) expired after 7 days, so a dedicated project paying for 14 or 30
+  could recover only to the switch from day 8. It now stays for the
+  project's window.
+- "Backup overdue" fired for projects the nightly schedule skips on
+  purpose (paused and archived Free projects, branches without backups,
+  suspended organisations), and kept the public status page's Backups
+  component degraded. It now leaves out what the schedule leaves out.
+- **With more than one server, imports and Supabase migration steps failed
+  at random.** The source's connection string (and S3 key) was kept in the
+  memory of the server that took the request, so a step another server
+  claimed failed with "xenibase-server restarted?" and the import rolled
+  back, as did any retry. They now travel with the operation, encrypted
+  with the master key, and are removed when it ends.
+- Nothing pinned the OpenPGP keys derived from the backup key and project
+  keys, which are never stored: a crypto library update that derived them
+  differently would have left every WAL-G archive and project-key backup
+  unreadable, unnoticed until a restore. A test now fixes them.
+- An import's verification counted the rows of every table in the source,
+  so a source login allowed to read only the imported schemas failed it
+  with "permission denied" and the import rolled back after the copy. It
+  now reads only the chosen schemas.
+- **A Supabase migration's source could be in the platform's private
+  network.** Its address check, unlike an import's, did not refuse the
+  cloud private network or `XENIBASE_OUTBOUND_BLOCK` for a host the
+  platform admin allow-listed for the organisation, so a tenant who
+  controls that host's DNS could point it at platform services. It now
+  uses the import's check.
+- **A backup download that failed part-way looked complete.** Once the
+  first bytes were sent, a decryption error ended the response normally,
+  so the browser or `curl` saved a truncated archive as a finished
+  download. The connection is now cut instead, and the download fails. The
+  disaster-recovery runbook decrypted the metadata backup through standard
+  output and restored the result even after a failure; it now uses
+  `--out`, which leaves no file on failure, and `&&`
+  (`docs/disaster-recovery.md`).
+- **A signed thumbnail URL opened the original.** A signed URL with a
+  transform carried an ordinary download token, so changing `render/sign`
+  to `object/sign` in it downloaded the full-size file. A token with a
+  transform now serves only that render (`400 invalid_signature` on the
+  download route).
+- **A signed upload URL skipped the storage policies on what it wrote, and
+  could be used again and again.** The upload's row was written with the
+  edge's own login, so a policy on the type, size or metadata never
+  applied, and an upsert URL could overwrite its path as often as its
+  holder liked, for up to 7 days. A signed upload is now written as the
+  user who signed it (their role and claims are kept with the URL in the
+  new `xb_storage.upload_tokens`, project schema version 8), the URL
+  uploads once (only an upload that commits uses it up, on any edge), and
+  it lasts 2 hours at most, as documented.
+- **A large upload's parts were neither bounded nor counted.** A part's
+  presigned URL signed no length, so each took up to the store's part limit
+  (5 GiB) whatever the upload declared, and uploads in progress were not in
+  the quota check: a 50 MB upload could hold about 20 GB for a day, and
+  uploads started together each passed against the same total. Each part's
+  URL now signs its exact length, uploads in progress hold their declared
+  size against the quota (direct and dashboard uploads count them too, and
+  starting one takes its turn on the project's usage row), and a project
+  may have 100 open at once (`429 too_many_uploads`).
+- **A CDN purge was tried once, and only when a bucket went private.** A
+  purge Cloudflare refused was only logged, so the CDN could keep serving
+  the now-private files for the bucket's cache time (up to a year), and
+  deleting, replacing or moving a public bucket's file, or deleting or
+  emptying the bucket, purged nothing. Every such change now purges the
+  files' URLs (and their image renders'), and a purge waits in the new
+  `cdn_purges` table until Cloudflare takes it: the storage sweep retries
+  it from every minute to every hour.
+- **Some stored files were never billed, and the storage reconciler could
+  never run.** File storage (`storage_gb_hours`) was metered only for
+  projects with backend services on, so turning them off, which keeps the
+  files, stopped the metering; cached image renders were never measured.
+  Every live project holding files is now metered each hour from its last
+  measurement, and the nightly reconciler measures the renders, which are
+  metered with the files. The reconciler's last run was kept in memory and
+  it waited a day from each start, so servers deployed more often never
+  ran it; the last run is now kept in the metadata database and one server
+  runs it each day.
+- **A move to another region left every stored file behind.** The move
+  copied the database and switched the project's region, but its files
+  stayed in the old region's object store, so every file answered "the
+  object's data is missing" afterwards and the old bytes were never
+  removed or billed. A region move is now refused (409) while the project
+  has files or an upload in progress, when it is asked for and again once
+  writes are frozen for the cutover; delete the files first, or move within
+  the region (`docs/regions.md`).
+- **Every edge held credentials that could delete its region's backups.**
+  Files were kept in the region's backup target, so the edge, the process
+  that faces the internet and parses uploads and images, was handed the
+  access key and secret of the bucket holding the region's backups, WAL-G
+  archives and metadata backups. A region can now have a **files target**
+  of its own (Platform → Regions; a bucket for files, or credentials
+  limited to `files/`), which the edges and the storage sweep use instead;
+  it can't be any region's backup or copy target or the default, and can't
+  be deleted while it holds files. A region without one keeps working as
+  before, with a warning in the server's log, a launch-check warning and
+  the new `files_share_backups` alert.
+- **A wallet debit that failed is no longer booked as paid.** When a
+  transfer's answer was lost, Xenibase looked its key up at the wallet
+  provider and settled the invoice as soon as the provider called the
+  request finished, without reading how it finished: a transfer that ended
+  `failed` marked the invoice paid with no money moved, and only the
+  nightly balance reconciliation showed it. A debit is now booked only when
+  the provider says it completed. One that ended failed (or was declined,
+  cancelled, expired or reversed) is a declined attempt: nothing is posted
+  and dunning starts as for a wallet that is short. A finished request in
+  a status nobody has written down is neither booked nor retried: it stays
+  pending, with an error in the log, for a person to look at. See
+  `docs/iswallet.md`.
+- **A wallet is no longer debited twice for one invoice.** A debit attempt
+  read what the invoice owed before recording itself, and the one pending
+  debit allowed per invoice only kept out an attempt that overlapped while
+  the other was still pending. An attempt that was slow (reading the
+  wallet's balance, say) while another debited and settled the invoice
+  then recorded its own and debited again, and the second amount became
+  credit that could not be refunded to the wallet. The triggers can meet: a
+  deposit, **Pay from wallet** and the daily dunning on every server. The
+  amount is now read again under the invoice's lock in the transaction
+  that records the attempt, and only what is still owed is debited.
+- **A month's invoices that fail to issue are tried again.** The monthly
+  run marked a month done whatever happened, so a draft refused for a
+  stale exchange rate, a provider outage or a database error stayed a
+  draft until the admin issued it by hand, and nothing was collected
+  meanwhile; an organisation whose rating failed got no draft at all. A
+  month is now done only once every organisation's draft is made, and
+  every billing run (every 10 minutes) issues the drafts of past months
+  that aren't held, stopping at the first stale rate or outage rather than
+  asking the provider for each. Turning automatic issue on therefore
+  issues earlier months' unheld drafts too: hold any you mean to issue by
+  hand first. The status page's "Last month's invoices are late" now counts
+  earlier months as well. See `docs/billing.md`.
+- **A deposit whose processing failed is processed again.** A payment
+  event that failed (the provider's verify call timed out, the database
+  refused) was answered 500 so the provider would retry, but the event was
+  already stored, so the retry was answered as a duplicate; the hourly
+  re-query had one try of its own, then skipped it too. A deposit could
+  stay unbooked, with the books short of the wallet. A stored event that
+  failed, or whose processing was cut off, is now processed again when the
+  provider redelivers it, when a re-query lists it, and by every hourly
+  re-query for 30 days; a deposit is still booked only once. A deposit the
+  provider reports as still pending is retried rather than rejected, and
+  an event that couldn't be stored at all is answered 500 rather than 200.
+  Migration 00091 adds `attempts` and `claimed_at` to `payment_events`.
+- **Wallets are no longer debited under superseded debit terms.** The
+  version of the debit terms an owner agreed to is stored so that a change
+  of wording asks again, and the Billing page did ask, but automatic debits
+  only checked that some consent existed and went on under the old
+  wording. They now need a consent to the current version; with an older
+  one an organisation is treated as without consent until an owner agrees
+  again. **Pay from wallet** still works, and each invoice's email says the
+  invoice won't be debited and where to agree.
+- **Rotating the master key no longer takes backend services offline.**
+  The edge and request roles' passwords, the console logins' passwords,
+  the keys that sign file URLs and the pooler admin's salt were derived
+  from the primary master key, so after `-rotate-master-key` the edge was
+  handed new passwords while the poolers and the instances still held the
+  verifiers made from the old ones, and every data API, auth, storage and
+  realtime request failed until the stored verifiers were cleared by hand;
+  signed file URLs stopped verifying too. They are now derived from a
+  derive seed, 32 bytes sealed under the master key in the `derive_seed`
+  settings row, which a rotation re-seals like every other secret, so they
+  do not change. `rotate.Verify` opens the seed and fails when projects
+  exist without one.
+- **The statement reaper ends a statement that catches its cancel.**
+  PL/pgSQL can trap `query_canceled`, so a block that caught it kept
+  running the same statement after the reaper's cancel: every 15 seconds
+  the reaper cancelled it again and logged another row, and a tenant could
+  keep a heavy statement running on a shared cluster indefinitely. The
+  reaper now records the backend and the statement's start with each
+  cancel, and on a later pass terminates a backend still running a
+  statement it cancelled. The project's reaped log shows it as
+  `statement_terminated` ("statement ended").
+- **The isolation check now audits the backend services' logins and every
+  database grant.** It looked at the owner, console and members' logins
+  only, so one of the five backend-service logins tenant SQL runs as on
+  the shared tier (`<db>_edge`, `_anon`, `_user`, `_service`,
+  `_auth_hook`) could keep `LOGIN` while its organisation was suspended,
+  lack its connection limit or `temp_file_limit`, gain an attribute or
+  join a predefined role, and the check passed; and it asked only whether
+  `PUBLIC` could connect, so `CONNECT` on one project's database granted
+  to another project's role passed too. The check now covers the five
+  logins (which must hold no role), requires every holder of `CONNECT` or
+  `TEMPORARY` on a project database to be one of that project's roles,
+  and, as V2 §10.4 asks, reports `SECURITY DEFINER` functions owned by
+  roles other than the tenant's, apart from Xenibase's own in the `xb_*`
+  and `xenibase` schemas with a pinned `search_path`. The live probes also
+  try a cross-project grant.
+- **One tenant can no longer fill a shared node's disk between size
+  samples.** Storage enforcement used only the 5-minute size sample, and
+  the soft lock lets a tenant write in a read-write transaction, so a
+  tenant at 99% could insert at disk speed for up to six minutes before
+  the hard lock, tens of gigabytes past its limit. Projects at the warning
+  or the soft lock are now measured with `pg_database_size` on every
+  enforcement pass (each minute); one that reaches 120%, or grows by 5% of
+  its limit while soft-locked, is hard-locked at once. A hard lock now
+  lifts only when the project is back under its limit (it used to drop to
+  the soft lock under 120%, letting the tenant write again).
+- **Shared-cluster tenants can no longer see each other's locks.**
+  `pg_locks` (over `pg_lock_status()`) stayed readable by `PUBLIC` after
+  the activity views were hidden, and lists every lock in the cluster with
+  its database, relation and backend, so a tenant could tell which other
+  projects were active, with how many sessions, and what they touched.
+  `SELECT` on `pg_locks` and `pg_prepared_xacts` and `EXECUTE` on
+  `pg_lock_status`, `pg_blocking_pids`, `pg_safe_snapshot_blocking_pids`,
+  `pg_isolation_test_session_is_blocked` and `pg_prepared_xact` are now
+  revoked from `PUBLIC` in every shared project database, and the
+  isolation check reports any of them readable. Query insights' locks view
+  is unchanged.
+- **Creates sent at once no longer go past the projects and branches
+  quotas or the dedicated allowance.** The quota was counted before the
+  create, outside the transaction that recorded it, so N requests sent
+  together each saw the same count and all succeeded: a Personal
+  organisation limited to 10 projects could hold 10 + N, and the same went
+  for branches, detached branches, dedicated projects, promotions and read
+  replicas. Each of these now counts again in the transaction that records
+  it, holding the organisation's row (`SELECT … FOR UPDATE`), and a create
+  past the limit answers `409 quota_exceeded`. Read replicas, and a queued
+  promotion's target instance, now count towards the dedicated allowance
+  (a replica as an instance the size of its primary); they were not
+  counted, so replicas could be added whatever the allowance.
+- **Suspension and hard locks now switch off the logins a dedicated
+  project's owner created.** With role management on, the owner's own
+  logins (an app login, say, recorded in `project_owned_logins`) were left
+  out of the logins a suspension or a hard storage lock switches off, so
+  they could still log in at the instance from the private network, and
+  sessions opened before kept running. They are now switched off and their
+  sessions ended with the project's other logins, and switched back on
+  with them; the role sync keeps them recorded meanwhile.
+- **Container logs are rotated.** No service in the compose files set
+  `logging:`, so Docker's default `json-file` driver kept every line (one
+  per API request, and the text of every slow tenant statement) until the
+  disk filled. Every service in `deploy/compose`, the status page's and the
+  pooler hosts' compose files now uses `json-file` with `max-size: 50m` and
+  `max-file: 5`, at most 250 MB per container. Existing containers pick it
+  up when they are next recreated (`./install.sh` does it).
+- **An upgrade's rollback no longer loses what was written while the images
+  built.** `upgrade.sh` took its metadata backup before `git checkout` and
+  `install.sh`, whose image build takes minutes while the old server keeps
+  writing, so a rollback after a migration restored a backup that missed
+  everything done in that time (projects created or deleted, password
+  changes, payment webhooks), besides what the new server wrote during the
+  checks. It now checks out the tag and builds its images first
+  (`install.sh --build-only`, new) while the old version serves, then stops
+  xenibase-server and the agent, takes and verifies the backup, and starts
+  the new version (`install.sh --no-build`, new). A failed build rolls back
+  with the old version still serving and nothing restored; a failed backup
+  starts the old version again. What the new version writes before a
+  failed check is still lost when the rollback restores; `docs/deploying.md`
+  ("What a rollback keeps") says what that means. A tag whose `install.sh`
+  lacks `--build-only` is upgraded the old way, backup first. Exit statuses,
+  the `.meta` file and `deploy-ssh.sh` are unchanged, except that a failed
+  backup is now exit 2 (rolled back) rather than 1, since the tag is
+  checked out and built by then.
+- **Upgrade backups and `.env` are readable by their owner only.**
+  `upgrade.sh` created its dump (password hashes, every sealed secret) under
+  the shell's umask, usually 644, in a 755 folder, and `chmod 600`ed it only
+  after `pg_dump` finished; its `.meta` file and log stayed 644. It now
+  creates each file mode 600 before writing to it and makes
+  `upgrade-backups/` mode 700 (`deploy-ssh.sh` creates it so too), without
+  changing the umask of what `git checkout` writes. An `.env` copied by hand
+  from `.env.example` kept the copy's mode; `install.sh` now sets an
+  existing `.env` to 600 on every run and warns when it had to.
+
+- **Another organisation can no longer capture a customer's support
+  tickets.** Billing contacts and WhatsApp numbers were whatever an
+  organisation's owners and admins typed, and a billing contact ranked
+  first when routing inbound email: an organisation that added
+  `victim@b.example` as a billing contact got every ticket the victim
+  emailed, its owners and admins read them and the replies, and its
+  members could reply into them by email; a WhatsApp number did the same,
+  and its real owner's organisation could no longer register it. Now an
+  address or number routes tickets only once verified. A billing contact
+  is verified at once when it is the verified address of one of the
+  organisation's members; any other address is emailed a confirmation
+  link (`POST /api/v1/billing/contacts/confirm`, the `/confirm-contact`
+  page) and gets billing email meanwhile, as before. A WhatsApp number
+  stays pending until the code the dashboard shows (`XB-12345678`) is sent
+  from it to the support number; pending registrations don't route and
+  don't stop another organisation registering the number, and the one
+  that verifies drops the others. An inbound email joins a ticket only
+  from its requester or a member of the ticket's organisation whose
+  address is verified, never from a billing contact alone. The API's
+  `BillingContact` gains `verified`, and `SupportPhone` gains `verified`,
+  `code` and `code_expires_at`.
+- **An inbound email's sender is no longer taken on trust.** The
+  inbound webhook read `From` and ignored the provider's verdicts, so mail
+  forged as an owner opened a ticket under the owner's organisation, or
+  joined the owner's thread with its `[T-n]`. The sender is now trusted
+  only on a DMARC pass, or DKIM and SPF passes aligned with `From`'s
+  domain, from Postmark's `Received-SPF` and `X-Spam-Tests` headers,
+  `Authentication-Results` naming `XENIBASE_SUPPORT_AUTHSERV_ID`, or the
+  plain body's new `authentication_results`. Other mail still opens a
+  ticket, with no organisation or user, flagged `unverified_sender`
+  (a badge and a warning in the support console); it never joins a
+  thread, and its acknowledgement says only the ticket's reference.
+
+- **The CLI no longer sends a context's token to another server.**
+  `--server` and `XENIBASE_SERVER` replaced only the server of the selected
+  context, so `xenibase whoami --server https://staging.example` sent the
+  production token to staging, as would a CI job setting `XENIBASE_SERVER`
+  on a machine with a logged-in context. When the server named differs from
+  the context's (by scheme, host and port), the context's token, `token_cmd`
+  and CA file are now left out: the token comes from `XENIBASE_TOKEN`, or the
+  one saved context for that server, or the command stops with exit code 2.
+  `--context` with a different `--server` is refused unless `XENIBASE_TOKEN`
+  is set. And `login` accepted `http://` for any host, so a token could travel
+  and be saved for a plain-HTTP server: `http://` is now accepted only for
+  `localhost`, `127.0.0.0/8` and `::1`, and a saved token is not sent over
+  `http://` to any other host. See `docs/cli.md` ("Which server and token a
+  command uses").
+- **A release is published only after CI passed on its tag.** The release
+  workflow started on the same tag push as CI and did not wait for it, so a
+  tag whose tests then failed still got a public GitHub release. Publishing
+  is now the `release` job of `ci.yml`, which needs `ci`, `e2e`,
+  `docs-install`, `audit` and `upgrade` to pass first; it alone can write to
+  the repository, and `release.yml` is gone. See `docs/deploying.md` ("Where
+  a release comes from").
+- **Tests that never ran in CI now run, and skips are counted.**
+  `TestDumpRestoreCopy` (the agent's real `pg_dump` and `pg_restore`) and
+  `docker.TestAgainstDaemon` skipped in every run because nothing set
+  `XENIBASE_TEST_PG_BIN` or `XENIBASE_TEST_DOCKER`; the `ci` job now installs
+  the Postgres 18 client tools and sets both, and `TestAgainstDaemon` fails
+  rather than skips when it is asked to run without a daemon or image. The
+  second half of `TestDedicatedResize` (a size its node can't hold moves the
+  project) skipped on a runner with fewer than three CPUs; it now fills the
+  node by memory, so it runs on any runner. `make test-go` and
+  `make test-integration` pipe `go test -json` through
+  `internal/tools/testsummary`, which prints each package's result, the
+  output of failing tests, the counts, and every skipped test with its
+  reason, and fails when a test named in `XENIBASE_TEST_MUST_RUN` skipped;
+  CI names the tests its environment is there for.
+- **Caddy is pinned, the images are scanned, and dependency updates are
+  proposed.** Caddy ran from the floating `caddy:2`, so two installs of one
+  release could run different Caddy, and the DNS plugins were built at
+  whatever version was latest. Caddy is now `caddy:2.10.0` in the bundle,
+  the status page and the DNS-plugin build (`xcaddy build v2.10.0`, the
+  version `test/acmedns` checks), and the cloudflare (v0.2.4) and desec
+  (v1.0.1) plugins are pinned to versions built for it. A weekly
+  `image-scan` job (and on demand) builds the images the install runs, pulls
+  Caddy and PgBouncer, and scans each with Trivy, failing on a fixed CRITICAL
+  or HIGH vulnerability. And `.github/dependabot.yml` proposes weekly,
+  grouped updates for the Go modules, the npm trees, the Dockerfiles and
+  compose images, and the workflows' actions.
+- **The upgrade rehearsal starts from the latest release.** `make
+  test-upgrade` installed v4.1.0, which its comment called the previous
+  release four releases later. It now finds the newest `vX.Y.Z` tag
+  reachable from the commit (not one on the commit itself, so CI on a
+  release tag upgrades from the release before), falling back to v4.1.0;
+  `UPGRADE_FROM` still overrides it.
+- **Interactive operations no longer wait behind moves and backups.** The
+  queue took the oldest runnable operation, 4 at a time per server, so two
+  48-hour moves and the nightly backups (all queued between 02:00 and
+  04:00 UTC) could hold every slot while a create, restore or delete
+  waited. Each operation kind now has a class: interactive (create,
+  delete, restore, rotate, settings, pause and resume, branches, the
+  default), long (moves, major upgrades, promotion and demotion, HA
+  enable, replicas, resizes, imports, Supabase user and storage copies,
+  branch file copies, Move all) or scheduled (backups, base backups,
+  restore tests, the metadata backup, storage switches, isolation checks,
+  minor upgrades, the Free tier's pause and archive, the V1 renames and
+  credential expiry). A server claims interactive operations first, and
+  lets long ones hold at most half its slots and long and scheduled ones
+  together all but one, so with the default 4 slots at most 2 long and 3
+  scheduled operations run at once and one slot is always free for
+  interactive work. The claim keeps `SKIP LOCKED`, the lease, the one
+  exclusive operation per project and the per-organisation limit. A new
+  `queue_age` alert fires when the oldest runnable operation of a class
+  has waited longer than 15 minutes (interactive, critical) or an hour
+  (long and scheduled, warning).
+- **Every stuck project raises `project_stuck`.** The alert covered
+  projects left `moving`, `promoting`, `demoting` or `upgrading` only. It
+  now covers a live project in any status but `active` (paused and
+  archived projects are `active`) with no queued or running operation 10
+  minutes after its last one ended: also `provisioning`, `restoring` and
+  `deleting` (critical: nothing repairs them, see `docs/operations.md`)
+  and `error` (warning: delete the project once the cause is fixed). The
+  repair loop still thaws only the move-like statuses, the ones with a
+  safe automatic repair.
+- **One server collects metrics.** Every xenibase-server, every minute,
+  listed every active project, opened a fresh admin connection to every
+  instance, read every PgBouncer and upserted `metric_points`, so each
+  added server repeated the work and multiplied the instance connections.
+  Now one server collects at a time, under an advisory lock held on a
+  connection of its own, and another takes over on its next round when
+  it stops. It keeps one admin connection per instance between rounds,
+  opened again after the instance closes it or its address or
+  credentials change, and closed when idle or when the instance has no
+  active project left. Each server still reads its own local PgBouncers,
+  which only it reaches, and leaves the counts in `pooler_readings` for
+  the collecting server, so `pooler_clients`, `pooler_waiting` and the
+  Free tier's activity cover every server's poolers. Every server still
+  serves `/metrics` from the stored points.
+- **Webhook `LISTEN` connections are capped and released when idle.** The
+  delivering server held a direct admin connection, outside the poolers,
+  for every project with webhooks, and nothing counted them against the
+  cluster's `max_connections` (500 in the bundle). Now an instance gets at
+  most `XENIBASE_WEBHOOK_LISTEN_MAX` (50) of them, a project gives its own
+  back once its outbox has had nothing to send for
+  `XENIBASE_WEBHOOK_IDLE_AFTER` (10 minutes), and the other projects are
+  polled every `XENIBASE_WEBHOOK_IDLE_POLL` (30 seconds), every 5 seconds
+  while events are going out, taking a connection again when one is free.
+  Order and at-least-once delivery are unchanged. `/metrics` shows the
+  number held as `xenibase_instance_webhook_listen_connections`, labelled
+  by instance, kind and node.
+
+### Upgrading
+- Migration 00102 adds `pooler_readings`, where each server leaves its
+  local PgBouncers' counts for the server collecting metrics. Nothing to
+  set. With several servers, the first to start after the upgrade
+  collects; points from older servers still running the previous release
+  are upserted alongside until they are upgraded.
+- New settings, passed through by the bundle's `compose.yaml`:
+  `XENIBASE_WEBHOOK_LISTEN_MAX` (default 50; `0` polls every project),
+  `XENIBASE_WEBHOOK_IDLE_AFTER` (10m) and `XENIBASE_WEBHOOK_IDLE_POLL`
+  (30s). A project with webhooks that has been quiet for 10 minutes, or
+  past the cap on its instance, can now take up to 30 seconds to send its
+  first event; lower `XENIBASE_WEBHOOK_IDLE_POLL` or raise the cap if that
+  matters more than the connections. An instance with more than 50 busy
+  webhook projects has the rest polled; leave room in its
+  `max_connections` before raising the cap.
+- Migration 00101 adds `agent_client_certs` and `agent_client_cert_state`.
+  Agents of this release accept any `xenibase-server` certificate, as
+  before, until a server of this release gives them a list; from then on
+  only the listed serials, plus, for 31 days after an agent's first list,
+  certificates that name no server (issued by an older server, which
+  registers none). So an older agent works with a newer server (it never
+  asks for a list), and a newer agent with an older server (no list is
+  pushed). With several servers on one metadata database, finish
+  upgrading all of them within those 31 days: an older server still
+  running after that is refused by every agent that has a list. A server
+  needs its host name to be unique among them to revoke one by name
+  (revoking by serial works either way). `client-serials.json` in an
+  agent's state directory holds its list; an agent restarted without it
+  accepts by subject again until a server's next health check (30
+  seconds) gives it a new one.
+- Caddy changes from `caddy:2` to `caddy:2.10.0` on the next `docker compose
+  up`. An install with backend services on keeps the Caddy image
+  `enable-services.sh` built until it is run again, which rebuilds it pinned.
+- A CLI context saved for an `http://` server other than this machine stops
+  working: log in again with `https://`, or, on a network you trust
+  without TLS, set `XENIBASE_ALLOW_HTTP=1` (each command warns). A script that sets `XENIBASE_SERVER`
+  to a server other than its current context's needs `XENIBASE_TOKEN`, or a
+  context for that server.
+- Migration 00097 adds billing contacts' `verified_at` and confirmation
+  token, and lets several organisations hold a WhatsApp number pending
+  (`org_support_phones` is keyed by organisation and number, with
+  `verified_at` and a `code`). Billing contacts that are a member's
+  verified address count as verified. The others keep getting invoices,
+  billing and status page email, but their email to support opens tickets
+  without an organisation until they are confirmed: **Send the link
+  again** under Billing → Billing contacts emails each one the link. Every WhatsApp
+  number registered before the upgrade is pending, with a code good for
+  30 days shown under Organisation → Support; its messages get the "how to
+  reach support" reply until the code is sent from it.
+- Migration 00098 adds `tickets.unverified_sender`. Inbound email that
+  isn't authenticated no longer threads or reaches an organisation. With
+  Postmark nothing needs setting. With another provider, have it pass its
+  verdict in `authentication_results`, or set
+  `XENIBASE_SUPPORT_AUTHSERV_ID` to the authserv-id of the
+  `Authentication-Results` header it adds; otherwise every inbound email
+  is unverified (`docs/support.md`, "Inbound email").
+- **Upgrade xenibase-server before xenibase-status.** A status page of this
+  release requires the `v2` push signature and refuses (401, logged as "no
+  v2 signature") heartbeats, incidents, SLA and subscriber pushes from an
+  older server. A new server still sends `v1` too, so an older status page
+  keeps working with it until upgraded. Something else that pushes to the
+  status page must sign with `statusapi.SignPush`.
+- Migration 00095 adds `alert_deliveries` (each alert event's delivery per
+  channel), `alert_grace` (the grace clocks), and `alerts.clear_count` and
+  `cleared_since`. Alerts now resolve about a minute later (3 clear
+  evaluations). Resolved alerts older than 90 days, and their deliveries,
+  are deleted within an hour of the upgrade. Resolved alerts of the last 7
+  days whose firing was never delivered are sent as `alert.resolved` once
+  a channel works. Monitoring that keys on the status page's probe error
+  text gets the class only; the full error is in xenibase-status's log.
+- Migration 00094 adds the node lifecycle `retiring`, with
+  `nodes.retiring_at` and `nodes.retiring_from`: an empty node out of
+  placement whose server the next sweep deletes. The API's node
+  `lifecycle` can now be `retiring`.
+- Migration 00093 adds `backups.verified_at`, when a backup's restore test
+  passed. Earlier backups have none; an archive in progress at the upgrade
+  tests its backup again before dropping the database.
+- Migration 00088 adds `api_tokens.parent_id` and a trigger that revokes a
+  token's descendants with it. Tokens created by other tokens before the
+  upgrade have no recorded parent: to find any an OAuth app made for
+  itself, look under Organisation → API tokens for tokens created via
+  `api` by a user with a connected app, and revoke them.
+- A password reset, a two-factor reset, and (by default) a password change
+  now revoke every API token the user has, including the CLI's and
+  connected apps': CI jobs using a revoked token fail with
+  `401 invalid_token` until given a new one. A password change keeps them
+  with `"revoke_tokens": false` (or by unticking the box under Account →
+  Security). Creating a token from a browser session, or approving
+  `xenibase login`, asks for the password and code when the last step-up is
+  more than 10 minutes old; scripts that create tokens with a session
+  cookie call `POST /api/v1/auth/reauth` first.
+- Organisation invitations are capped at 100 per organisation and 50 per
+  inviter in any 24 hours. An installation that onboards more people a
+  day raises `XENIBASE_INVITES_PER_ORG_DAY` and
+  `XENIBASE_INVITES_PER_USER_DAY` (0 turns a cap off).
+- Migration 00087 adds `users.lockout_notified_at` and the
+  `login_address_failures` table. Sign-in locks now double with each
+  further failure up to a day instead of staying at 15 minutes, and their
+  owners are emailed.
+- Backend services' schema version 7 runs on every enabled project with its
+  next reconcile (within seconds of the upgrade). It revokes the request
+  roles' `EXECUTE` on functions an extension installed; the data API no
+  longer serves them, so wrap one in a function of your own if an app calls
+  it.
+  The same version adds `xb_auth.sync_grants`, which the control plane
+  runs straight after: anon and user lose their privileges on tables without
+  row-level security (except `SELECT` on public tables), materialized views
+  and views that run as their owner, in every schema of the project's,
+  exposed or not, including grants made by hand. A view or function that
+  read such a table with the publishable key now answers `403 rls_required`
+  (or `403 permission_denied`): enable row-level security on the table, or
+  list it as public if anyone may read it. See `docs/upgrade.md`
+  ("Upgrading from 4.2.4").
+- Migration 00060 adds `instances.max_connections`. Existing instances keep
+  100 until they are resized.
+- Migrations 00068 and 00069 move children an earlier transfer left behind to
+  their project's organisation and add the keys; 00070 builds two indexes
+  concurrently for the retention sweep (`docs/upgrade.md`, "Upgrading from
+  4.2.4").
+- Migration 00061 adds `edge_credentials`; migration 00062 removes SCRAM
+  verifiers from finished password rotations and credential switches.
+- Migration 00075 gives the nightly and archive backups of projects deleted
+  before the upgrade, on platform targets, their final backup's expiry, and
+  at least seven days: they are deleted from a week after the upgrade.
+- Signed upload URLs made before the upgrade stop working (`400
+  invalid_signature`): they have no row in `xb_storage.upload_tokens`, so
+  they can't be used once. Apps sign a new URL; they last 2 hours at most.
+  A project's signed uploads fail until its schema reaches version 8, which
+  the backend services reconciler applies within minutes of the upgrade.
+- Migration 00083 adds `cdn_purges`, the CDN purges the storage sweep
+  retries; `project_storage.transform_bytes`, the cached renders' size; and
+  `storage_reconciler`, the reconciler's last run. The first server to
+  start runs the reconciler straight away. Projects whose backend services
+  are off have their files metered from the next sweep.
+- Migration 00082 adds `regions.files_target_id`. Existing regions have
+  none, so their files stay in the backup target and the
+  `files_share_backups` alert fires for each region with backend services:
+  give each a files target, copying `files/` across around the switch
+  (`docs/regions.md`, "Files target"; `docs/upgrade.md`).
+- The first server to start makes the derive seed. On an install with
+  projects it is the current master key, so every derived password and URL
+  key stays as it is; a new install gets random bytes. Upgrade before you
+  rotate the master key. A rotation run before any server of this release
+  started makes the seed from the old key itself, and refuses when
+  `XENIBASE_MASTER_KEY_PREVIOUS` lists more than one key, since it cannot
+  tell which one the servers used (`docs/operations.md`, "Secrets").
+- Migration 00089 adds `reaped_sessions.pid` and `started_at` and the
+  `statement_terminated` kind, which `GET /api/v1/projects/{id}/reaped`
+  can now return. A statement cancelled before the upgrade has no `pid`
+  recorded, so if it caught the cancel it is cancelled once more, then
+  ended on the following pass.
+- The isolation check audits more (the backend-service logins, every
+  grantee of `CONNECT` and `TEMPORARY`, `SECURITY DEFINER` functions), so
+  the first check after the upgrade can fail on something earlier checks
+  missed, such as a grant made by hand, and raise `isolation_check_failed`.
+  Its log names each finding.
+- Migration 00090 queues `apply_settings` for each active shared project,
+  which revokes `pg_locks` and the lock functions from `PUBLIC` in its
+  database (a project with an exclusive operation pending gets it from its
+  next `apply_settings`). Tenant SQL, including the SQL console, that
+  reads `pg_locks` or calls `pg_blocking_pids` on the shared tier now
+  answers "permission denied"; the project's Query insights → Locks view
+  shows its blocking chains instead.
+- Read replicas now count towards an organisation's dedicated allowance,
+  so the Usage & quotas page shows more in use where there are replicas,
+  and an organisation already at its allowance gets new replicas and
+  dedicated projects refused (or a promotion turned into a request) until
+  the allowance is raised.
+- The operations queue has classes (no migration). With the default 4
+  workers a server runs at most 2 long operations (moves, upgrades, HA,
+  replicas, resizes, imports) and 3 scheduled ones (backups and other
+  timetabled work) at once, where it used to run 4 of either: a night with
+  many projects to back up takes longer, and `queue_age` warns if a
+  scheduled operation waits over an hour. Raise `XENIBASE_WORKERS` for
+  more of both; with `XENIBASE_WORKERS=1` nothing is kept back. Servers of
+  an older release sharing the metadata database still claim oldest first
+  until upgraded.
+- `project_stuck` now also fires for projects left `provisioning`,
+  `restoring`, `deleting` or `error` with no operation, so an install may
+  see it for such projects at the first evaluation after the upgrade.
+  Delete a project in `error`; the others need repair by hand
+  (`docs/operations.md`, "Projects stuck in a status").
+
+## v4.2.4
+
+### Added
+- **A region's own API domain.** Platform → Regions → **API domain**
+  (`api_domain` on `PUT /api/v1/admin/regions/{id}`) gives a region's projects
+  `https://<ref>.<api-domain>` for their backend services, served by an edge in
+  the region (`XENIBASE_EDGE_DOMAIN` set to it, `XENIBASE_EDGE_REGION` to the
+  region), so a Lagos project's API traffic stays in Lagos instead of crossing
+  to the home region. Edge nodes Xenibase adds in the region get it in their
+  cloud-init. See `docs/regions.md`.
+- **Role management on dedicated projects.** An organisation owner can let a
+  dedicated project's owner role create roles (`CREATEROLE`, Project Settings →
+  Compute → Database roles, or `PUT /api/v1/projects/{id}/manage-roles`), for
+  applications whose migrations create their own roles. Postgres 16+ limits it
+  to the roles the owner creates. Logins it creates named `<database>_<name>`
+  connect through the poolers within 30 seconds (`POST …/manage-roles/sync` for
+  at once), with the project's connection limit; moves and major upgrades take
+  the roles along. See `docs/database-roles.md`.
+- **An IP allowlist per project.** Project Settings → Network access (or
+  `PUT /api/v1/projects/{id}/network` with `allowed_cidrs`, up to 50 addresses
+  or CIDR ranges) makes the poolers accept the project's logins only from
+  those addresses; Xenibase's own services (backend services, the dashboard's
+  SQL editor, probes) still connect. `GET` returns the caller's address and
+  whether it is allowed. Enforced by PgBouncer HBA rules in each region's
+  pooler configuration. See `docs/network-access.md`.
+- **Early access to hidden regions.** A hidden region takes new projects from
+  the organisations in its **Early-access organisations** list
+  (`early_access_org_ids`), for rehearsals before it opens or a first customer;
+  `GET /api/v1/regions` lists it to their members. Before, a hidden region
+  refused every project, so the Lagos launch rehearsals could not run until it
+  was open.
+- **Standby settings per read replica.** Hot standby feedback (off by
+  default) and how long replay waits for a conflicting query before cancelling
+  it (30 s by default, 0 to 900; `max_standby_streaming_delay` and
+  `max_standby_archive_delay`), set when a replica is added
+  (`hot_standby_feedback`, `max_standby_delay_seconds` on
+  `POST /api/v1/projects/{id}/replicas`) or changed later
+  (`PATCH /api/v1/projects/{id}/replicas/{replica_id}`, the replica's
+  **Settings…** in the dashboard, `xenibase replicas set`). A change applies to
+  that replica alone with a reload, without a restart; the primary and HA
+  standbys keep Postgres's defaults. See `docs/read-replicas.md`.
+
+### Security
+- Built with Go 1.26.10, which distrusts compromised intermediate certificates
+  in `crypto/x509` (GO-2026-6809); the agent's TLS connections reached it.
+
+### Upgrading
+- Migration 00056 adds `regions.api_domain` and `region_early_access`. Nothing
+  changes until a region is given a domain or an early-access list.
+- Migration 00057 adds `projects.manage_roles` and `project_owned_logins`.
+  Nothing changes until an owner turns role management on.
+- Migration 00058 adds `projects.allowed_cidrs`. The poolers now use
+  `auth_type = hba` with an `hba.conf` xenibase-server writes next to
+  `databases.ini` and `userlist.txt`. **Upgrade the pooler hosts first**
+  (agent and PgBouncer configuration, `xenibase-pooler-host` image), then
+  xenibase-server: an older pooler-host agent refuses bundles that carry
+  `hba.conf`. A compose install with the poolers in the bundle gets both
+  together from `./upgrade.sh`; for a dev checkout, run `make pooler-seed` and
+  recreate the poolers.
+- Migration 00059 adds the settings to `read_replicas`. Existing replicas keep
+  Postgres's defaults (feedback off, 30 s), which they already ran with.
+
+### Fixed
+- **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.
+- **A source that doesn't answer is explained, not an "internal error".** When the import's preflight (or the import itself) can't read the source in time, for example because a pooler in front of it has no free connection for that login, or a query is refused, the answer is now a clear request error naming the likely cause (the password is redacted). It was a 500 after the preflight's one-minute limit.
+
 ## v4.2.3
 
 - **Upgrades rebuild the edge.** `install.sh` built the server and agent images but not the edge, so a deployment with backend services on kept running the old edge after `upgrade.sh` (v4.2.2's browser preflight fix never reached it). The edge is rebuilt on every install and upgrade while the `services` profile is on. If you upgraded to v4.2.2 and use backend services, upgrade again.

@@ -11,6 +11,7 @@ import (
 	"testing/fstest"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/store"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -74,6 +75,22 @@ func TestHealth(t *testing.T) {
 		if res, body := get(t, ts, p); res.StatusCode != http.StatusOK || !strings.Contains(body, `"ok"`) {
 			t.Errorf("%s: %d %s", p, res.StatusCode, body)
 		}
+	}
+}
+
+// TestNotReadyOnANewerSchema: once a newer release has migrated the
+// database, /readyz says so and /healthz (liveness) doesn't.
+func TestNotReadyOnANewerSchema(t *testing.T) {
+	ts := httptest.NewServer(NewHandler(Options{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), UI: fstest.MapFS{"index.html": {Data: []byte("app")}}, UIIndex: "index.html",
+		InsecureNoAuth: true, Schema: func() error { return store.ErrSchemaNewer },
+	}))
+	t.Cleanup(ts.Close)
+	if res, body := get(t, ts, "/readyz"); res.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, "schema is newer") {
+		t.Errorf("/readyz: %d %s", res.StatusCode, body)
+	}
+	if res, _ := get(t, ts, "/healthz"); res.StatusCode != http.StatusOK {
+		t.Errorf("/healthz: %d", res.StatusCode)
 	}
 }
 

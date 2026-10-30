@@ -1774,6 +1774,7 @@ const (
 	NodeLifecycleActive       NodeLifecycle = "active"
 	NodeLifecycleDraining     NodeLifecycle = "draining"
 	NodeLifecycleProvisioning NodeLifecycle = "provisioning"
+	NodeLifecycleRetiring     NodeLifecycle = "retiring"
 )
 
 // Valid indicates whether the value is a known member of the NodeLifecycle enum.
@@ -1784,6 +1785,8 @@ func (e NodeLifecycle) Valid() bool {
 	case NodeLifecycleDraining:
 		return true
 	case NodeLifecycleProvisioning:
+		return true
+	case NodeLifecycleRetiring:
 		return true
 	default:
 		return false
@@ -2272,8 +2275,9 @@ func (e ReadReplicaStatus) Valid() bool {
 
 // Defines values for ReapedSessionKind.
 const (
-	IdleInTransaction ReapedSessionKind = "idle_in_transaction"
-	Statement         ReapedSessionKind = "statement"
+	IdleInTransaction   ReapedSessionKind = "idle_in_transaction"
+	Statement           ReapedSessionKind = "statement"
+	StatementTerminated ReapedSessionKind = "statement_terminated"
 )
 
 // Valid indicates whether the value is a known member of the ReapedSessionKind enum.
@@ -2282,6 +2286,8 @@ func (e ReapedSessionKind) Valid() bool {
 	case IdleInTransaction:
 		return true
 	case Statement:
+		return true
+	case StatementTerminated:
 		return true
 	default:
 		return false
@@ -4134,10 +4140,19 @@ type AdminOrgSummaryStatus string
 
 // AdminRegion defines model for AdminRegion.
 type AdminRegion struct {
+	// ApiDomain The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN).
+	ApiDomain string `json:"api_domain"`
+
 	// CopyTargetId Where backups on platform targets are copied (V3 §2.5).
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      string              `json:"country"`
 	CreatedAt    time.Time           `json:"created_at"`
+
+	// EarlyAccessOrgIds Organisations that may create projects while the region is hidden.
+	EarlyAccessOrgIds []openapi_types.UUID `json:"early_access_org_ids"`
+
+	// FilesTargetId Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
+	FilesTargetId *openapi_types.UUID `json:"files_target_id,omitempty"`
 
 	// FloatingIpId The region's pooler floating IP at the provider.
 	FloatingIpId *string `json:"floating_ip_id,omitempty"`
@@ -4184,11 +4199,19 @@ type AdminRegionListCopiesStatus string
 
 // AdminRegionRequest defines model for AdminRegionRequest.
 type AdminRegionRequest struct {
+	// ApiDomain The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects.
+	ApiDomain    *string             `json:"api_domain,omitempty"`
 	CopyTargetId *openapi_types.UUID `json:"copy_target_id,omitempty"`
 	Country      *string             `json:"country,omitempty"`
-	FloatingIpId *string             `json:"floating_ip_id,omitempty"`
 
-	// Hidden Hidden regions take no new projects.
+	// EarlyAccessOrgIds Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
+
+	// FilesTargetId A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
+	FilesTargetId *openapi_types.UUID `json:"files_target_id,omitempty"`
+	FloatingIpId  *string             `json:"floating_ip_id,omitempty"`
+
+	// Hidden Hidden regions take new projects only from their early-access organisations.
 	Hidden     *bool   `json:"hidden,omitempty"`
 	Location   *string `json:"location,omitempty"`
 	Name       string  `json:"name"`
@@ -4243,6 +4266,34 @@ type AdvisorFindingLevel string
 // AdvisorFindings defines model for AdvisorFindings.
 type AdvisorFindings struct {
 	Items []AdvisorFinding `json:"items"`
+}
+
+// AgentClientCert defines model for AgentClientCert.
+type AgentClientCert struct {
+	// Current The certificate the answering server is using.
+	Current   bool       `json:"current"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	IssuedAt  time.Time  `json:"issued_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+
+	// Serial The certificate's serial, lower-case hex.
+	Serial string `json:"serial"`
+
+	// Server The xenibase-server it was issued to (its host name).
+	Server string `json:"server"`
+}
+
+// AgentClientCertRevoke Exactly one of serial and server.
+type AgentClientCertRevoke struct {
+	Serial *string `json:"serial,omitempty"`
+	Server *string `json:"server,omitempty"`
+}
+
+// AgentClientCertRevoked defines model for AgentClientCertRevoked.
+type AgentClientCertRevoked struct {
+	// NotPushed Agents the new list did not reach now; each gets it at its next health check.
+	NotPushed []string          `json:"not_pushed"`
+	Revoked   []AgentClientCert `json:"revoked"`
 }
 
 // AgentRegisterRequest defines model for AgentRegisterRequest.
@@ -4478,9 +4529,12 @@ type AuthConfig struct {
 	// HookRole The role Postgres hooks run as; grant it what they read.
 	HookRole *string `json:"hook_role,omitempty"`
 
-	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
-	HookSecret         *string `json:"hook_secret,omitempty"`
-	MonthlyActiveUsers int64   `json:"monthly_active_users"`
+	// HookSecret Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+	HookSecret *string `json:"hook_secret,omitempty"`
+
+	// HookSecretSet Whether the project has a hook secret (for those who aren't shown it).
+	HookSecretSet      *bool `json:"hook_secret_set,omitempty"`
+	MonthlyActiveUsers int64 `json:"monthly_active_users"`
 
 	// OauthCallbackUrl The redirect URI to register with OAuth providers.
 	OauthCallbackUrl *string          `json:"oauth_callback_url,omitempty"`
@@ -5052,6 +5106,9 @@ type BillingContact struct {
 
 	// StatusEmails Gets the status page's incident emails while the organisation is on a paid plan (default true).
 	StatusEmails *bool `json:"status_emails,omitempty"`
+
+	// Verified A member's verified address, or confirmed from the emailed link. Only a verified contact's email to support opens tickets for the organisation; billing email goes to every contact.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 // BillingDetailsUpdate defines model for BillingDetailsUpdate.
@@ -5339,6 +5396,9 @@ type CategoryCost struct {
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+
+	// RevokeTokens Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+	RevokeTokens *bool `json:"revoke_tokens,omitempty"`
 }
 
 // ColumnRef A column's foreign key.
@@ -6381,16 +6441,21 @@ type InstanceState struct {
 
 // InstanceSummary defines model for InstanceSummary.
 type InstanceSummary struct {
-	Cpus  *float32 `json:"cpus,omitempty"`
-	Error *string  `json:"error,omitempty"`
+	// ConnectionLimitMax Dedicated only. The highest connection limit the project can have on this instance: max_connections less what Xenibase keeps for its own connections (backups, replication, probes, backend services).
+	ConnectionLimitMax *int     `json:"connection_limit_max,omitempty"`
+	Cpus               *float32 `json:"cpus,omitempty"`
+	Error              *string  `json:"error,omitempty"`
 
 	// HaEnabled A primary and a streaming standby on another node (V3 §2.2).
 	HaEnabled *bool               `json:"ha_enabled,omitempty"`
 	Id        openapi_types.UUID  `json:"id"`
 	Kind      InstanceSummaryKind `json:"kind"`
-	MemoryMb  *int                `json:"memory_mb,omitempty"`
-	NodeId    openapi_types.UUID  `json:"node_id"`
-	NodeName  string              `json:"node_name"`
+
+	// MaxConnections Dedicated only. Postgres's max_connections, which grows with the instance's memory (50 per GB, 100 to 500).
+	MaxConnections *int               `json:"max_connections,omitempty"`
+	MemoryMb       *int               `json:"memory_mb,omitempty"`
+	NodeId         openapi_types.UUID `json:"node_id"`
+	NodeName       string             `json:"node_name"`
 
 	// PgRelease The release the instance runs ("18.1"), as its agent last reported.
 	PgRelease *string `json:"pg_release,omitempty"`
@@ -6990,6 +7055,29 @@ type MaintenanceWindow struct {
 	Weekday int `json:"weekday"`
 }
 
+// ManageRoles defines model for ManageRoles.
+type ManageRoles struct {
+	// Enabled The owner role has CREATEROLE.
+	Enabled bool `json:"enabled"`
+
+	// Logins The owner's logins the poolers accept.
+	Logins []struct {
+		Name     string    `json:"name"`
+		SyncedAt time.Time `json:"synced_at"`
+	} `json:"logins"`
+
+	// Skipped After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password).
+	Skipped *[]struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"skipped,omitempty"`
+}
+
+// ManageRolesRequest defines model for ManageRolesRequest.
+type ManageRolesRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Margins defines model for Margins.
 type Margins struct {
 	Categories        []CategoryCost     `json:"categories"`
@@ -7111,8 +7199,10 @@ type Node struct {
 	Id                 openapi_types.UUID `json:"id"`
 
 	// Keep Never deleted for being empty.
-	Keep             *bool          `json:"keep,omitempty"`
-	LastHeartbeat    *time.Time     `json:"last_heartbeat,omitempty"`
+	Keep          *bool      `json:"keep,omitempty"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+
+	// Lifecycle retiring is an empty node out of placement whose server is about to be deleted.
 	Lifecycle        *NodeLifecycle `json:"lifecycle,omitempty"`
 	MonthlyCostMinor *int64         `json:"monthly_cost_minor,omitempty"`
 	Name             string         `json:"name"`
@@ -7129,7 +7219,7 @@ type Node struct {
 	Status     string  `json:"status"`
 }
 
-// NodeLifecycle defines model for Node.Lifecycle.
+// NodeLifecycle retiring is an empty node out of placement whose server is about to be deleted.
 type NodeLifecycle string
 
 // NodeCost defines model for NodeCost.
@@ -7201,6 +7291,9 @@ type OAuthAuthorizeInfo struct {
 	CodeChallenge       string `json:"code_challenge"`
 	CodeChallengeMethod string `json:"code_challenge_method"`
 
+	// Consent The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
+	Consent string `json:"consent"`
+
 	// Organisations The organisations the user may grant for, with the projects they could restrict the token to.
 	Organisations []OAuthGrantOrg `json:"organisations"`
 	RedirectUri   string          `json:"redirect_uri"`
@@ -7239,16 +7332,19 @@ type OAuthClientList struct {
 
 // OAuthDecision defines model for OAuthDecision.
 type OAuthDecision struct {
-	Approve             bool                  `json:"approve"`
-	ClientId            string                `json:"client_id"`
-	CodeChallenge       string                `json:"code_challenge"`
-	CodeChallengeMethod string                `json:"code_challenge_method"`
-	ExpiresInDays       *int                  `json:"expires_in_days,omitempty"`
-	OrgId               *openapi_types.UUID   `json:"org_id,omitempty"`
-	ProjectIds          *[]openapi_types.UUID `json:"project_ids,omitempty"`
-	RedirectUri         string                `json:"redirect_uri"`
+	Approve             bool   `json:"approve"`
+	ClientId            string `json:"client_id"`
+	CodeChallenge       string `json:"code_challenge"`
+	CodeChallengeMethod string `json:"code_challenge_method"`
 
-	// Scopes Within what the app asked for; the request's scopes by default.
+	// Consent The `consent` the consent page was given; required to approve.
+	Consent       *string               `json:"consent,omitempty"`
+	ExpiresInDays *int                  `json:"expires_in_days,omitempty"`
+	OrgId         *openapi_types.UUID   `json:"org_id,omitempty"`
+	ProjectIds    *[]openapi_types.UUID `json:"project_ids,omitempty"`
+	RedirectUri   string                `json:"redirect_uri"`
+
+	// Scopes Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
 	Scopes *[]TokenScope `json:"scopes,omitempty"`
 	State  *string       `json:"state,omitempty"`
 }
@@ -7944,8 +8040,10 @@ type ProfileList struct {
 
 // Project defines model for Project.
 type Project struct {
-	ArchivedAt *time.Time  `json:"archived_at,omitempty"`
-	Branch     *BranchInfo `json:"branch,omitempty"`
+	// AllowedCidrs The project's IP allowlist; empty allows any address.
+	AllowedCidrs *[]string   `json:"allowed_cidrs,omitempty"`
+	ArchivedAt   *time.Time  `json:"archived_at,omitempty"`
+	Branch       *BranchInfo `json:"branch,omitempty"`
 
 	// BranchCount Live branches of this project.
 	BranchCount *int `json:"branch_count,omitempty"`
@@ -7976,11 +8074,14 @@ type Project struct {
 	LegacyCredentialsUntil *time.Time `json:"legacy_credentials_until,omitempty"`
 
 	// Lifecycle A Free project paused or archived for inactivity (V3 §4).
-	Lifecycle *ProjectLifecycle  `json:"lifecycle,omitempty"`
-	MyRole    *ProjectRole       `json:"my_role,omitempty"`
-	Name      string             `json:"name"`
-	OrgId     openapi_types.UUID `json:"org_id"`
-	OwnerRole string             `json:"owner_role"`
+	Lifecycle *ProjectLifecycle `json:"lifecycle,omitempty"`
+
+	// ManageRoles A dedicated project's owner role has CREATEROLE (role management).
+	ManageRoles *bool              `json:"manage_roles,omitempty"`
+	MyRole      *ProjectRole       `json:"my_role,omitempty"`
+	Name        string             `json:"name"`
+	OrgId       openapi_types.UUID `json:"org_id"`
+	OwnerRole   string             `json:"owner_role"`
 
 	// ParentProjectId Set for a branch (V2 §8).
 	ParentProjectId *openapi_types.UUID `json:"parent_project_id,omitempty"`
@@ -8088,6 +8189,24 @@ type ProjectMembership struct {
 	ProjectId   openapi_types.UUID `json:"project_id"`
 	ProjectName string             `json:"project_name"`
 	Role        ProjectRole        `json:"role"`
+}
+
+// ProjectNetwork defines model for ProjectNetwork.
+type ProjectNetwork struct {
+	// AllowedCidrs The networks, normalised; empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
+
+	// YourIp The address this request came from, as Xenibase sees it (your database client's address may differ).
+	YourIp *string `json:"your_ip,omitempty"`
+
+	// YourIpAllowed Whether your_ip is in the allowlist (always true when the list is empty).
+	YourIpAllowed *bool `json:"your_ip_allowed,omitempty"`
+}
+
+// ProjectNetworkRequest defines model for ProjectNetworkRequest.
+type ProjectNetworkRequest struct {
+	// AllowedCidrs Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address.
+	AllowedCidrs []string `json:"allowed_cidrs"`
 }
 
 // ProjectResidencyRequest defines model for ProjectResidencyRequest.
@@ -8231,20 +8350,28 @@ type QuotaItem struct {
 
 // ReadReplica defines model for ReadReplica.
 type ReadReplica struct {
-	CreatedAt time.Time          `json:"created_at"`
-	Error     *string            `json:"error,omitempty"`
-	Id        openapi_types.UUID `json:"id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	Error              *string            `json:"error,omitempty"`
+	HotStandbyFeedback bool               `json:"hot_standby_feedback"`
+	Id                 openapi_types.UUID `json:"id"`
 
 	// InRotation The read-only route sends reads to it.
 	InRotation bool   `json:"in_rotation"`
 	LagBytes   *int64 `json:"lag_bytes,omitempty"`
 
 	// LagMs How long ago the primary wrote what it has not replayed yet.
-	LagMs             *int64             `json:"lag_ms,omitempty"`
-	NodeId            openapi_types.UUID `json:"node_id"`
-	NodeName          string             `json:"node_name"`
-	Region            string             `json:"region"`
-	RotationChangedAt *time.Time         `json:"rotation_changed_at,omitempty"`
+	LagMs                  *int64             `json:"lag_ms,omitempty"`
+	MaxStandbyDelaySeconds int                `json:"max_standby_delay_seconds"`
+	NodeId                 openapi_types.UUID `json:"node_id"`
+	NodeName               string             `json:"node_name"`
+	Region                 string             `json:"region"`
+	RotationChangedAt      *time.Time         `json:"rotation_changed_at,omitempty"`
+
+	// SettingsAppliedAt When the replica last confirmed its settings.
+	SettingsAppliedAt *time.Time `json:"settings_applied_at,omitempty"`
+
+	// SettingsError Why the settings couldn't be applied yet (retried).
+	SettingsError *string `json:"settings_error,omitempty"`
 
 	// Size The instance profile it runs with (the primary's).
 	Size   string            `json:"size"`
@@ -8288,14 +8415,16 @@ type RealtimeTable struct {
 
 // ReapedSession defines model for ReapedSession.
 type ReapedSession struct {
-	CreatedAt time.Time         `json:"created_at"`
-	DurationS int               `json:"duration_s"`
-	Kind      ReapedSessionKind `json:"kind"`
-	Query     *string           `json:"query,omitempty"`
-	Role      string            `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	DurationS int       `json:"duration_s"`
+
+	// Kind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+	Kind  ReapedSessionKind `json:"kind"`
+	Query *string           `json:"query,omitempty"`
+	Role  string            `json:"role"`
 }
 
-// ReapedSessionKind defines model for ReapedSession.Kind.
+// ReapedSessionKind statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
 type ReapedSessionKind string
 
 // ReapedSessionList defines model for ReapedSessionList.
@@ -8389,6 +8518,9 @@ type RecoveryCodesStatus struct {
 type Region struct {
 	// Country ISO 3166 two-letter code; empty when not tied to one.
 	Country string `json:"country"`
+
+	// EarlyAccessOrgIds Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens.
+	EarlyAccessOrgIds *[]openapi_types.UUID `json:"early_access_org_ids,omitempty"`
 
 	// Home The platform's home region, where projects go by default.
 	Home bool `json:"home"`
@@ -8508,6 +8640,12 @@ type ReplayResult struct {
 
 // ReplicaCreateRequest defines model for ReplicaCreateRequest.
 type ReplicaCreateRequest struct {
+	// HotStandbyFeedback See ReplicaSettings (default false).
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds See ReplicaSettings (default 30).
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
+
 	// NodeId Where the replica goes (default the least loaded eligible node in the region).
 	NodeId *openapi_types.UUID `json:"node_id,omitempty"`
 
@@ -8533,6 +8671,15 @@ type ReplicaList struct {
 	// ReadUrl The read-only route's connection string, without a password.
 	ReadUrl  *string       `json:"read_url,omitempty"`
 	Replicas []ReadReplica `json:"replicas"`
+}
+
+// ReplicaSettings A read replica's standby settings. Omitted fields keep their value.
+type ReplicaSettings struct {
+	// HotStandbyFeedback The replica tells the primary which rows its running queries still read, so the primary's vacuum keeps them and long queries on the replica aren't cancelled for it. The cost is on the primary: dead rows stay longer, so a long query on the replica can bloat tables.
+	HotStandbyFeedback *bool `json:"hot_standby_feedback,omitempty"`
+
+	// MaxStandbyDelaySeconds How long replay waits for a query that conflicts with it before cancelling the query (max_standby_streaming_delay and max_standby_archive_delay). Longer lets long queries finish but lets the replica fall further behind; one behind by more than the rotation threshold leaves the read route until it catches up.
+	MaxStandbyDelaySeconds *int `json:"max_standby_delay_seconds,omitempty"`
 }
 
 // ResizePlan defines model for ResizePlan.
@@ -9419,8 +9566,14 @@ type SupportOperation struct {
 
 // SupportPhone defines model for SupportPhone.
 type SupportPhone struct {
-	CreatedAt time.Time `json:"created_at"`
-	Phone     string    `json:"phone"`
+	// Code While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678.
+	Code          *string    `json:"code,omitempty"`
+	CodeExpiresAt *time.Time `json:"code_expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	Phone         string     `json:"phone"`
+
+	// Verified The code was sent from the number; only then do its messages open tickets.
+	Verified bool `json:"verified"`
 }
 
 // SupportProject defines model for SupportProject.
@@ -9575,7 +9728,10 @@ type Ticket struct {
 	RespondBy *time.Time   `json:"respond_by,omitempty"`
 	Status    TicketStatus `json:"status"`
 	Subject   string       `json:"subject"`
-	UpdatedAt time.Time    `json:"updated_at"`
+
+	// UnverifiedSender An email whose sender the provider didn't authenticate (no DMARC pass, nor aligned DKIM and SPF passes): the From address may be forged, so the ticket has no organisation.
+	UnverifiedSender bool      `json:"unverified_sender"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // TicketChannel defines model for Ticket.Channel.
@@ -10869,6 +11025,9 @@ type SupportWhatsAppVerifyParams struct {
 // SupportWhatsAppWebhookJSONBody defines parameters for SupportWhatsAppWebhook.
 type SupportWhatsAppWebhookJSONBody map[string]interface{}
 
+// RevokeAgentClientCertsJSONRequestBody defines body for RevokeAgentClientCerts for application/json ContentType.
+type RevokeAgentClientCertsJSONRequestBody = AgentClientCertRevoke
+
 // PutBillingSettingsJSONRequestBody defines body for PutBillingSettings for application/json ContentType.
 type PutBillingSettingsJSONRequestBody = BillingSettings
 
@@ -11054,6 +11213,9 @@ type ResendVerificationJSONRequestBody = EmailRequest
 
 // RestoreBackupJSONRequestBody defines body for RestoreBackup for application/json ContentType.
 type RestoreBackupJSONRequestBody = RestoreRequest
+
+// ConfirmBillingContactJSONRequestBody defines body for ConfirmBillingContact for application/json ContentType.
+type ConfirmBillingContactJSONRequestBody = TokenRequest
 
 // CreateDevOperationJSONRequestBody defines body for CreateDevOperation for application/json ContentType.
 type CreateDevOperationJSONRequestBody = NoopParams
@@ -11262,6 +11424,9 @@ type CreateJobJSONRequestBody = JobRequest
 // UpdateJobJSONRequestBody defines body for UpdateJob for application/json ContentType.
 type UpdateJobJSONRequestBody = JobUpdate
 
+// SetProjectManageRolesJSONRequestBody defines body for SetProjectManageRoles for application/json ContentType.
+type SetProjectManageRolesJSONRequestBody = ManageRolesRequest
+
 // AddProjectMemberJSONRequestBody defines body for AddProjectMember for application/json ContentType.
 type AddProjectMemberJSONRequestBody = ProjectMemberRequest
 
@@ -11270,6 +11435,9 @@ type UpdateProjectMemberJSONRequestBody = ProjectRoleRequest
 
 // MigrateSupabaseJSONRequestBody defines body for MigrateSupabase for application/json ContentType.
 type MigrateSupabaseJSONRequestBody = SupabaseMigrationRequest
+
+// SetProjectNetworkJSONRequestBody defines body for SetProjectNetwork for application/json ContentType.
+type SetProjectNetworkJSONRequestBody = ProjectNetworkRequest
 
 // RestoreProjectPITRJSONRequestBody defines body for RestoreProjectPITR for application/json ContentType.
 type RestoreProjectPITRJSONRequestBody = PitrRequest
@@ -11297,6 +11465,9 @@ type ReclaimSpaceJSONRequestBody = ReclaimSpaceRequest
 
 // CreateProjectReplicaJSONRequestBody defines body for CreateProjectReplica for application/json ContentType.
 type CreateProjectReplicaJSONRequestBody = ReplicaCreateRequest
+
+// UpdateProjectReplicaJSONRequestBody defines body for UpdateProjectReplica for application/json ContentType.
+type UpdateProjectReplicaJSONRequestBody = ReplicaSettings
 
 // DetachProjectReplicaJSONRequestBody defines body for DetachProjectReplica for application/json ContentType.
 type DetachProjectReplicaJSONRequestBody = ReplicaDetachRequest
@@ -11405,6 +11576,12 @@ type CreateTokenJSONRequestBody = CreateTokenRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+	// (GET /api/v1/admin/agent-client-certs)
+	ListAgentClientCerts(w http.ResponseWriter, r *http.Request)
+	// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+	// (POST /api/v1/admin/agent-client-certs/revoke)
+	RevokeAgentClientCerts(w http.ResponseWriter, r *http.Request)
 	// ListPlatformAudit The platform audit log, newest first (platform admin)
 	// (GET /api/v1/admin/audit)
 	ListPlatformAudit(w http.ResponseWriter, r *http.Request, params ListPlatformAuditParams)
@@ -11807,6 +11984,9 @@ type ServerInterface interface {
 	// RestoreBackup Restore a backup into a new project or in place
 	// (POST /api/v1/backups/{id}/restore)
 	RestoreBackup(w http.ResponseWriter, r *http.Request, id BackupID)
+	// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+	// (POST /api/v1/billing/contacts/confirm)
+	ConfirmBillingContact(w http.ResponseWriter, r *http.Request)
 	// CreateDevOperation Enqueue a dummy operation (development only)
 	// (POST /api/v1/dev/operations)
 	CreateDevOperation(w http.ResponseWriter, r *http.Request)
@@ -11870,7 +12050,7 @@ type ServerInterface interface {
 	// AcceptMyInvitation Accept one of your pending invitations
 	// (POST /api/v1/me/invitations/{invitation_id}/accept)
 	AcceptMyInvitation(w http.ResponseWriter, r *http.Request, invitationId InvitationID)
-	// ChangePassword Change your password; ends your other sessions
+	// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 	// (POST /api/v1/me/password)
 	ChangePassword(w http.ResponseWriter, r *http.Request)
 	// GetRecoveryCodes How many recovery codes you have left
@@ -12170,6 +12350,9 @@ type ServerInterface interface {
 	// RotateSigningKey Sign with a new key; the old one verifies until its tokens expire
 	// (POST /api/v1/projects/{id}/auth/signing-keys/rotate)
 	RotateSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+	// (POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke)
+	RevokeSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID, keyId openapi_types.UUID)
 	// TestAuthSMTP Send a test email through the project's SMTP server (or the settings given)
 	// (POST /api/v1/projects/{id}/auth/smtp/test)
 	TestAuthSMTP(w http.ResponseWriter, r *http.Request, id ProjectID)
@@ -12323,6 +12506,15 @@ type ServerInterface interface {
 	// ListJobRuns A job's history (30 days, at most 1,000 runs)
 	// (GET /api/v1/projects/{id}/jobs/{job_id}/runs)
 	ListJobRuns(w http.ResponseWriter, r *http.Request, id ProjectID, jobId JobID, params ListJobRunsParams)
+	// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+	// (GET /api/v1/projects/{id}/manage-roles)
+	GetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+	// (PUT /api/v1/projects/{id}/manage-roles)
+	SetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// SyncProjectManageRoles Sync the owner's logins to the poolers now
+	// (POST /api/v1/projects/{id}/manage-roles/sync)
+	SyncProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID)
 	// ListProjectMembers Project members (org owners and admins are implicit admins)
 	// (GET /api/v1/projects/{id}/members)
 	ListProjectMembers(w http.ResponseWriter, r *http.Request, id ProjectID)
@@ -12344,6 +12536,12 @@ type ServerInterface interface {
 	// ListProjectMoves The project's recent moves between instances, newest first
 	// (GET /api/v1/projects/{id}/moves)
 	ListProjectMoves(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// GetProjectNetwork The project's IP allowlist
+	// (GET /api/v1/projects/{id}/network)
+	GetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID)
+	// SetProjectNetwork Replace the project's IP allowlist (project admins)
+	// (PUT /api/v1/projects/{id}/network)
+	SetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID)
 	// RestoreProjectPITR Point-in-time recovery of a dedicated project into a new one
 	// (POST /api/v1/projects/{id}/pitr)
 	RestoreProjectPITR(w http.ResponseWriter, r *http.Request, id ProjectID)
@@ -12395,6 +12593,9 @@ type ServerInterface interface {
 	// DeleteProjectReplica Remove a read replica
 	// (DELETE /api/v1/projects/{id}/replicas/{replica_id})
 	DeleteProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID)
+	// UpdateProjectReplica Change a read replica's standby settings
+	// (PATCH /api/v1/projects/{id}/replicas/{replica_id})
+	UpdateProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID)
 	// DetachProjectReplica Promote a read replica into a standalone project
 	// (POST /api/v1/projects/{id}/replicas/{replica_id}/detach)
 	DetachProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID)
@@ -12637,6 +12838,18 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// ListAgentClientCerts The client certificates xenibase-servers issued themselves for agents
+// (GET /api/v1/admin/agent-client-certs)
+func (_ Unimplemented) ListAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// RevokeAgentClientCerts Revoke a server's agent client certificate, by serial or every live one of a server
+// (POST /api/v1/admin/agent-client-certs/revoke)
+func (_ Unimplemented) RevokeAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // ListPlatformAudit The platform audit log, newest first (platform admin)
 // (GET /api/v1/admin/audit)
@@ -13442,6 +13655,12 @@ func (_ Unimplemented) RestoreBackup(w http.ResponseWriter, r *http.Request, id 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// ConfirmBillingContact Confirm a billing contact from the emailed link (public)
+// (POST /api/v1/billing/contacts/confirm)
+func (_ Unimplemented) ConfirmBillingContact(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // CreateDevOperation Enqueue a dummy operation (development only)
 // (POST /api/v1/dev/operations)
 func (_ Unimplemented) CreateDevOperation(w http.ResponseWriter, r *http.Request) {
@@ -13568,7 +13787,7 @@ func (_ Unimplemented) AcceptMyInvitation(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ChangePassword Change your password; ends your other sessions
+// ChangePassword Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
 // (POST /api/v1/me/password)
 func (_ Unimplemented) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -14168,6 +14387,12 @@ func (_ Unimplemented) RotateSigningKey(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// RevokeSigningKey Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+// (POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke)
+func (_ Unimplemented) RevokeSigningKey(w http.ResponseWriter, r *http.Request, id ProjectID, keyId openapi_types.UUID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // TestAuthSMTP Send a test email through the project's SMTP server (or the settings given)
 // (POST /api/v1/projects/{id}/auth/smtp/test)
 func (_ Unimplemented) TestAuthSMTP(w http.ResponseWriter, r *http.Request, id ProjectID) {
@@ -14474,6 +14699,24 @@ func (_ Unimplemented) ListJobRuns(w http.ResponseWriter, r *http.Request, id Pr
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// GetProjectManageRoles Role management on a dedicated project, and the owner's logins the poolers accept
+// (GET /api/v1/projects/{id}/manage-roles)
+func (_ Unimplemented) GetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// SetProjectManageRoles Turn role management on or off (organisation owners; step-up)
+// (PUT /api/v1/projects/{id}/manage-roles)
+func (_ Unimplemented) SetProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// SyncProjectManageRoles Sync the owner's logins to the poolers now
+// (POST /api/v1/projects/{id}/manage-roles/sync)
+func (_ Unimplemented) SyncProjectManageRoles(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // ListProjectMembers Project members (org owners and admins are implicit admins)
 // (GET /api/v1/projects/{id}/members)
 func (_ Unimplemented) ListProjectMembers(w http.ResponseWriter, r *http.Request, id ProjectID) {
@@ -14513,6 +14756,18 @@ func (_ Unimplemented) MigrateSupabase(w http.ResponseWriter, r *http.Request, i
 // ListProjectMoves The project's recent moves between instances, newest first
 // (GET /api/v1/projects/{id}/moves)
 func (_ Unimplemented) ListProjectMoves(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetProjectNetwork The project's IP allowlist
+// (GET /api/v1/projects/{id}/network)
+func (_ Unimplemented) GetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// SetProjectNetwork Replace the project's IP allowlist (project admins)
+// (PUT /api/v1/projects/{id}/network)
+func (_ Unimplemented) SetProjectNetwork(w http.ResponseWriter, r *http.Request, id ProjectID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -14615,6 +14870,12 @@ func (_ Unimplemented) CreateProjectReplica(w http.ResponseWriter, r *http.Reque
 // DeleteProjectReplica Remove a read replica
 // (DELETE /api/v1/projects/{id}/replicas/{replica_id})
 func (_ Unimplemented) DeleteProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdateProjectReplica Change a read replica's standby settings
+// (PATCH /api/v1/projects/{id}/replicas/{replica_id})
+func (_ Unimplemented) UpdateProjectReplica(w http.ResponseWriter, r *http.Request, id ProjectID, replicaId ReplicaID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -15100,6 +15361,34 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListAgentClientCerts operation middleware
+func (siw *ServerInterfaceWrapper) ListAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListAgentClientCerts(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RevokeAgentClientCerts operation middleware
+func (siw *ServerInterfaceWrapper) RevokeAgentClientCerts(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeAgentClientCerts(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // ListPlatformAudit operation middleware
 func (siw *ServerInterfaceWrapper) ListPlatformAudit(w http.ResponseWriter, r *http.Request) {
@@ -18241,6 +18530,20 @@ func (siw *ServerInterfaceWrapper) RestoreBackup(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.RestoreBackup(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ConfirmBillingContact operation middleware
+func (siw *ServerInterfaceWrapper) ConfirmBillingContact(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ConfirmBillingContact(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -21626,6 +21929,41 @@ func (siw *ServerInterfaceWrapper) RotateSigningKey(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
+// RevokeSigningKey operation middleware
+func (siw *ServerInterfaceWrapper) RevokeSigningKey(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "keyId" -------------
+	var keyId openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "keyId", chi.URLParam(r, "keyId"), &keyId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "keyId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RevokeSigningKey(w, r, id, keyId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // TestAuthSMTP operation middleware
 func (siw *ServerInterfaceWrapper) TestAuthSMTP(w http.ResponseWriter, r *http.Request) {
 
@@ -23327,6 +23665,84 @@ func (siw *ServerInterfaceWrapper) ListJobRuns(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// GetProjectManageRoles operation middleware
+func (siw *ServerInterfaceWrapper) GetProjectManageRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetProjectManageRoles(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetProjectManageRoles operation middleware
+func (siw *ServerInterfaceWrapper) SetProjectManageRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetProjectManageRoles(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SyncProjectManageRoles operation middleware
+func (siw *ServerInterfaceWrapper) SyncProjectManageRoles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SyncProjectManageRoles(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListProjectMembers operation middleware
 func (siw *ServerInterfaceWrapper) ListProjectMembers(w http.ResponseWriter, r *http.Request) {
 
@@ -23547,6 +23963,58 @@ func (siw *ServerInterfaceWrapper) ListProjectMoves(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListProjectMoves(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetProjectNetwork operation middleware
+func (siw *ServerInterfaceWrapper) GetProjectNetwork(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetProjectNetwork(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetProjectNetwork operation middleware
+func (siw *ServerInterfaceWrapper) SetProjectNetwork(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetProjectNetwork(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -24052,6 +24520,41 @@ func (siw *ServerInterfaceWrapper) DeleteProjectReplica(w http.ResponseWriter, r
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DeleteProjectReplica(w, r, id, replicaId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateProjectReplica operation middleware
+func (siw *ServerInterfaceWrapper) UpdateProjectReplica(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id ProjectID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "replica_id" -------------
+	var replicaId ReplicaID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "replica_id", chi.URLParam(r, "replica_id"), &replicaId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "replica_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateProjectReplica(w, r, id, replicaId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -26677,6 +27180,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Delete(options.BaseURL+"/api/v1/projects/{id}/replicas/{replica_id}", wrapper.DeleteProjectReplica)
 	})
 	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/v1/projects/{id}/replicas/{replica_id}", wrapper.UpdateProjectReplica)
+	})
+	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/projects/{id}/replicas/{replica_id}/detach", wrapper.DetachProjectReplica)
 	})
 	r.Group(func(r chi.Router) {
@@ -26714,6 +27220,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/nodes/{id}/registration-token", wrapper.CreateNodeRegistrationToken)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/admin/agent-client-certs", wrapper.ListAgentClientCerts)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/admin/agent-client-certs/revoke", wrapper.RevokeAgentClientCerts)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/agent/register", wrapper.RegisterAgent)
@@ -27160,6 +27672,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/v1/projects/{id}/auth/signing-keys/rotate", wrapper.RotateSigningKey)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke", wrapper.RevokeSigningKey)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/projects/{id}/auth/users", wrapper.ListAuthUsers)
 	})
 	r.Group(func(r chi.Router) {
@@ -27239,6 +27754,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/orgs/{org}/billing/contacts", wrapper.AddBillingContact)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/billing/contacts/confirm", wrapper.ConfirmBillingContact)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/v1/orgs/{org}/billing/contacts/{email}", wrapper.RemoveBillingContact)
@@ -27581,6 +28099,21 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/admin/regions/{region_id}/etcd-move-all", wrapper.MoveAllToRegionEtcd)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{id}/manage-roles", wrapper.GetProjectManageRoles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/projects/{id}/manage-roles", wrapper.SetProjectManageRoles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{id}/manage-roles/sync", wrapper.SyncProjectManageRoles)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{id}/network", wrapper.GetProjectNetwork)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/projects/{id}/network", wrapper.SetProjectNetwork)
 	})
 	r.Group(func(r chi.Router) {
 		r.Put(options.BaseURL+"/api/v1/projects/{id}/residency", wrapper.SetProjectResidency)

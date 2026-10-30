@@ -22,9 +22,18 @@ platform admin can reset your two-factor after confirming who you are, and you
 sign in with your password until you turn it on again. Platform admins and
 support staff always have it on.
 
+Five wrong passwords or codes in a row lock signing in for 15 minutes, and
+each further wrong attempt after that for twice as long, up to a day; your
+right password works again once the lock ends. You are emailed when it
+locks: if it wasn't you, reset your password and turn on two-factor sign-in.
+
 **Account** lists your sessions (revoke any), lets you change your password
 and name, and shows new recovery codes (after confirming your password and
-code). A password reset by email signs you out everywhere.
+code). A password reset by email signs you out everywhere and revokes your
+API tokens; so does a two-factor reset, and so does changing your password
+unless you untick **Also revoke my API tokens**. Creating a token, or
+approving the CLI's login, asks for your password and code if you haven't
+confirmed them in the last 10 minutes.
 
 ### Getting around
 
@@ -70,7 +79,10 @@ Org owners and admins are admins of every project in the organisation.
 optionally project roles; **Project Settings → Members** adds someone to one project
 (they join the organisation as a member). Invitations last 7 days and can
 be revoked until they're accepted. If the address already has an account,
-accepting just adds the membership.
+accepting just adds the membership. Someone already in the organisation
+isn't invited again: change their role, or add them to a project, instead. An organisation can send 100
+invitations in any 24 hours, and each person 50 (the platform admin may
+change both); past that, wait for the time the error gives.
 
 You can **leave** an organisation yourself (Organisation → Leave), unless
 you are its last owner: transfer ownership first.
@@ -106,8 +118,15 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   after a TTL (1 hour to 30 days, 7 days by default); the creator is emailed
   a day before.
 - **Reset** refills it from the parent, keeping its name, URL and
-  passwords, so `.env` files and pipelines keep working.
+  passwords, so `.env` files and pipelines keep working. Since it copies
+  the parent again, it needs the developer role on the parent as well as
+  on the branch, and refilling a full-data branch of a project marked
+  *contains sensitive data* needs the parent's admin role. Removing
+  someone from a project removes them from its branches too.
 - **Detach** makes it an ordinary project (which can then be promoted).
+  It counts as a new project: it needs permission to create projects in
+  the organisation and room in its projects quota, and waits until the
+  branch is active with nothing in progress.
 - **With backend services** on the parent, the branch gets an API of its
   own: a new URL (ref), new publishable and secret keys and a new signing
   key, so neither's keys or users' tokens work on the other. It keeps the
@@ -119,8 +138,12 @@ feature, or one per pull request in CI ([CLI guide](cli.md#a-database-branch-per
   `xenibase branch create --env` give `XENIBASE_API_URL`,
   `XENIBASE_PUBLISHABLE_KEY` and `XENIBASE_SECRET_KEY`. Stored files are not
   copied unless you ask (**Copy its stored files too**, or `--copy-files`):
-  they are then copied in the background and count toward file storage.
-- A branch can't have branches. Its parent's webhooks and jobs are not
+  they are then copied in the background, again after every reset, and
+  count toward file storage. A reset removes the files the branch stored
+  that its refilled data no longer names, its own uploads included.
+- A branch can't have branches, and stays in its parent's organisation:
+  a branch, or a project with branches, can't be transferred (detach or
+  delete the branches first). Its parent's webhooks and jobs are not
   copied. Branches count against your organisation's branch and storage
   quotas, and have no nightly backups unless you turn them on.
 
@@ -197,11 +220,35 @@ storage:
 - at **90%** of a project's limit you get an email and a banner;
 - at **100%** it is read-only by default (apps can still delete inside
   `BEGIN READ WRITE`; the console works, scheduled jobs' writes fail);
-- at **120%** apps can't connect, but the console still works so you can
-  delete data and **Reclaim space**.
+- at **120%**, or if it keeps growing while read-only (by 5% of the
+  limit), apps can't connect, but the console still works so you can
+  delete data and **Reclaim space**. Apps can connect again once the
+  project is back under its limit.
 
 Statements running over 10 minutes, and transactions idle over 5, are
 ended on the shared tier.
+
+### Connections
+
+A project's **connection limit** (Project Settings → Connections and timeouts → **Max
+backend connections**) caps how many connections its logins hold open to
+Postgres. It is not the number of clients your apps can open: those
+connect to the pooler (up to 2,000 on each port). In transaction mode,
+port 6543, many clients share a small pool of Postgres connections; in
+session mode, port 5432 (needed for `LISTEN/NOTIFY` and migrations), each
+client holds one.
+
+- **Shared projects**: 20 by default, up to your plan's limit.
+- **Dedicated projects**: 90 by default. Each Postgres connection is a
+  process, so how many an instance holds depends on its memory:
+  `max_connections` is 50 per GB, from 100 (2 GB or less) to 500 (10 GB
+  or more), for example 200 on a 4 GB instance and 400 on 8 GB. The
+  project can have all of it but 10, which Xenibase keeps for backups,
+  replication, probes and backend services: up to 190 on 4 GB. The
+  panel shows the most this instance allows. Resizing to less
+  memory lowers the limit to fit.
+
+Instances created before connections grew with memory keep 100 until they are resized.
 
 ## Free projects that sleep
 
@@ -238,7 +285,8 @@ the organisation, and can also accept them when changing plan. Details:
 - The platform admin can't open your databases, console or backups through
   Xenibase except with **break-glass** access: at most 4 hours, with a reason,
   emailed to every owner, shown as a banner while it lasts, and marked in
-  your audit log. Any owner can end it. It is an audit control, not
+  your audit log. Any owner can end it, and it can't invite anyone or
+  change roles, so it can't become lasting access. It is an audit control, not
   encryption: someone with root on the servers can read the data.
 - **Deleting an organisation** (owners, Organisation → Delete) takes each
   project's final backup and gives a 7-day grace period in which an owner

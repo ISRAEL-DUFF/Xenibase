@@ -60,10 +60,39 @@ type Limits interface {
 	Limits(ctx context.Context, orgID uuid.UUID) (store.Limits, store.OrgWithPlanRow, error)
 }
 
+// Defaults of Config.
+const (
+	// DefaultListenMax is how many LISTEN connections the deliverer holds
+	// to one instance at most.
+	DefaultListenMax = 50
+	// DefaultIdleAfter is how long a project's outbox stays empty before
+	// its LISTEN connection is released.
+	DefaultIdleAfter = 10 * time.Minute
+	// DefaultIdlePoll is how often the outbox of a project without a
+	// LISTEN connection is read.
+	DefaultIdlePoll = 30 * time.Second
+)
+
 // Config tunes the service.
 type Config struct {
-	// Poll is the fallback interval between outbox reads (V2 §9.1: 5s).
+	// Poll is the fallback interval between outbox reads of a project the
+	// deliverer LISTENs on, and between reads of one with events waiting
+	// (V2 §9.1: 5s).
 	Poll time.Duration
+	// ListenMax caps the LISTEN connections held to one instance
+	// (XENIBASE_WEBHOOK_LISTEN_MAX): they are direct admin connections,
+	// outside the poolers, and count against the instance's
+	// max_connections. Projects past the cap are polled. 0 means
+	// DefaultListenMax; negative means none, and every project is polled.
+	ListenMax int
+	// IdleAfter releases a project's LISTEN connection once its outbox has
+	// been empty this long (XENIBASE_WEBHOOK_IDLE_AFTER, default 10m); the
+	// project is polled until events come again.
+	IdleAfter time.Duration
+	// IdlePoll is how often a project without a LISTEN connection has its
+	// outbox read, over a connection opened for that read
+	// (XENIBASE_WEBHOOK_IDLE_POLL, default 30s).
+	IdlePoll time.Duration
 	// Now is the clock (tests move it).
 	Now func() time.Time
 	// PublicURL links emails to the UI.
@@ -84,6 +113,21 @@ type Service struct {
 	mu       sync.Mutex
 	kicks    map[uuid.UUID]chan struct{}
 	outboxed map[uuid.UUID]bool // projects already alerted for a large outbox
+	// held is the LISTEN connections held per instance, and listening the
+	// instance each project holds one to.
+	held      map[uuid.UUID]int
+	listening map[uuid.UUID]uuid.UUID
+
+	// What a delivery loop uses; tests replace them.
+	loop loopDeps
+}
+
+// loopDeps are a delivery loop's reads and connections.
+type loopDeps struct {
+	project func(ctx context.Context, id uuid.UUID) (store.Project, error)
+	connect func(ctx context.Context, p store.Project) (*pgx.Conn, error)
+	pass    func(ctx context.Context, conn *pgx.Conn, p store.Project) (busy bool, err error)
+	health  func(ctx context.Context, conn *pgx.Conn, p store.Project)
 }
 
 // New returns a Service.
@@ -94,8 +138,29 @@ func New(db *pgxpool.Pool, keyring *crypto.Keyring, ps *provision.Service, out *
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Service{db: db, keyring: keyring, projects: ps, out: out, limits: limits, mail: m, cfg: cfg, log: log,
-		kicks: map[uuid.UUID]chan struct{}{}, outboxed: map[uuid.UUID]bool{}}
+	if cfg.ListenMax == 0 {
+		cfg.ListenMax = DefaultListenMax
+	}
+	if cfg.IdleAfter <= 0 {
+		cfg.IdleAfter = DefaultIdleAfter
+	}
+	if cfg.IdlePoll <= 0 {
+		cfg.IdlePoll = DefaultIdlePoll
+	}
+	s := &Service{db: db, keyring: keyring, projects: ps, out: out, limits: limits, mail: m, cfg: cfg, log: log,
+		kicks: map[uuid.UUID]chan struct{}{}, outboxed: map[uuid.UUID]bool{},
+		held: map[uuid.UUID]int{}, listening: map[uuid.UUID]uuid.UUID{}}
+	s.loop = loopDeps{
+		project: func(ctx context.Context, id uuid.UUID) (store.Project, error) {
+			return store.New(s.db).GetProject(ctx, id)
+		},
+		connect: func(ctx context.Context, p store.Project) (*pgx.Conn, error) {
+			return s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+		},
+		pass:   s.deliverProject,
+		health: s.health,
+	}
+	return s
 }
 
 func secretAAD(id uuid.UUID) []byte  { return []byte("webhooks.secret:" + id.String()) }

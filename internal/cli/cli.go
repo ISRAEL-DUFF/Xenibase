@@ -225,7 +225,8 @@ func (a *App) commands() []command {
 		}},
 		{name: "replicas", summary: "Read replicas of a dedicated project", sub: []command{
 			{name: "list", summary: "Replicas, lag, rotation and the read-only URL: list <p>", run: (*App).replicasList},
-			{name: "create", summary: "Add one (up to 2): create <p> [--node <id>] [--region <r>]", run: (*App).replicasCreate},
+			{name: "create", summary: "Add one (up to 2): create <p> [--node <id>] [--region <r>] [--feedback on|off] [--standby-delay <s>]", run: (*App).replicasCreate},
+			{name: "set", summary: "Standby settings: set <p> <replica-id> [--feedback on|off] [--standby-delay <s>]", run: (*App).replicasSet},
 			{name: "delete", summary: "Remove one: delete <p> <replica-id>", run: (*App).replicasDelete},
 			{name: "detach", summary: "Make one a standalone project: detach <p> <replica-id> --name <new>", run: (*App).replicasDetach},
 		}},

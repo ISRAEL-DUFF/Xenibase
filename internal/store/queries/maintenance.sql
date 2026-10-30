@@ -13,13 +13,23 @@ WHERE id = @id;
 
 -- InstancesBehind lists running instances whose image has another release;
 -- the caller keeps the ones where it is newer. Dedicated instances go
--- first: each restart there pauses one project, not a cluster's worth.
+-- first: each restart there pauses one project, not a cluster's worth. An
+-- instance whose last upgrade to that release failed is left out, so the
+-- sweep moves on to the others; a newer release, or the admin's Run now,
+-- tries it again.
 -- name: InstancesBehind :many
 -- tenant: system - the maintenance sweep reads every running instance.
-SELECT * FROM instances
-WHERE deleted_at IS NULL AND status = 'running'
-  AND pg_release IS NOT NULL AND pg_release_available IS NOT NULL AND pg_release <> pg_release_available
-ORDER BY kind = 'shared', created_at;
+SELECT * FROM instances i
+WHERE i.deleted_at IS NULL AND i.status = 'running'
+  AND i.pg_release IS NOT NULL AND i.pg_release_available IS NOT NULL AND i.pg_release <> i.pg_release_available
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT m.error, m.to_release FROM minor_upgrades m
+      WHERE m.instance_id = i.id AND m.finished_at IS NOT NULL
+      ORDER BY m.started_at DESC LIMIT 1
+    ) last
+    WHERE last.error IS NOT NULL AND last.to_release = i.pg_release_available)
+ORDER BY i.kind = 'shared', i.created_at;
 
 -- InstanceBusy reports whether a project on the instance is in the middle
 -- of something (a move, a restore, a queued operation) that a restart
@@ -57,3 +67,32 @@ ORDER BY m.started_at DESC LIMIT @lim;
 SELECT m.*, i.kind, n.name AS node_name
 FROM minor_upgrades m JOIN instances i ON i.id = m.instance_id JOIN nodes n ON n.id = i.node_id
 WHERE m.id = @id;
+
+-- InstanceMinorUpgradeActive reports a minor upgrade queued or running on
+-- the instance: its projects take no other exclusive operation meanwhile.
+-- name: InstanceMinorUpgradeActive :one
+-- tenant: system - the maintenance sweep and the exclusive-operation check of a project already resolved.
+SELECT EXISTS (
+  SELECT 1 FROM operations
+  WHERE kind = 'minor_upgrade' AND status IN ('queued', 'running') AND params @> jsonb_build_object('instance_id', @instance_id::uuid)
+)::bool;
+
+-- name: MinorUpgradeActive :one
+-- tenant: system - the maintenance sweep upgrades one instance at a time.
+SELECT EXISTS (SELECT 1 FROM operations WHERE kind = 'minor_upgrade' AND status IN ('queued', 'running'))::bool;
+
+-- InterruptedMinorUpgrades lists runs that never finished and that no
+-- operation will finish: a server stopped part-way (before minor upgrades
+-- were operations), or an operation's OnFail did not get to it.
+-- name: InterruptedMinorUpgrades :many
+-- tenant: system - the maintenance sweep records its own runs.
+SELECT m.* FROM minor_upgrades m
+WHERE m.finished_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM operations o
+    WHERE o.kind = 'minor_upgrade' AND o.status IN ('queued', 'running') AND o.params->>'run_id' = m.id::text)
+ORDER BY m.started_at;
+
+-- name: FailUnfinishedMinorUpgrade :exec
+-- tenant: system - the maintenance sweep records its own runs.
+UPDATE minor_upgrades SET finished_at = now(), error = @error::text WHERE id = @id AND finished_at IS NULL;

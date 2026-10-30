@@ -49,6 +49,7 @@ func (e *Env) CreateToken(req map[string]any) string {
 	var out struct {
 		Secret string `json:"secret"`
 	}
+	e.Reauth() // a session creates a token only after a recent step-up
 	if code := e.Do("POST", "/api/v1/tokens", req, &out); code != http.StatusCreated {
 		e.t.Fatalf("create token %v: status %d", req, code)
 	}

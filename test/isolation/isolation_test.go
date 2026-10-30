@@ -10,9 +10,11 @@ package isolation
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
@@ -178,6 +180,18 @@ func TestTenantIsolation(t *testing.T) {
 		// pg_stat_activity at all, not even other sessions' names.
 		mustFail(t, a.conn, `SELECT count(*) FROM pg_stat_activity`, "permission denied")
 		mustFail(t, a.conn, `SELECT count(*) FROM pg_stat_get_activity(NULL)`, "permission denied")
+		// Nor B's database's activity, or B's backends' database and role.
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_stat_database`, "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_stat_database_conflicts`, "permission denied")
+		mustFail(t, a.conn, `SELECT pg_stat_get_db_xact_commit(oid) FROM pg_database WHERE datname = '`+b.db()+`'`, "permission denied")
+		mustFail(t, a.conn, `SELECT pg_stat_get_db_numbackends(oid) FROM pg_database WHERE datname = '`+b.db()+`'`, "permission denied")
+		mustFail(t, a.conn, `SELECT pg_stat_get_backend_dbid(s) FROM pg_stat_get_backend_idset() s`, "permission denied")
+		mustFail(t, a.conn, `SELECT pg_stat_get_backend_userid(s) FROM pg_stat_get_backend_idset() s`, "permission denied")
+		// Nor which databases have backends and what they lock.
+		mustFail(t, a.conn, `SELECT d.datname, l.pid, l.relation FROM pg_locks l JOIN pg_database d ON d.oid = l.database`, "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_lock_status()`, "permission denied")
+		mustFail(t, a.conn, "SELECT pg_blocking_pids("+itoa(bpid)+")", "permission denied")
+		mustFail(t, a.conn, `SELECT count(*) FROM pg_prepared_xacts`, "permission denied")
 		mustFail(t, a.conn, "SELECT pg_terminate_backend("+itoa(bpid)+")", "permission denied", "must be a member")
 		mustFail(t, a.conn, "SELECT pg_cancel_backend("+itoa(bpid)+")", "permission denied", "must be a member")
 		if _, err := b.conn.Exec(ctx, "SELECT 1"); err != nil {
@@ -294,7 +308,7 @@ func TestTenantIsolation(t *testing.T) {
 }
 
 // TestClusterConfiguration checks the cluster-wide items of spec §7.1
-// with the same checker the weekly live check runs.
+// with the same checker the live check runs every 24 hours.
 func TestClusterConfiguration(t *testing.T) {
 	e := testenv.Start(t, testenv.Options{})
 	admin := e.SharedAdmin("postgres")
@@ -307,13 +321,26 @@ func TestClusterConfiguration(t *testing.T) {
 	}
 }
 
-// TestLiveIsolationCheck runs the weekly isolation_check operation through
-// the API: it passes on a correctly provisioned cluster, and a violation
-// of any kind makes it fail with a finding.
+// TestLiveIsolationCheck runs the isolation_check operation (every 24
+// hours in production) through the API: it passes on a correctly
+// provisioned cluster, with a project's backend services on, and a
+// violation of any kind makes it fail with a finding.
 func TestLiveIsolationCheck(t *testing.T) {
 	e := testenv.Start(t, testenv.Options{})
 	ctx := context.Background()
 	p := e.CreateProject("audited")
+	other := e.CreateProject("neighbour")
+	enableServices := func(id uuid.UUID) {
+		t.Helper()
+		var en gen.BackendServicesEnabled
+		if code := e.Do("POST", "/api/v1/projects/"+id.String()+"/services", nil, &en); code != http.StatusAccepted {
+			t.Fatalf("enable services: %d", code)
+		}
+		if op := e.WaitOperation(en.Operation.Id); op.Status != gen.OperationStatusSucceeded {
+			t.Fatalf("enable services: %s\n%s", op.Status, testenv.FormatLog(op))
+		}
+	}
+	enableServices(p.Project.Id)
 
 	run := func() gen.Operation {
 		t.Helper()
@@ -353,6 +380,10 @@ func TestLiveIsolationCheck(t *testing.T) {
 	// Each violation is found, then undone.
 	db := pgx.Identifier{p.Project.DbName}.Sanitize()
 	role := pgx.Identifier{p.Project.OwnerRole}.Sanitize()
+	anon := pgx.Identifier{p.Project.DbName + "_anon"}.Sanitize()
+	edge := pgx.Identifier{p.Project.DbName + "_edge"}.Sanitize()
+	service := pgx.Identifier{p.Project.DbName + "_service"}.Sanitize()
+	neighbour := pgx.Identifier{other.Project.OwnerRole}.Sanitize()
 	projectDB := e.SharedAdmin(p.Project.DbName)
 	for _, v := range []struct {
 		name, finding string
@@ -364,10 +395,20 @@ func TestLiveIsolationCheck(t *testing.T) {
 		{"role joins pg_read_all_data", "role memberships", admin, "GRANT pg_read_all_data TO " + role, "REVOKE pg_read_all_data FROM " + role},
 		{"PUBLIC may create in public", "schema public", projectDB, "GRANT CREATE ON SCHEMA public TO PUBLIC", "REVOKE CREATE ON SCHEMA public FROM PUBLIC"},
 		{"dblink installed", "escape-prone extensions", projectDB, "CREATE EXTENSION dblink", "DROP EXTENSION dblink"},
+		{"PUBLIC may read pg_stat_database", "activity privacy", projectDB, "GRANT SELECT ON pg_catalog.pg_stat_database TO PUBLIC", "REVOKE SELECT ON pg_catalog.pg_stat_database FROM PUBLIC"},
+		{"PUBLIC may run pg_stat_get_backend_dbid", "activity privacy", projectDB, "GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_get_backend_dbid(integer) TO PUBLIC", "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_stat_get_backend_dbid(integer) FROM PUBLIC"},
+		{"PUBLIC may read pg_locks", "activity privacy", projectDB, "GRANT SELECT ON pg_catalog.pg_locks TO PUBLIC", "REVOKE SELECT ON pg_catalog.pg_locks FROM PUBLIC"},
 		// V2 §10.2, §10.4, §10.8.
 		{"a descriptive database name", "metadata leak", admin, "CREATE DATABASE customer_invoices", "DROP DATABASE customer_invoices"},
 		{"no temp_file_limit", "temp_file_limit", admin, "ALTER ROLE " + role + " RESET temp_file_limit", "ALTER ROLE " + role + " SET temp_file_limit = '2GB'"},
 		{"no connection limit", "connection limit", admin, "ALTER ROLE " + role + " CONNECTION LIMIT -1", "ALTER ROLE " + role + " CONNECTION LIMIT 20"},
+		// The backend services' logins, and grants to other projects.
+		{"a request role without temp_file_limit", "temp_file_limit", admin, "ALTER ROLE " + anon + " RESET temp_file_limit", "ALTER ROLE " + anon + " SET temp_file_limit = '2GB'"},
+		{"a request role gains CREATEROLE", "role attributes", admin, "ALTER ROLE " + anon + " CREATEROLE", "ALTER ROLE " + anon + " NOCREATEROLE"},
+		{"the edge may become the service role", "service logins", admin, "GRANT " + service + " TO " + edge, "REVOKE " + service + " FROM " + edge},
+		{"another project's owner may connect", "database grants", admin, "GRANT CONNECT ON DATABASE " + db + " TO " + neighbour, "REVOKE CONNECT ON DATABASE " + db + " FROM " + neighbour},
+		{"a superuser's SECURITY DEFINER function", "security definer", projectDB,
+			"CREATE FUNCTION public.xenibase_escalate() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'", "DROP FUNCTION public.xenibase_escalate()"},
 	} {
 		if _, err := v.conn.Exec(ctx, v.do); err != nil {
 			t.Fatalf("%s: %v", v.name, err)
@@ -388,6 +429,7 @@ func TestLiveIsolationCheck(t *testing.T) {
 	// then switch one back on behind Xenibase's back.
 	team := e.CreateOrg("Isolated team")
 	tp := e.CreateProjectIn("suspended app", team)
+	enableServices(tp.Project.Id)
 	e.Reauth()
 	if code := e.Do("POST", "/api/v1/admin/orgs/"+team.String()+"/suspend", map[string]string{"reason": "test"}, nil); code != http.StatusNoContent {
 		t.Fatalf("suspend: %d", code)
@@ -405,6 +447,91 @@ func TestLiveIsolationCheck(t *testing.T) {
 	}
 	if _, err := admin.Exec(ctx, "ALTER ROLE "+tRole+" NOLOGIN"); err != nil {
 		t.Fatal(err)
+	}
+	// So must its backend services' logins, which tenant SQL runs as.
+	tAnon := pgx.Identifier{tp.Project.DbName + "_anon"}.Sanitize()
+	if _, err := admin.Exec(ctx, "ALTER ROLE "+tAnon+" LOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	op = run()
+	if op.Status != gen.OperationStatusFailed || !strings.Contains(deref(op.Error), "suspended logins") {
+		t.Errorf("a suspended project whose request role can log in: %s (%s)", op.Status, deref(op.Error))
+	}
+	if _, err := admin.Exec(ctx, "ALTER ROLE "+tAnon+" NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReadOnlyConsoleCannotBecomeOwner: a read-scope token (and so a
+// read_only member) runs console SQL as the read-only role, and a
+// statement that switches role inside itself cannot reach the owner:
+// neither rows RLS hides from <db>_ro nor tables never granted to it.
+func TestReadOnlyConsoleCannotBecomeOwner(t *testing.T) {
+	e := testenv.Start(t, testenv.Options{})
+	ctx := context.Background()
+	p := e.CreateProject("read-only console")
+	conn := e.MustConnect(p.Connection.SessionUrl)
+	ro := p.Project.DbName + "_ro"
+	read := e.CreateToken(map[string]any{"name": "reader", "org_id": e.OrgID, "scopes": []string{"read"}})
+	path := "/api/v1/projects/" + p.Project.Id.String() + "/sql"
+	// The read-only role is made with the console's logins, on the first
+	// session; the policy below names it.
+	yes := true
+	if code, raw := e.BearerDo(read, "POST", path, gen.SqlRequest{Query: "SELECT 1", QueryId: uuid.New(), ReadOnly: &yes}, nil); code != http.StatusOK {
+		t.Fatalf("first read-only session: status %d %s", code, raw)
+	}
+	for _, q := range []string{
+		`CREATE TABLE t (v text, visible bool)`,
+		`INSERT INTO t VALUES ('shown', true), ('rls-hidden', false)`,
+		`ALTER TABLE t ENABLE ROW LEVEL SECURITY`,
+		`CREATE POLICY only_visible ON t FOR SELECT TO ` + pgx.Identifier{ro}.Sanitize() + ` USING (visible)`,
+		`GRANT SELECT ON t TO ` + pgx.Identifier{ro}.Sanitize(),
+		`CREATE TABLE owner_only (v text)`,
+		`INSERT INTO owner_only VALUES ('never-granted')`,
+		`REVOKE SELECT ON owner_only FROM ` + pgx.Identifier{ro}.Sanitize(),
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	owner := "'" + p.Project.OwnerRole + "'"
+	for _, q := range []string{
+		`SELECT set_config('role', ` + owner + `, true), query_to_xml('SELECT * FROM t', true, false, '')`,
+		`SELECT set_config('role', ` + owner + `, true), query_to_xml('SELECT * FROM owner_only', true, false, '')`,
+		`SET ROLE ` + pgx.Identifier{p.Project.OwnerRole}.Sanitize(),
+	} {
+		var res gen.SqlResult
+		ro := true
+		code, raw := e.BearerDo(read, "POST", path, gen.SqlRequest{Query: q, QueryId: uuid.New(), ReadOnly: &ro}, &res)
+		if code != http.StatusOK {
+			t.Fatalf("%s: status %d %s", q, code, raw)
+		}
+		if res.Error == nil || deref(res.Error.Code) != "42501" {
+			t.Errorf("%s: read-only session was not refused: %s", q, raw)
+		}
+		if s := string(raw); strings.Contains(s, "rls-hidden") || strings.Contains(s, "never-granted") {
+			t.Errorf("%s: read-only session read as the owner: %s", q, raw)
+		}
+	}
+	// The table browser's raw filter runs in the same kind of session.
+	where := url.QueryEscape(`set_config('role', ` + owner + `, true) IS NOT NULL AND query_to_xml('SELECT * FROM owner_only', true, false, '')::text <> ''`)
+	code, raw := e.BearerDo(read, "GET", "/api/v1/projects/"+p.Project.Id.String()+"/tables/public/t/rows?where="+where, nil, nil)
+	if s := string(raw); code == http.StatusOK || strings.Contains(s, "rls-hidden") || strings.Contains(s, "never-granted") {
+		t.Errorf("raw filter as the owner: %d %s", code, raw)
+	}
+	// And the isolation check finds a read-only console login that could.
+	admin := e.SharedAdmin("postgres")
+	tenant := []isocheck.Tenant{{DB: p.Project.DbName, Role: p.Project.OwnerRole}}
+	if f, err := isocheck.Roles(ctx, admin, tenant); err != nil || len(f) > 0 {
+		t.Fatalf("clean roles: %v %v", f, err)
+	}
+	login := pgx.Identifier{p.Project.DbName + "_console_ro"}.Sanitize()
+	if _, err := admin.Exec(ctx, "GRANT "+pgx.Identifier{p.Project.OwnerRole}.Sanitize()+" TO "+login+" WITH INHERIT FALSE, SET TRUE"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := isocheck.Roles(ctx, admin, tenant)
+	if err != nil || len(f) == 0 || !strings.Contains(f[0].String(), "console logins") {
+		t.Errorf("owner granted to the read-only console login: findings %v %v", f, err)
 	}
 }
 

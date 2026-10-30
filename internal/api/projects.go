@@ -13,6 +13,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
+	"github.com/israel-duff/xenibase/internal/tenancy"
 )
 
 // ListProjects implements GET /api/v1/projects.
@@ -98,6 +99,12 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Choosing the node is placement, the platform's: a tenant could
+	// otherwise put instances next to anyone's.
+	if req.NodeId != nil && !acc.Actor.PlatformAdmin {
+		writeError(w, http.StatusForbidden, "forbidden", "only platform admins choose the node; leave node_id out")
+		return
+	}
 	a := auditFrom(r.Context())
 	a.set("name", req.Name)
 	cp := provision.CreateParams{OrgID: acc.OrgID, CreatorRole: creatorRole(acc),
@@ -173,7 +180,7 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, _ gen.Projec
 	if i, ok := s.instanceSummaries(r.Context())[p.InstanceID]; ok {
 		gp.Instance = &i
 	}
-	if n, err := store.New(s.db).CountLiveBranches(r.Context(), &p.ID); err == nil && n > 0 {
+	if n, err := store.New(s.db).CountLiveBranches(r.Context(), store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err == nil && n > 0 {
 		bn := int(n)
 		gp.BranchCount = &bn
 	}
@@ -279,6 +286,8 @@ func (s *Server) toAPIProject(p store.Project) (gen.Project, error) {
 		Connection:             toAPIConnection(s.projects.ConnectionFor(p), ""),
 		Region:                 &p.Region,
 		DataResidency:          &p.DataResidency,
+		ManageRoles:            &p.ManageRoles,
+		AllowedCidrs:           allowedOrEmpty(p.AllowedCidrs),
 		ForwardRegion:          p.ForwardRegion,
 		ForwardUntil:           p.ForwardUntil,
 		StorageState:           ptrTo(gen.StorageState(p.StorageState)),
@@ -340,7 +349,11 @@ func (s *Server) requireProjects(w http.ResponseWriter) bool {
 }
 
 func (s *Server) provisionError(w http.ResponseWriter, what string, err error) {
+	// A quota counted again as the create was recorded (tenancy's claim).
+	var qe *tenancy.QuotaError
 	switch {
+	case errors.As(err, &qe):
+		writeQuotaError(w, qe)
 	case errors.Is(err, provision.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, provision.ErrNotFound):
@@ -379,4 +392,79 @@ func provisionUpdate(req gen.UpdateProjectRequest) provision.UpdateParams {
 		}
 	}
 	return p
+}
+
+// networkOut is a project's IP allowlist as the API shows it.
+func (s *Server) networkOut(r *http.Request, cidrs []string) gen.ProjectNetwork {
+	if cidrs == nil {
+		cidrs = []string{}
+	}
+	out := gen.ProjectNetwork{AllowedCidrs: cidrs}
+	if ip := s.clientIP(r); ip.IsValid() {
+		str, ok := ip.Unmap().String(), provision.AllowedFrom(cidrs, ip)
+		out.YourIp, out.YourIpAllowed = &str, &ok
+	}
+	return out
+}
+
+// GetProjectNetwork implements GET /api/v1/projects/{id}/network.
+func (s *Server) GetProjectNetwork(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "project network", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.networkOut(r, p.AllowedCidrs))
+}
+
+// SetProjectNetwork implements PUT /api/v1/projects/{id}/network: the
+// project's IP allowlist, applied to every pooler of its region.
+func (s *Server) SetProjectNetwork(w http.ResponseWriter, r *http.Request, id gen.ProjectID) {
+	var req gen.ProjectNetworkRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	cidrs, err := provision.NormalizeAllowedCIDRs(req.AllowedCidrs)
+	if err != nil {
+		s.provisionError(w, "project network", err)
+		return
+	}
+	a := auditFrom(r.Context())
+	a.target("project", id.String())
+	a.projectID = id
+	p, err := s.projects.Get(r.Context(), id)
+	if err != nil {
+		s.provisionError(w, "project network", err)
+		return
+	}
+	a.set("before", p.AllowedCidrs)
+	a.set("allowed_cidrs", cidrs)
+	p, err = store.New(s.db).SetProjectAllowedCIDRs(r.Context(), store.SetProjectAllowedCIDRsParams{ID: id, AllowedCidrs: cidrs})
+	if err != nil {
+		s.internalError(w, "project network", err)
+		return
+	}
+	if pm := s.projects.Pooler(); pm != nil {
+		if err := pm.Sync(r.Context()); err != nil {
+			s.internalError(w, "project network: pooler sync", err)
+			return
+		}
+		// HBA rules apply at login: drop clients already connected from
+		// addresses the list no longer admits.
+		n, err := pm.DropDisallowed(r.Context(), p, p.AllowedCidrs)
+		if err != nil {
+			s.log.Warn("project network: drop disallowed clients", "project_id", p.ID, "err", err)
+		}
+		if n > 0 {
+			a.set("dropped_connections", n)
+		}
+	}
+	writeJSON(w, http.StatusOK, s.networkOut(r, p.AllowedCidrs))
+}
+
+func allowedOrEmpty(c []string) *[]string {
+	if c == nil {
+		c = []string{}
+	}
+	return &c
 }

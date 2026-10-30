@@ -80,28 +80,41 @@ Fixes M27 made on the way, all covered by the tests above:
    don't offer HA in Lagos yet ([HA](ha.md), [failure domains](failure-domains.md)).
 10. Open the **waker port** (`XENIBASE_WAKER_ADDR`) from the Lagos pooler
     hosts to xenibase-server, and check `waker_down` isn't firing.
+11. **Backend services** (if Lagos projects use the data API, auth, files
+    or realtime): give the region its own **API domain**
+    (`ng.api.<your domain>`), with a wildcard DNS record and certificate
+    for it, and run xenibase-edge in Lagos with
+    `XENIBASE_EDGE_DOMAIN=ng.api.<your domain>`,
+    `XENIBASE_EDGE_REGION=ng-lagos`, and an edge credential for `ng-lagos`
+    as its `XENIBASE_EDGE_SECRET` ([Regions](regions.md#a-regions-api-domain)).
+    Without it, Lagos projects' API calls go through the home region.
+12. **Early access** for the rehearsals: add your own organisation to the
+    region's **Early-access organisations**, so you can create projects
+    there while it is hidden. Add a first customer here too if they start
+    before everyone else.
 
 ### Rehearsals in Lagos (with a client writing throughout)
 
-11. **Kill the pooler host** holding the floating IP: queries are back
+13. **Kill the pooler host** holding the floating IP: queries are back
     within 10 seconds (docs/edge-poolers.md).
-12. **Disconnect the pooler hosts from each other**: one `pooler_split_brain`
+14. **Disconnect the pooler hosts from each other**: one `pooler_split_brain`
     alert for `ng-lagos`, none for the home region, and the floating IP
     doesn't flap.
-13. **Kill a dedicated HA project's primary node**: writes are back within
+15. **Kill a dedicated HA project's primary node**: writes are back within
     60 seconds on the standby.
-14. **Restore a backup from the in-country bucket** and, for a project
+16. **Restore a backup from the in-country bucket** and, for a project
     without residency, from the copy target.
-15. **Stop one etcd member**, then a second for a minute: writes continue.
-16. **Pause a Free project in Lagos** and connect to it: the waker's
+17. **Stop one etcd member**, then a second for a minute: writes continue.
+18. **Pause a Free project in Lagos** and connect to it: the waker's
     message, then the project resumes.
 
 ### Opening
 
-17. Check the region's **launch checks** (Platform → Regions → the region):
+19. Check the region's **launch checks** (Platform → Regions → the region):
     every blocking one must pass, and read every warning. Then turn off
-    **Hidden**. New projects can now choose Lagos.
-18. Post an announcement through the status page, and watch for a week:
+    **Hidden**. New projects can now choose Lagos. The early-access
+    list stays; empty it once it no longer matters.
+20. Post an announcement through the status page, and watch for a week:
     alerts, pooler events, failover history, reconciliation, and the
     first month end's invoices for Lagos organisations.
 

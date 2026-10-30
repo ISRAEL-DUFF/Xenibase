@@ -59,8 +59,14 @@ func TestPausedProjectAnswersResuming(t *testing.T) {
 		{"paused", "project_resuming", "10"},
 		{"archived", "project_restoring", "60"},
 	} {
-		if _, err := e.DB.Exec(ctx, `UPDATE projects SET lifecycle = $2 WHERE id = $1`, c.Project.Id, tc.lifecycle); err != nil {
-			t.Fatal(err)
+		// Each call queues a wake, and a shared project's resume can finish
+		// before the next call: let it, and put the project back to sleep.
+		sleep := func() {
+			t.Helper()
+			awaitPay(t, "the wake", func() bool { return !busy(t, e, c.Project) })
+			if _, err := e.DB.Exec(ctx, `UPDATE projects SET lifecycle = $2 WHERE id = $1`, c.Project.Id, tc.lifecycle); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for _, r := range []struct {
 			method, path string
@@ -69,6 +75,7 @@ func TestPausedProjectAnswersResuming(t *testing.T) {
 			{"POST", "/api/v1/projects/" + pid + "/sql", map[string]any{"query": "select 1", "query_id": uuid.NewString()}},
 			{"PATCH", "/api/v1/projects/" + pid + "/webhooks/" + wh.Webhook.Id.String(), map[string]any{"enabled": true}},
 		} {
+			sleep()
 			code, h, apiErr := call(r.method, r.path, r.body)
 			if code != http.StatusServiceUnavailable || apiErr.Code != tc.code || h.Get("Retry-After") != tc.retry {
 				t.Fatalf("%s %s on a %s project: %d %+v Retry-After=%q", r.method, r.path, tc.lifecycle,
@@ -76,6 +83,7 @@ func TestPausedProjectAnswersResuming(t *testing.T) {
 			}
 		}
 		// Reads that don't need the database still answer.
+		sleep()
 		if code, _, apiErr := call("GET", "/api/v1/projects/"+pid+"/webhooks", nil); code != http.StatusOK {
 			t.Fatalf("listing webhooks on a %s project: %d %+v", tc.lifecycle, code, apiErr)
 		}

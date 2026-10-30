@@ -13,6 +13,50 @@ import (
 	"github.com/google/uuid"
 )
 
+const budgetCostTotals = `-- name: BudgetCostTotals :many
+SELECT c.currency, coalesce(sum(c.monthly_minor), 0)::bigint AS monthly_minor
+FROM (
+  SELECT n.cost_currency AS currency, n.monthly_cost_minor AS monthly_minor
+  FROM nodes n WHERE n.status <> 'removed' AND n.monthly_cost_minor IS NOT NULL
+  UNION ALL
+  SELECT p.currency, p.monthly_cost_minor
+  FROM capacity_proposals p
+  WHERE p.status IN ('approved', 'provisioning')
+    AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = p.node_id AND n.status <> 'removed' AND n.monthly_cost_minor IS NOT NULL)
+) c
+GROUP BY c.currency
+`
+
+type BudgetCostTotalsRow struct {
+	Currency     string
+	MonthlyMinor int64
+}
+
+// What counts against the capacity budget, by currency: the monthly cost
+// of every node in service, and of proposals approved or provisioning
+// whose node isn't one of those yet (a started proposal has no node until
+// its operation runs). One statement, so one snapshot: a proposal getting
+// its node meanwhile counts once.
+func (q *Queries) BudgetCostTotals(ctx context.Context) ([]BudgetCostTotalsRow, error) {
+	rows, err := q.db.Query(ctx, budgetCostTotals)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BudgetCostTotalsRow
+	for rows.Next() {
+		var i BudgetCostTotalsRow
+		if err := rows.Scan(&i.Currency, &i.MonthlyMinor); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const cancelNodeDrain = `-- name: CancelNodeDrain :execrows
 UPDATE rebalance_moves SET status = 'skipped', updated_at = now(), error = 'the drain was stopped'
 WHERE from_node = $1 AND kind = 'drain' AND status IN ('proposed', 'approved')
@@ -29,7 +73,7 @@ func (q *Queries) CancelNodeDrain(ctx context.Context, fromNode uuid.UUID) (int6
 
 const capacityNodes = `-- name: CapacityNodes :many
 
-SELECT n.id, n.name, n.private_addr, n.agent_port, n.role, n.agent_cert_fp, n.pg_admin_secret, n.capacity, n.status, n.last_heartbeat, n.created_at, n.agent_host, n.agent_version, n.registration_token, n.registration_expires_at, n.last_reachable_at, n.provider_server_id, n.pooler_generation, n.pooler_hash, n.pooler_vrrp_state, n.pooler_ready, n.pooler_checked_at, n.provider, n.region, n.server_type, n.monthly_cost_minor, n.cost_currency, n.lifecycle, n.empty_since, n.keep, n.failure_domain, n.placement_group,
+SELECT n.id, n.name, n.private_addr, n.agent_port, n.role, n.agent_cert_fp, n.pg_admin_secret, n.capacity, n.status, n.last_heartbeat, n.created_at, n.agent_host, n.agent_version, n.registration_token, n.registration_expires_at, n.last_reachable_at, n.provider_server_id, n.pooler_generation, n.pooler_hash, n.pooler_vrrp_state, n.pooler_ready, n.pooler_checked_at, n.provider, n.region, n.server_type, n.monthly_cost_minor, n.cost_currency, n.lifecycle, n.empty_since, n.keep, n.failure_domain, n.placement_group, n.retiring_at, n.retiring_from,
   (SELECT count(*) FROM instances i WHERE i.node_id = n.id AND i.deleted_at IS NULL)::int AS instances,
   (SELECT count(*) FROM instances i WHERE i.node_id = n.id AND i.deleted_at IS NULL AND i.kind = 'dedicated')::int AS dedicated_instances,
   (SELECT count(*) FROM instances i JOIN projects p ON p.instance_id = i.id AND p.deleted_at IS NULL
@@ -76,6 +120,8 @@ type CapacityNodesRow struct {
 	Keep                  bool
 	FailureDomain         *string
 	PlacementGroup        *string
+	RetiringAt            *time.Time
+	RetiringFrom          *string
 	Instances             int32
 	DedicatedInstances    int32
 	Projects              int32
@@ -131,6 +177,8 @@ func (q *Queries) CapacityNodes(ctx context.Context) ([]CapacityNodesRow, error)
 			&i.Keep,
 			&i.FailureDomain,
 			&i.PlacementGroup,
+			&i.RetiringAt,
+			&i.RetiringFrom,
 			&i.Instances,
 			&i.DedicatedInstances,
 			&i.Projects,
@@ -309,7 +357,7 @@ INSERT INTO nodes (name, private_addr, role, capacity, registration_token, regis
   provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle)
 VALUES ($1, $2, $3, '{}', $4, $5,
   $6, $7, $8, $9, $10, 'provisioning')
-RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group
+RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from
 `
 
 type InsertProvisionedNodeParams struct {
@@ -374,6 +422,8 @@ func (q *Queries) InsertProvisionedNode(ctx context.Context, arg InsertProvision
 		&i.Keep,
 		&i.FailureDomain,
 		&i.PlacementGroup,
+		&i.RetiringAt,
+		&i.RetiringFrom,
 	)
 	return i, err
 }
@@ -532,6 +582,19 @@ func (q *Queries) ListRebalanceMoves(ctx context.Context) ([]ListRebalanceMovesR
 	return items, nil
 }
 
+const lockCapacityBudget = `-- name: LockCapacityBudget :exec
+SELECT set_config('lock_timeout', '30s', true), pg_advisory_xact_lock(hashtext('xenibase_capacity_budget'))
+`
+
+// Holds the budget until the transaction ends, so a budget check and the
+// start it allows are one step across Evaluate passes and HostFor calls
+// on every server. A waiter gives up after 30 seconds rather than hold
+// its connection indefinitely.
+func (q *Queries) LockCapacityBudget(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockCapacityBudget)
+	return err
+}
+
 const lockCapacityProposal = `-- name: LockCapacityProposal :one
 SELECT id, region, tier, reason, provider, server_type, location, monthly_cost_minor, currency, status, auto, node_id, operation_id, error, decided_by, decided_at, created_at, updated_at FROM capacity_proposals WHERE id = $1 FOR UPDATE
 `
@@ -558,6 +621,69 @@ func (q *Queries) LockCapacityProposal(ctx context.Context, id uuid.UUID) (Capac
 		&i.DecidedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockNodeForPlacement = `-- name: LockNodeForPlacement :one
+SELECT lifecycle FROM nodes WHERE id = $1 AND status <> 'removed' FOR SHARE
+`
+
+// A project's placement on a node holds the node's row until it commits,
+// so the empty-node sweep either counts the project or has already taken
+// the node out (lifecycle 'retiring').
+func (q *Queries) LockNodeForPlacement(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, lockNodeForPlacement, id)
+	var lifecycle string
+	err := row.Scan(&lifecycle)
+	return lifecycle, err
+}
+
+const lockNodeForRetire = `-- name: LockNodeForRetire :one
+SELECT id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from FROM nodes WHERE id = $1 AND status <> 'removed' FOR UPDATE
+`
+
+// The empty-node sweep holds a node's row while it counts what is on it
+// and changes its lifecycle; a project placed on the node holds it FOR
+// SHARE (LockNodeForPlacement).
+func (q *Queries) LockNodeForRetire(ctx context.Context, id uuid.UUID) (Node, error) {
+	row := q.db.QueryRow(ctx, lockNodeForRetire, id)
+	var i Node
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.PrivateAddr,
+		&i.AgentPort,
+		&i.Role,
+		&i.AgentCertFp,
+		&i.PgAdminSecret,
+		&i.Capacity,
+		&i.Status,
+		&i.LastHeartbeat,
+		&i.CreatedAt,
+		&i.AgentHost,
+		&i.AgentVersion,
+		&i.RegistrationToken,
+		&i.RegistrationExpiresAt,
+		&i.LastReachableAt,
+		&i.ProviderServerID,
+		&i.PoolerGeneration,
+		&i.PoolerHash,
+		&i.PoolerVrrpState,
+		&i.PoolerReady,
+		&i.PoolerCheckedAt,
+		&i.Provider,
+		&i.Region,
+		&i.ServerType,
+		&i.MonthlyCostMinor,
+		&i.CostCurrency,
+		&i.Lifecycle,
+		&i.EmptySince,
+		&i.Keep,
+		&i.FailureDomain,
+		&i.PlacementGroup,
+		&i.RetiringAt,
+		&i.RetiringFrom,
 	)
 	return i, err
 }
@@ -634,38 +760,6 @@ func (q *Queries) NextNodeNumber(ctx context.Context, prefix string) (int32, err
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
-}
-
-const nodeCostTotals = `-- name: NodeCostTotals :many
-SELECT cost_currency AS currency, coalesce(sum(monthly_cost_minor), 0)::bigint AS monthly_minor
-FROM nodes WHERE status <> 'removed' AND monthly_cost_minor IS NOT NULL
-GROUP BY cost_currency
-`
-
-type NodeCostTotalsRow struct {
-	Currency     string
-	MonthlyMinor int64
-}
-
-// The monthly cost of every node in service, by currency.
-func (q *Queries) NodeCostTotals(ctx context.Context) ([]NodeCostTotalsRow, error) {
-	rows, err := q.db.Query(ctx, nodeCostTotals)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []NodeCostTotalsRow
-	for rows.Next() {
-		var i NodeCostTotalsRow
-		if err := rows.Scan(&i.Currency, &i.MonthlyMinor); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const nodeMetricSeries = `-- name: NodeMetricSeries :many
@@ -764,6 +858,39 @@ func (q *Queries) NodeOccupancy(ctx context.Context) ([]NodeOccupancyRow, error)
 	return items, nil
 }
 
+const nodeOccupancyOf = `-- name: NodeOccupancyOf :one
+SELECT
+  (SELECT count(*) FROM projects p JOIN instances i ON i.id = p.instance_id
+     WHERE i.node_id = $1 AND p.deleted_at IS NULL AND i.deleted_at IS NULL)::int AS projects,
+  (SELECT count(*) FROM instances i WHERE i.node_id = $1 AND i.deleted_at IS NULL AND i.kind = 'dedicated')::int AS dedicated,
+  (SELECT count(*) FROM retired_databases r JOIN instances i ON i.id = r.instance_id
+     WHERE i.node_id = $1 AND r.dropped_at IS NULL)::int AS retired,
+  (SELECT count(*) FROM instance_members m WHERE m.node_id = $1 AND m.deleted_at IS NULL)::int AS members,
+  (SELECT count(*) FROM etcd_members e WHERE e.node_id = $1)::int AS etcd
+`
+
+type NodeOccupancyOfRow struct {
+	Projects  int32
+	Dedicated int32
+	Retired   int32
+	Members   int32
+	Etcd      int32
+}
+
+// tenant: system - the empty-node sweep counts again what holds one node, under its lock.
+func (q *Queries) NodeOccupancyOf(ctx context.Context, id uuid.UUID) (NodeOccupancyOfRow, error) {
+	row := q.db.QueryRow(ctx, nodeOccupancyOf, id)
+	var i NodeOccupancyOfRow
+	err := row.Scan(
+		&i.Projects,
+		&i.Dedicated,
+		&i.Retired,
+		&i.Members,
+		&i.Etcd,
+	)
+	return i, err
+}
+
 const nodeProjectSizes = `-- name: NodeProjectSizes :many
 SELECT p.id, p.org_id, p.tier, p.instance_id, i.pg_version, i.org_id AS cluster_org,
   coalesce((SELECT m.value FROM metric_points m WHERE m.scope = 'project' AND m.scope_id = p.id AND m.metric = 'size_bytes'
@@ -813,7 +940,7 @@ func (q *Queries) NodeProjectSizes(ctx context.Context, nodeID uuid.UUID) ([]Nod
 }
 
 const nodeProjects = `-- name: NodeProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles FROM projects p JOIN instances i ON i.id = p.instance_id
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p JOIN instances i ON i.id = p.instance_id
 WHERE i.node_id = $1 AND p.deleted_at IS NULL AND i.deleted_at IS NULL
 ORDER BY p.created_at
 `
@@ -873,6 +1000,9 @@ func (q *Queries) NodeProjects(ctx context.Context, nodeID uuid.UUID) ([]Project
 			&i.ForwardRegion,
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -924,10 +1054,25 @@ UPDATE instances SET deleted_at = now(), status = 'deleted'
 WHERE node_id = $1 AND kind = 'shared' AND deleted_at IS NULL
 `
 
+// tenant: system - capacity automation retiring an empty node's shared clusters.
 // An empty node's shared clusters go with it.
 func (q *Queries) RetireNodeSharedClusters(ctx context.Context, nodeID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, retireNodeSharedClusters, nodeID)
 	return err
+}
+
+const returnRetiringNode = `-- name: ReturnRetiringNode :execrows
+UPDATE nodes SET lifecycle = coalesce(retiring_from, 'active'), retiring_from = NULL, retiring_at = NULL, empty_since = NULL
+WHERE id = $1 AND lifecycle = 'retiring'
+`
+
+// Puts a retiring node back as it was: something was placed on it.
+func (q *Queries) ReturnRetiringNode(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, returnRetiringNode, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setCapacityProposalNode = `-- name: SetCapacityProposalNode :exec
@@ -948,7 +1093,7 @@ const setNodeCost = `-- name: SetNodeCost :one
 UPDATE nodes SET monthly_cost_minor = $1, cost_currency = $2,
   server_type = coalesce($3, server_type), region = coalesce($4, region),
   keep = coalesce($5, keep)
-WHERE id = $6 AND status <> 'removed' RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group
+WHERE id = $6 AND status <> 'removed' RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from
 `
 
 type SetNodeCostParams struct {
@@ -1003,6 +1148,8 @@ func (q *Queries) SetNodeCost(ctx context.Context, arg SetNodeCostParams) (Node,
 		&i.Keep,
 		&i.FailureDomain,
 		&i.PlacementGroup,
+		&i.RetiringAt,
+		&i.RetiringFrom,
 	)
 	return i, err
 }
@@ -1022,7 +1169,7 @@ func (q *Queries) SetNodeEmptySince(ctx context.Context, arg SetNodeEmptySincePa
 }
 
 const setNodeLifecycle = `-- name: SetNodeLifecycle :one
-UPDATE nodes SET lifecycle = $1 WHERE id = $2 AND status <> 'removed' RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group
+UPDATE nodes SET lifecycle = $1 WHERE id = $2 AND status <> 'removed' RETURNING id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from
 `
 
 type SetNodeLifecycleParams struct {
@@ -1066,6 +1213,8 @@ func (q *Queries) SetNodeLifecycle(ctx context.Context, arg SetNodeLifecyclePara
 		&i.Keep,
 		&i.FailureDomain,
 		&i.PlacementGroup,
+		&i.RetiringAt,
+		&i.RetiringFrom,
 	)
 	return i, err
 }
@@ -1082,6 +1231,25 @@ type SetNodePrivateAddrParams struct {
 func (q *Queries) SetNodePrivateAddr(ctx context.Context, arg SetNodePrivateAddrParams) error {
 	_, err := q.db.Exec(ctx, setNodePrivateAddr, arg.PrivateAddr, arg.ID)
 	return err
+}
+
+const setNodeRetiring = `-- name: SetNodeRetiring :execrows
+UPDATE nodes SET retiring_from = lifecycle, lifecycle = 'retiring', retiring_at = $1
+WHERE id = $2 AND lifecycle IN ('active', 'draining') AND status <> 'removed'
+`
+
+type SetNodeRetiringParams struct {
+	RetiringAt *time.Time
+	ID         uuid.UUID
+}
+
+// Takes an empty node out of placement before its server is deleted.
+func (q *Queries) SetNodeRetiring(ctx context.Context, arg SetNodeRetiringParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setNodeRetiring, arg.RetiringAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setNodeServer = `-- name: SetNodeServer :exec

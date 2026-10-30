@@ -1332,6 +1332,34 @@ paths:
         default:
           $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/replicas/{replica_id}:
+    patch:
+      operationId: updateProjectReplica
+      summary: Change a read replica's standby settings
+      description: >-
+        Sets hot_standby_feedback and how long replay waits for a conflicting
+        query (max_standby_streaming_delay and max_standby_archive_delay) on
+        this replica only. Applied at once with a configuration reload, no
+        restart; if the replica can't be reached the settings are stored and
+        applied when it is (settings_error says why).
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - $ref: "#/components/parameters/ReplicaID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplicaSettings"
+      responses:
+        "200":
+          description: The replica with its new settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadReplica"
+        default:
+          $ref: "#/components/responses/Error"
     delete:
       operationId: deleteProjectReplica
       summary: Remove a read replica
@@ -1643,6 +1671,59 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RegistrationToken"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/admin/agent-client-certs:
+    get:
+      operationId: listAgentClientCerts
+      summary: The client certificates xenibase-servers issued themselves for agents
+      description: |
+        Each xenibase-server issues itself a client certificate for its
+        agents, a day long and renewed at half-life, and records its
+        serial. The live ones (unexpired, unrevoked) are the allow list
+        every agent is given; an agent that has a list accepts no other.
+        Listed: live certificates, and those expired or revoked in the
+        last week.
+      tags: [nodes]
+      responses:
+        "200":
+          description: The certificates, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentClientCert"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/admin/agent-client-certs/revoke:
+    post:
+      operationId: revokeAgentClientCerts
+      summary: Revoke a server's agent client certificate, by serial or every live one of a server
+      description: |
+        Removes the certificates from the allow list and pushes the new
+        list to every agent at once, so a copied certificate stops working
+        (agents that do not answer get it at their next health check). A
+        server whose own certificate is revoked issues and registers a new
+        one and keeps its agents.
+      tags: [nodes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentClientCertRevoke"
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentClientCertRevoked"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/agent/register:
@@ -2665,7 +2746,7 @@ paths:
   /api/v1/me/password:
     post:
       operationId: changePassword
-      summary: Change your password; ends your other sessions
+      summary: Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens
       tags: [account]
       requestBody:
         required: true
@@ -4723,6 +4804,28 @@ paths:
                 $ref: "#/components/schemas/SigningKeyList"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke:
+    post:
+      operationId: revokeSigningKey
+      summary: Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one
+      tags: [auth]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SigningKeyList"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/auth/users:
     get:
       operationId: listAuthUsers
@@ -5237,6 +5340,11 @@ paths:
     post:
       operationId: addBillingContact
       summary: Add a billing contact
+      description: >-
+        Unless the address is a member's verified address, a confirmation link
+        is emailed to it (again on a repeat request, at most every ten
+        minutes); until it is confirmed it gets billing email but its support
+        email isn't routed to the organisation.
       tags: [billing]
       parameters:
         - $ref: "#/components/parameters/OrgID"
@@ -5253,6 +5361,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BillingContact"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/billing/contacts/confirm:
+    post:
+      operationId: confirmBillingContact
+      summary: Confirm a billing contact from the emailed link (public)
+      description: >-
+        An address an organisation adds as a billing contact gets invoices at
+        once, but support routes its email to the organisation only once it is
+        verified: it is a member's verified address, or its owner confirms it
+        here with the link's token.
+      tags: [billing]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "200":
+          description: Confirmed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [email, org_name]
+                properties:
+                  email:
+                    type: string
+                  org_name:
+                    type: string
         default:
           $ref: "#/components/responses/Error"
   /api/v1/orgs/{org}/billing/contacts/{email}:
@@ -7088,6 +7227,11 @@ paths:
     post:
       operationId: addSupportPhone
       summary: Register a WhatsApp number (E.164) for the organisation's support
+      description: >-
+        The number is pending until its code is sent from it to the support
+        WhatsApp number; only then do its messages open tickets for the
+        organisation. Registering a pending number again gives a new code. 409
+        when the organisation or another one has the number verified.
       tags: [support]
       parameters:
         - $ref: "#/components/parameters/OrgID"
@@ -7135,6 +7279,12 @@ paths:
         Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
         password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
         inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+        The sender is trusted only on the provider's verdicts: DMARC pass, or
+        DKIM and SPF passes aligned with From's domain, read from the
+        Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+        API's `authentication_results` (the provider's Authentication-Results
+        value, a string or an array). Other mail opens a ticket with no
+        organisation, flagged unverified_sender, that never joins a thread.
       tags: [support]
       security: []
       requestBody:
@@ -7475,7 +7625,7 @@ paths:
       tags: [regions]
       responses:
         "200":
-          description: Active regions.
+          description: Active regions, and hidden ones the caller's organisations have early access to.
           content:
             application/json:
               schema:
@@ -7636,6 +7786,111 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Operation"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/manage-roles:
+    get:
+      operationId: getProjectManageRoles
+      summary: Role management on a dedicated project, and the owner's logins the poolers accept
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: The setting and the synced logins.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageRoles"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setProjectManageRoles
+      summary: Turn role management on or off (organisation owners; step-up)
+      description: |
+        On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+        and later that lets it create roles and manage only those it created;
+        it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+        owner creates, named <database>_<name>, connect through the poolers
+        within about 30 seconds (or at once after a sync), with the project's
+        connection limit. Off removes CREATEROLE; roles already created stay.
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManageRolesRequest"
+      responses:
+        "200":
+          description: Changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageRoles"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/manage-roles/sync:
+    post:
+      operationId: syncProjectManageRoles
+      summary: Sync the owner's logins to the poolers now
+      description: Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: Synced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageRoles"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/projects/{id}/network:
+    get:
+      operationId: getProjectNetwork
+      summary: The project's IP allowlist
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      responses:
+        "200":
+          description: The allowlist, and the caller's own address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectNetwork"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setProjectNetwork
+      summary: Replace the project's IP allowlist (project admins)
+      description: |
+        With networks listed, the poolers accept the project's logins (the
+        owner, members' and its own) only from those addresses; an empty list
+        allows any address. Xenibase's own logins for the project (backend
+        services, the SLA probe) aren't limited. Takes effect within seconds
+        on every pooler of the project's region; existing connections stay
+        until they close.
+      tags: [projects]
+      parameters:
+        - $ref: "#/components/parameters/ProjectID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectNetworkRequest"
+      responses:
+        "200":
+          description: Saved and applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectNetwork"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/projects/{id}/residency:
@@ -9214,6 +9469,14 @@ components:
         data_residency:
           type: boolean
           description: Data, backups and branches stay in the project's region's country (V3 §6.3).
+        manage_roles:
+          type: boolean
+          description: A dedicated project's owner role has CREATEROLE (role management).
+        allowed_cidrs:
+          type: array
+          description: The project's IP allowlist; empty allows any address.
+          items:
+            type: string
         forward_region:
           type: string
           nullable: true
@@ -9361,6 +9624,12 @@ components:
         home:
           type: boolean
           description: The platform's home region, where projects go by default.
+        early_access_org_ids:
+          type: array
+          description: Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens.
+          items:
+            type: string
+            format: uuid
     RegionList:
       type: object
       required: [items]
@@ -9371,7 +9640,7 @@ components:
             $ref: "#/components/schemas/Region"
     AdminRegion:
       type: object
-      required: [id, name, country, pooler_host, provider, location, residency, status, home, nodes, pooler_hosts, projects, residency_projects, created_at]
+      required: [id, name, country, pooler_host, api_domain, early_access_org_ids, provider, location, residency, status, home, nodes, pooler_hosts, projects, residency_projects, created_at]
       properties:
         id:
           type: string
@@ -9382,6 +9651,15 @@ components:
         pooler_host:
           type: string
           description: The hostname in the region's connection strings; empty is the platform's database host.
+        api_domain:
+          type: string
+          description: The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN).
+        early_access_org_ids:
+          type: array
+          description: Organisations that may create projects while the region is hidden.
+          items:
+            type: string
+            format: uuid
         provider:
           type: string
           description: manual or hetzner.
@@ -9398,6 +9676,11 @@ components:
           format: uuid
           nullable: true
           description: Where backups on platform targets are copied (V3 §2.5).
+        files_target_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
         floating_ip_id:
           type: string
           nullable: true
@@ -9476,6 +9759,16 @@ components:
           type: string
         pooler_host:
           type: string
+        api_domain:
+          type: string
+          description: The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects.
+        early_access_org_ids:
+          type: array
+          description: Replaces the organisations that may create projects while the region is hidden; left out, the list is kept.
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
         provider:
           type: string
           description: manual (the default) or hetzner.
@@ -9489,6 +9782,11 @@ components:
           type: string
           format: uuid
           nullable: true
+        files_target_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
         floating_ip_id:
           type: string
           nullable: true
@@ -9496,7 +9794,68 @@ components:
           type: boolean
         hidden:
           type: boolean
-          description: Hidden regions take no new projects.
+          description: Hidden regions take new projects only from their early-access organisations.
+    ManageRolesRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    ManageRoles:
+      type: object
+      required: [enabled, logins]
+      properties:
+        enabled:
+          type: boolean
+          description: The owner role has CREATEROLE.
+        logins:
+          type: array
+          description: The owner's logins the poolers accept.
+          items:
+            type: object
+            required: [name, synced_at]
+            properties:
+              name:
+                type: string
+              synced_at:
+                type: string
+                format: date-time
+        skipped:
+          type: array
+          description: After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password).
+          items:
+            type: object
+            required: [name, reason]
+            properties:
+              name:
+                type: string
+              reason:
+                type: string
+    ProjectNetworkRequest:
+      type: object
+      required: [allowed_cidrs]
+      properties:
+        allowed_cidrs:
+          type: array
+          maxItems: 50
+          description: Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address.
+          items:
+            type: string
+    ProjectNetwork:
+      type: object
+      required: [allowed_cidrs]
+      properties:
+        allowed_cidrs:
+          type: array
+          description: The networks, normalised; empty allows any address.
+          items:
+            type: string
+        your_ip:
+          type: string
+          description: The address this request came from, as Xenibase sees it (your database client's address may differ).
+        your_ip_allowed:
+          type: boolean
+          description: Whether your_ip is in the allowlist (always true when the list is empty).
     ProjectResidencyRequest:
       type: object
       required: [enabled]
@@ -10402,7 +10761,8 @@ components:
           description: manual (registered by hand) or the cloud provider that created it.
         lifecycle:
           type: string
-          enum: [active, provisioning, draining]
+          description: retiring is an empty node out of placement whose server is about to be deleted.
+          enum: [active, provisioning, draining, retiring]
         server_type:
           type: string
           nullable: true
@@ -10510,6 +10870,49 @@ components:
         command:
           type: string
           description: A ready-to-run registration command for the node.
+    AgentClientCert:
+      type: object
+      required: [serial, server, issued_at, expires_at, current]
+      properties:
+        serial:
+          type: string
+          description: The certificate's serial, lower-case hex.
+        server:
+          type: string
+          description: The xenibase-server it was issued to (its host name).
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+          description: The certificate the answering server is using.
+    AgentClientCertRevoke:
+      type: object
+      description: Exactly one of serial and server.
+      properties:
+        serial:
+          type: string
+        server:
+          type: string
+    AgentClientCertRevoked:
+      type: object
+      required: [revoked, not_pushed]
+      properties:
+        revoked:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentClientCert"
+        not_pushed:
+          type: array
+          description: Agents the new list did not reach now; each gets it at its next health check.
+          items:
+            type: string
     AgentRegisterRequest:
       type: object
       required: [token, csr]
@@ -10724,6 +11127,36 @@ components:
         region:
           type: string
           description: The region it goes in (default the project's).
+        hot_standby_feedback:
+          type: boolean
+          description: See ReplicaSettings (default false).
+        max_standby_delay_seconds:
+          type: integer
+          minimum: 0
+          maximum: 900
+          description: See ReplicaSettings (default 30).
+    ReplicaSettings:
+      type: object
+      description: >-
+        A read replica's standby settings. Omitted fields keep their value.
+      properties:
+        hot_standby_feedback:
+          type: boolean
+          description: >-
+            The replica tells the primary which rows its running queries still
+            read, so the primary's vacuum keeps them and long queries on the
+            replica aren't cancelled for it. The cost is on the primary: dead
+            rows stay longer, so a long query on the replica can bloat tables.
+        max_standby_delay_seconds:
+          type: integer
+          minimum: 0
+          maximum: 900
+          description: >-
+            How long replay waits for a query that conflicts with it before
+            cancelling the query (max_standby_streaming_delay and
+            max_standby_archive_delay). Longer lets long queries finish but
+            lets the replica fall further behind; one behind by more than the
+            rotation threshold leaves the read route until it catches up.
     ReplicaDetachRequest:
       type: object
       required: [name]
@@ -10733,7 +11166,7 @@ components:
           description: The new project's name.
     ReadReplica:
       type: object
-      required: [id, node_id, node_name, region, size, status, in_rotation, created_at]
+      required: [id, node_id, node_name, region, size, status, in_rotation, hot_standby_feedback, max_standby_delay_seconds, created_at]
       properties:
         id:
           type: string
@@ -10766,6 +11199,17 @@ components:
         rotation_changed_at:
           type: string
           format: date-time
+        hot_standby_feedback:
+          type: boolean
+        max_standby_delay_seconds:
+          type: integer
+        settings_applied_at:
+          type: string
+          format: date-time
+          description: When the replica last confirmed its settings.
+        settings_error:
+          type: string
+          description: Why the settings couldn't be applied yet (retried).
         created_at:
           type: string
           format: date-time
@@ -11361,7 +11805,10 @@ components:
           type: boolean
         hook_secret:
           type: string
-          description: Signs webhook hooks (Xenibase-Signature); set once a hook URL is.
+          description: Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services).
+        hook_secret_set:
+          type: boolean
+          description: Whether the project has a hook secret (for those who aren't shown it).
         hook_role:
           type: string
           description: The role Postgres hooks run as; grant it what they read.
@@ -12443,6 +12890,17 @@ components:
         volume_gb:
           type: integer
           nullable: true
+        max_connections:
+          type: integer
+          description: >-
+            Dedicated only. Postgres's max_connections, which grows with the
+            instance's memory (50 per GB, 100 to 500).
+        connection_limit_max:
+          type: integer
+          description: >-
+            Dedicated only. The highest connection limit the project can have
+            on this instance: max_connections less what Xenibase keeps for its
+            own connections (backups, replication, probes, backend services).
     PitrWindow:
       type: object
       description: Dedicated only. Any time in [from, to] can be restored.
@@ -14870,8 +15328,11 @@ components:
             $ref: "#/components/schemas/OAuthGrantProject"
     OAuthAuthorizeInfo:
       type: object
-      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations]
+      required: [client_id, client_name, redirect_uri, scopes, code_challenge, code_challenge_method, organisations, consent]
       properties:
+        consent:
+          type: string
+          description: The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes.
         client_id:
           type: string
         client_name:
@@ -14898,6 +15359,9 @@ components:
       type: object
       required: [client_id, redirect_uri, code_challenge, code_challenge_method, approve]
       properties:
+        consent:
+          type: string
+          description: The `consent` the consent page was given; required to approve.
         client_id:
           type: string
         redirect_uri:
@@ -14912,7 +15376,7 @@ components:
           type: boolean
         scopes:
           type: array
-          description: Within what the app asked for; the request's scopes by default.
+          description: Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default.
           items:
             $ref: "#/components/schemas/TokenScope"
         org_id:
@@ -15147,6 +15611,10 @@ components:
           type: string
           format: password
           minLength: 12
+        revoke_tokens:
+          type: boolean
+          default: true
+          description: Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
     Terms:
       type: object
       required: [version, terms_md, privacy_md, published_at]
@@ -15877,7 +16345,7 @@ components:
               $ref: "#/components/schemas/Prices"
     Ticket:
       type: object
-      required: [id, number, ref, requester, channel, subject, status, priority, created_at, updated_at]
+      required: [id, number, ref, requester, channel, subject, status, priority, created_at, updated_at, unverified_sender]
       properties:
         id:
           type: string
@@ -15936,6 +16404,12 @@ components:
           format: date-time
           nullable: true
           description: The plan's response target; null is best effort.
+        unverified_sender:
+          type: boolean
+          description: >-
+            An email whose sender the provider didn't authenticate (no DMARC
+            pass, nor aligned DKIM and SPF passes): the From address may be
+            forged, so the ticket has no organisation.
     TicketList:
       type: object
       required: [items]
@@ -16120,13 +16594,24 @@ components:
           format: uuid
     SupportPhone:
       type: object
-      required: [phone, created_at]
+      required: [phone, created_at, verified]
       properties:
         phone:
           type: string
         created_at:
           type: string
           format: date-time
+        verified:
+          type: boolean
+          description: The code was sent from the number; only then do its messages open tickets.
+        code:
+          type: string
+          nullable: true
+          description: While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678.
+        code_expires_at:
+          type: string
+          format: date-time
+          nullable: true
     RevenueMonth:
       type: object
       required: [month, mrr_minor, arr_minor, new_minor, expansion_minor, contraction_minor, churned_minor, paying_orgs, arpa_minor,
@@ -16621,6 +17106,13 @@ components:
         status_emails:
           type: boolean
           description: Gets the status page's incident emails while the organisation is on a paid plan (default true).
+        verified:
+          type: boolean
+          readOnly: true
+          description: >-
+            A member's verified address, or confirmed from the emailed link.
+            Only a verified contact's email to support opens tickets for the
+            organisation; billing email goes to every contact.
     LegalDocument:
       type: object
       required: [id, kind, version, title, body_md, published_at]
@@ -18393,7 +18885,8 @@ components:
       properties:
         kind:
           type: string
-          enum: [statement, idle_in_transaction]
+          description: statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+          enum: [statement, statement_terminated, idle_in_transaction]
         role:
           type: string
         duration_s:

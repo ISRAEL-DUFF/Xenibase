@@ -78,6 +78,7 @@ function Consent({ search }: { search: OAuthAuthorizeSearch }) {
         state: info.state,
         code_challenge: info.code_challenge,
         code_challenge_method: info.code_challenge_method,
+        consent: info.consent,
       };
       const { redirect_to } = await api.decideOAuth(
         approve ? { ...base, approve: true, org_id: org, scopes: chosen, project_ids: projects, expires_in_days: days } : { ...base, approve: false },

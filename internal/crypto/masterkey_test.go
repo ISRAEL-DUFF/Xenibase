@@ -137,3 +137,35 @@ func TestDerive(t *testing.T) {
 		t.Fatal("derive does not depend on label and key")
 	}
 }
+
+// TestDeriveSeed: with a seed, Derive depends on the seed and not on the
+// master key, so two keyrings with different primaries and one seed
+// derive the same values; a seed equal to the old primary key reproduces
+// what that key derived without one (the upgrade path).
+func TestDeriveSeed(t *testing.T) {
+	oldKey, newKey := mustKey(t), mustKey(t)
+	before := mustRing(t, oldKey).Derive("xenibase edge role p_edge", 32)
+
+	oldRing, newRing := mustRing(t, oldKey), mustRing(t, newKey)
+	for _, r := range []*Keyring{oldRing, newRing} {
+		if err := r.SetDeriveSeed(oldKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(oldRing.Derive("xenibase edge role p_edge", 32), before) {
+		t.Fatal("a seed equal to the old key changed what it derives")
+	}
+	if !bytes.Equal(newRing.Derive("xenibase edge role p_edge", 32), before) {
+		t.Fatal("a new primary key changed what the same seed derives")
+	}
+	other := mustRing(t, newKey)
+	if err := other.SetDeriveSeed(mustKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(other.Derive("xenibase edge role p_edge", 32), before) {
+		t.Fatal("derive does not depend on the seed")
+	}
+	if err := other.SetDeriveSeed(oldKey[:16]); err == nil {
+		t.Fatal("short seed accepted")
+	}
+}

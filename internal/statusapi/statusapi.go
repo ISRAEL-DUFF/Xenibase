@@ -1,13 +1,17 @@
 // Package statusapi is the contract between xenibase-server and the separately
 // hosted status service, xenibase-status (V3 §2.6): signed heartbeats for the
 // components the status service can't probe from outside, and incidents
-// the platform admin posts in Xenibase. Both directions carry a
-// Xenibase-Signature over the body with the shared push secret.
+// the platform admin posts in Xenibase. Every push carries a
+// Xenibase-Signature with the shared push secret that binds the method,
+// the path and the body (SignPush, VerifyPush).
 package statusapi
 
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,11 +20,63 @@ import (
 	netmail "net/mail"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/israel-duff/xenibase/internal/signature"
 )
+
+// SignPush returns the Xenibase-Signature of a push: t=<unix>; v1, the
+// HMAC of "<unix>.<body>" that older status services check; and v2, the
+// HMAC-SHA256 of "<unix>.<METHOD> <path>\n<body>", which binds the push to
+// its endpoint, so a signed heartbeat can't be replayed as another push.
+// path is the API path (PathHeartbeat, say), without the status service's
+// base URL.
+func SignPush(secret string, t time.Time, method, path string, body []byte) string {
+	return signature.Sign(secret, t, body) + ",v2=" + pushMAC(secret, strconv.FormatInt(t.Unix(), 10), method, path, body)
+}
+
+// VerifyPush checks a push's v2 signature, refusing timestamps more than
+// tolerance from now. A header with v1 only is refused: v1 covers the
+// body alone.
+func VerifyPush(secret, header, method, path string, body []byte, now time.Time, tolerance time.Duration) error {
+	var ts string
+	var sigs []string
+	for _, part := range strings.Split(header, ",") {
+		k, v, _ := strings.Cut(strings.TrimSpace(part), "=")
+		switch k {
+		case "t":
+			ts = v
+		case "v2":
+			sigs = append(sigs, v)
+		}
+	}
+	n, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return errors.New("malformed signature header")
+	}
+	if len(sigs) == 0 {
+		return errors.New("no v2 signature (bound to method and path): upgrade xenibase-server")
+	}
+	if d := now.Sub(time.Unix(n, 0)); d > tolerance || d < -tolerance {
+		return errors.New("signature timestamp outside the tolerance")
+	}
+	want := pushMAC(secret, ts, method, path, body)
+	for _, sig := range sigs {
+		if hmac.Equal([]byte(want), []byte(sig)) {
+			return nil
+		}
+	}
+	return errors.New("signature mismatch")
+}
+
+func pushMAC(secret, ts, method, path string, body []byte) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte(ts + "." + method + " " + path + "\n"))
+	m.Write(body)
+	return hex.EncodeToString(m.Sum(nil))
+}
 
 // Paths on the status service.
 const (
@@ -327,7 +383,7 @@ func (c *Client) call(ctx context.Context, method, path string, v, out any) erro
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(signature.Header, signature.Sign(c.Secret, time.Now(), body))
+	req.Header.Set(signature.Header, SignPush(c.Secret, time.Now(), method, path, body))
 	hc := c.HTTP
 	if hc == nil {
 		hc = &http.Client{Timeout: 15 * time.Second}

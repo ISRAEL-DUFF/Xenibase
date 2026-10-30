@@ -60,11 +60,21 @@ type Config struct {
 	// Edge is what an edge node runs besides its agent (V4.1 §11): nil
 	// leaves edge proposals to be provisioned by hand.
 	Edge *cloud.EdgeBootstrap
+	// RegionAPIDomain is a region's own API domain, if it has one, which
+	// an edge node there serves instead of Edge.Domain.
+	RegionAPIDomain func(region string) string
+	// EdgeCredential issues the credential an edge node's xenibase-edge
+	// uses, bound to its region (edgecred.Issue); nil gives it Edge.Secret.
+	EdgeCredential func(ctx context.Context, name, region string) (string, error)
 	// JoinTimeout bounds the wait for a new server's agent (20 minutes).
 	JoinTimeout time.Duration
 	// Poll is how often the provisioning flow checks for the agent (5 s).
 	Poll time.Duration
-	Now  func() time.Time
+	// RetireGrace is how long an empty node is out of placement before its
+	// server is deleted (10 minutes): placements that chose the node just
+	// before land meanwhile, and are counted.
+	RetireGrace time.Duration
+	Now         func() time.Time
 }
 
 // Service runs capacity automation.
@@ -93,6 +103,9 @@ func New(db *pgxpool.Pool, ns *nodes.Service, ded *dedicated.Service, provider c
 	}
 	if cfg.Poll <= 0 {
 		cfg.Poll = 5 * time.Second
+	}
+	if cfg.RetireGrace <= 0 {
+		cfg.RetireGrace = 10 * time.Minute
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

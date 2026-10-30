@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +55,31 @@ type Manager struct {
 	wakerMu   sync.Mutex
 	wakerHost string
 	wakerPort int
+
+	// adminNets may reach the admin consoles (hba.conf); nil means
+	// DefaultAdminNetworks.
+	adminNets []string
+
+	// skipped is what the last Sync left out as invalid.
+	skippedMu sync.Mutex
+	skipped   []string
+}
+
+// Skipped is what the last Sync left out of the pooler configuration as
+// invalid (a route, user or allowlist), with why: those projects or logins
+// can't connect until the row is fixed. The alerts report it.
+func (m *Manager) Skipped() []string {
+	m.skippedMu.Lock()
+	defer m.skippedMu.Unlock()
+	return append([]string(nil), m.skipped...)
+}
+
+// SetAdminNetworks sets the networks the poolers' admin consoles accept
+// (XENIBASE_POOLER_ADMIN_ALLOW). Call it before the first Sync.
+func (m *Manager) SetAdminNetworks(cidrs []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.adminNets = append([]string(nil), cidrs...)
 }
 
 // SetHome sets the home region (default eu-central).
@@ -182,6 +210,20 @@ func (m *Manager) Admins() []*Admin {
 		out = append(out, hs.reachableAdmins("")...)
 	}
 	return out
+}
+
+// LocalAdmins are the admin consoles of the poolers next to this
+// xenibase-server (XENIBASE_POOLER_LOCAL): only this server reaches them,
+// and another server has its own.
+func (m *Manager) LocalAdmins() []*Admin { return append([]*Admin(nil), m.admins...) }
+
+// HostAdmins are both PgBouncers of every pooler host last seen reachable
+// (V3 §2.1). Every server reaches the same hosts.
+func (m *Manager) HostAdmins() []*Admin {
+	if hs := m.hostSet(); hs != nil {
+		return hs.reachableAdmins("")
+	}
+	return nil
 }
 
 // adminsFor are the admin consoles of the poolers that route db: the local
@@ -368,6 +410,22 @@ func (m *Manager) Sync(ctx context.Context) error {
 			mark(*r.AliasDbName, regs)
 		}
 	}
+	// IP allowlists: the project's routes take its customer logins only
+	// from the listed networks; its edge, request-role and SLA probe
+	// logins are Xenibase's own and connect from wherever Xenibase runs.
+	for _, r := range rows {
+		if len(r.AllowedCidrs) == 0 {
+			continue
+		}
+		res := Restriction{Databases: []string{r.DbName, r.DbName + ReadOnlySuffix}, CIDRs: r.AllowedCidrs,
+			Platform: append(store.ServiceRoles(r.DbName), store.ProbeRole(r.DbName))}
+		if r.AliasDbName != nil {
+			res.Databases = append(res.Databases, *r.AliasDbName)
+		}
+		add(served(r.Region, r.ForwardRegion, r.ForwardUntil), func(cfg *Config) {
+			cfg.Restrictions = append(cfg.Restrictions, res)
+		})
+	}
 	members, err := q.PoolerDBUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("pooler sync: load personal logins: %w", err)
@@ -411,18 +469,50 @@ func (m *Manager) Sync(ctx context.Context) error {
 		})
 	}
 
+	// Logins dedicated owners created with role management on, last: a
+	// platform login with the same name wins (Render refuses duplicates).
+	owned, err := q.PoolerOwnedLogins(ctx)
+	if err != nil {
+		return fmt.Errorf("pooler sync: load owned logins: %w", err)
+	}
+	for _, u := range owned {
+		add(served(u.Region, u.ForwardRegion, u.ForwardUntil), func(cfg *Config) {
+			if !slices.ContainsFunc(cfg.Users, func(x User) bool { return x.Name == u.RoleName }) {
+				cfg.Users = append(cfg.Users, User{Name: u.RoleName, Secret: u.ScramVerifier})
+			}
+		})
+	}
+
+	var skipped []string
+	defer func() {
+		sort.Strings(skipped)
+		m.skippedMu.Lock()
+		m.skipped = skipped
+		m.skippedMu.Unlock()
+	}()
 	for region, cfg := range cfgs {
 		dir := m.RegionDir(region)
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("pooler sync: %w", err)
 		}
-		databases, userlist, err := Render(*cfg)
+		cfg.AdminNetworks = m.adminNets
+		// One bad row must not stop every region's changes: leave it out.
+		for _, err := range cfg.DropInvalid() {
+			m.log.Error("pooler sync: left out of the configuration", "region", region, "err", err)
+			skipped = append(skipped, region+": "+err.Error())
+		}
+		databases, userlist, hba, err := Render(*cfg)
 		if err != nil {
 			return err
 		}
 		// Users first: a new route is only useful once its user can log in.
 		usersChanged, err := WriteFileAtomic(filepath.Join(dir, UserlistFile), userlist, m.mode)
 		if err != nil {
+			return fmt.Errorf("pooler sync: %w", err)
+		}
+		// Then who may log in from where, so a new route never opens
+		// wider than its allowlist.
+		if _, err := WriteFileAtomic(filepath.Join(dir, HBAFile), hba, m.mode); err != nil {
 			return fmt.Errorf("pooler sync: %w", err)
 		}
 		routesChanged, err := WriteFileAtomic(filepath.Join(dir, DatabasesFile), databases, m.mode)
@@ -581,6 +671,69 @@ func (m *Manager) each(ctx context.Context, f func(*Admin) error) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// DropDisallowed drops p's client connections that its IP allowlist,
+// cidrs, no longer admits: on its routes (the database, its _ro route and
+// V1 alias), from an address outside every network, apart from Xenibase's
+// own logins, which the allowlist exempts. PgBouncer checks HBA rules only
+// at login, so narrowing a list does nothing to clients already connected
+// until this runs. An empty list admits everyone and drops nothing. It
+// returns how many clients it dropped.
+func (m *Manager) DropDisallowed(ctx context.Context, p store.Project, cidrs []string) (int, error) {
+	if len(cidrs) == 0 {
+		return 0, nil
+	}
+	nets := make([]netip.Prefix, 0, len(cidrs))
+	for _, c := range cidrs {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			return 0, fmt.Errorf("pooler: allowlist entry %q: %w", c, err)
+		}
+		nets = append(nets, pfx)
+	}
+	dbs := map[string]bool{}
+	for _, d := range store.PoolerNames(p) {
+		dbs[d], dbs[d+ReadOnlySuffix] = true, true
+	}
+	exempt := map[string]bool{store.ProbeRole(p.DbName): true}
+	for _, r := range store.ServiceRoles(p.DbName) {
+		exempt[r] = true
+	}
+	drop := func(c Client) bool { return dbs[c.Database] && !exempt[c.User] && !admitted(c.Addr, nets) }
+	seen := map[*Admin]bool{}
+	var errs []error
+	n := 0
+	for _, d := range store.PoolerNames(p) {
+		for _, a := range m.adminsFor(d) {
+			if seen[a] {
+				continue
+			}
+			seen[a] = true
+			k, err := a.KillClients(ctx, drop)
+			n += k
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return n, errors.Join(errs...)
+}
+
+// admitted reports whether a client at addr is on one of nets. A socket
+// client ("unix") is local, never subject to an allowlist.
+func admitted(addr string, nets []netip.Prefix) bool {
+	a, err := netip.ParseAddr(addr)
+	if err != nil {
+		return addr == "unix"
+	}
+	a = a.Unmap()
+	for _, n := range nets {
+		if n.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // KillUser drops user's client connections on every pooler.

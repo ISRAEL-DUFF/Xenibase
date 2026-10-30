@@ -581,15 +581,8 @@ func Cleanup(ctx context.Context, m Move, srcDB, srcAdmin, dstDB *pgx.Conn) erro
 		if err := dstDB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_subscription WHERE subname = $1)`, m.Name).Scan(&exists); err != nil {
 			errs = append(errs, err)
 		} else if exists {
-			for _, stmt := range []string{
-				"ALTER SUBSCRIPTION " + ident(m.Name) + " DISABLE",
-				"ALTER SUBSCRIPTION " + ident(m.Name) + " SET (slot_name = NONE)",
-				"DROP SUBSCRIPTION " + ident(m.Name),
-			} {
-				if _, err := dstDB.Exec(ctx, stmt); err != nil {
-					errs = append(errs, fmt.Errorf("%s: %w", stmt, err))
-					break
-				}
+			if err := DropSubscription(ctx, dstDB, m.Name); err != nil {
+				errs = append(errs, err)
 			}
 		}
 		if _, err := dstDB.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
@@ -622,6 +615,95 @@ func Cleanup(ctx context.Context, m Move, srcDB, srcAdmin, dstDB *pgx.Conn) erro
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Leftovers are the move objects in one database: what a cleanup that
+// could not reach a side left there.
+type Leftovers struct {
+	Subscriptions, Publications []string
+	// Slots are the inactive slots on the database.
+	Slots []string
+	// Logins are the move logins granted CONNECT on the database.
+	Logins []string
+	// DDLBlock: the event trigger or the move schema is there.
+	DDLBlock bool
+}
+
+// FindLeftovers lists the move objects in the database c is connected to,
+// as the superuser.
+func FindLeftovers(ctx context.Context, c *pgx.Conn) (Leftovers, error) {
+	var lo Leftovers
+	var err error
+	if lo.Subscriptions, err = names(ctx, c, `SELECT subname FROM pg_subscription
+		WHERE subdbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND starts_with(subname::text, $1) ORDER BY 1`, Prefix); err != nil {
+		return lo, err
+	}
+	if lo.Publications, err = names(ctx, c, `SELECT pubname FROM pg_publication WHERE starts_with(pubname::text, $1) ORDER BY 1`, Prefix); err != nil {
+		return lo, err
+	}
+	if lo.Slots, err = names(ctx, c, `SELECT slot_name FROM pg_replication_slots
+		WHERE database = current_database() AND NOT active AND starts_with(slot_name::text, $1) ORDER BY 1`, Prefix); err != nil {
+		return lo, err
+	}
+	if lo.Logins, err = names(ctx, c, `SELECT DISTINCT r.rolname FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a
+		JOIN pg_roles r ON r.oid = a.grantee WHERE d.datname = current_database() AND starts_with(r.rolname::text, $1) ORDER BY 1`, Prefix); err != nil {
+		return lo, err
+	}
+	err = c.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = $1) OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $2)`,
+		Prefix+"ddl_block", schema).Scan(&lo.DDLBlock)
+	return lo, err
+}
+
+// DropSubscription drops a subscription in c's database without touching
+// its publisher (its slot is dropped there separately).
+func DropSubscription(ctx context.Context, c *pgx.Conn, name string) error {
+	for _, stmt := range []string{
+		"ALTER SUBSCRIPTION " + ident(name) + " DISABLE",
+		"ALTER SUBSCRIPTION " + ident(name) + " SET (slot_name = NONE)",
+		"DROP SUBSCRIPTION " + ident(name),
+	} {
+		if _, err := c.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// DropPublication drops a publication in c's database.
+func DropPublication(ctx context.Context, c *pgx.Conn, name string) error {
+	_, err := c.Exec(ctx, "DROP PUBLICATION IF EXISTS "+ident(name))
+	return err
+}
+
+// DropInactiveSlot drops a slot no WAL sender holds.
+func DropInactiveSlot(ctx context.Context, c *pgx.Conn, name string) error {
+	_, err := c.Exec(ctx, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active`, name)
+	return err
+}
+
+// DropDDLBlock removes the event trigger and the move schema from c's
+// database.
+func DropDDLBlock(ctx context.Context, c *pgx.Conn) error {
+	for _, stmt := range []string{"DROP EVENT TRIGGER IF EXISTS " + Prefix + "ddl_block", "DROP SCHEMA IF EXISTS " + schema + " CASCADE"} {
+		if _, err := c.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// DropLoginGrants revokes what a move login holds in c's database (and
+// its CONNECT); the login itself is dropped from the server once no
+// database has any.
+func DropLoginGrants(ctx context.Context, c *pgx.Conn, name string) error {
+	_, err := c.Exec(ctx, "DROP OWNED BY "+ident(name))
+	return err
+}
+
+// DropLogin drops a move login from the server.
+func DropLogin(ctx context.Context, admin *pgx.Conn, name string) error {
+	_, err := admin.Exec(ctx, "DROP ROLE IF EXISTS "+ident(name))
+	return err
 }
 
 // dropSlot drops the slot, ending the WAL sender still holding it.

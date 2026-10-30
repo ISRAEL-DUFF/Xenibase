@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { ApiRequestError, api, errorMessage } from "../api/client";
-import { Alert, Badge, Button, Dialog, Field, FormRow, Input, Page, Panel, Section, Table, PageSkeleton } from "../components/ui";
+import { Alert, Badge, Button, Checkbox, Dialog, Field, FormRow, Input, Page, Panel, Section, Table, PageSkeleton } from "../components/ui";
 import { RecoveryCodes, TotpEnrol } from "../components/Enrol";
 import { TokensCard } from "../components/Tokens";
 import { formatDate, relativeTime } from "../lib/format";
@@ -135,6 +135,7 @@ function ProfileCard() {
 function PasswordCard() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
+  const [revoke, setRevoke] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const save = async (e: FormEvent) => {
@@ -142,10 +143,15 @@ function PasswordCard() {
     setBusy(true);
     setMsg(null);
     try {
-      await api.changePassword({ current_password: current, new_password: next });
+      await api.changePassword({ current_password: current, new_password: next, revoke_tokens: revoke });
       setCurrent("");
       setNext("");
-      setMsg({ ok: true, text: "Password changed. Your other sessions were signed out." });
+      setMsg({
+        ok: true,
+        text: revoke
+          ? "Password changed. Your other sessions were signed out and your API tokens revoked."
+          : "Password changed. Your other sessions were signed out.",
+      });
     } catch (e) {
       setMsg({ ok: false, text: e instanceof ApiRequestError && e.code === "invalid_credentials" ? "The current password is wrong." : errorMessage(e) });
     } finally {
@@ -169,6 +175,9 @@ function PasswordCard() {
         <FormRow label="New password" description="At least 12 characters." htmlFor="new-password">
           <Input id="new-password" type="password" required minLength={12} autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />
         </FormRow>
+        <label className="mb-3 flex items-center gap-2 text-[13px]">
+          <Checkbox checked={revoke} onCheckedChange={(v) => setRevoke(v === true)} data-testid="password-revoke-tokens" /> Also revoke my API tokens (the CLI&apos;s, CI&apos;s and connected apps&apos;)
+        </label>
         {msg && <Alert tone={msg.ok ? "ok" : "danger"}>{msg.text}</Alert>}
       </form>
     </Panel>

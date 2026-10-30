@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -93,6 +94,12 @@ func in(ps []netip.Prefix, a netip.Addr) bool {
 type Config struct {
 	// Blocked are extra ranges to refuse, such as the nodes' network.
 	Blocked []netip.Prefix
+	// Internal are the platform's own networks (the nodes' private
+	// network): database sources there are refused even allow-listed.
+	Internal []netip.Prefix
+	// PlatformAddrs lists the nodes' and instances' addresses (default:
+	// from the metadata DB, names resolved).
+	PlatformAddrs func(ctx context.Context) ([]netip.Addr, error)
 	// Resolve looks a host up (default: the system resolver).
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	// Now is the clock (tests move it).
@@ -140,6 +147,10 @@ func New(db *pgxpool.Pool, cfg Config, log *slog.Logger) *Service {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.PlatformAddrs == nil {
+		resolve := cfg.Resolve
+		cfg.PlatformAddrs = func(ctx context.Context) ([]netip.Addr, error) { return platformAddrs(ctx, db, resolve) }
+	}
 	return &Service{db: db, cfg: cfg, log: log, buckets: map[string]*bucket{}, transports: map[string]*http.Transport{}, counts: map[countKey]*countVal{}}
 }
 
@@ -178,6 +189,9 @@ func ValidAllowHost(h string) error {
 func (s *Service) allowed(ctx context.Context, orgID uuid.UUID, host string) (bool, error) {
 	if s.cfg.Allowed != nil {
 		return s.cfg.Allowed(orgID, NormalizeHost(host)), nil
+	}
+	if s.db == nil {
+		return false, nil
 	}
 	return store.New(s.db).OutboundHostAllowed(ctx, store.OutboundHostAllowedParams{OrgID: orgID, Host: NormalizeHost(host)})
 }
@@ -241,6 +255,122 @@ func (s *Service) Check(ctx context.Context, orgID uuid.UUID, rawURL string) (Ta
 		}
 	}
 	return Target{URL: u, Host: host, Addr: netip.AddrPortFrom(addrs[0].Unmap(), uint16(port))}, nil
+}
+
+// CheckAddr validates host:port for orgID by Check's rules (a project's
+// own SMTP server): public addresses only unless the host is
+// allow-listed, never link-local or metadata addresses. It returns the
+// address to connect to, so a second lookup cannot rebind the name.
+func (s *Service) CheckAddr(ctx context.Context, orgID uuid.UUID, host string, port int) (netip.AddrPort, error) {
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if host == "" || strings.ContainsAny(host, "/@?#[] ") {
+		return netip.AddrPort{}, fmt.Errorf("%w: not a host name or IP address", ErrRefused)
+	}
+	if port < 1 || port > 65535 {
+		return netip.AddrPort{}, fmt.Errorf("%w: bad port", ErrRefused)
+	}
+	t, err := s.Check(ctx, orgID, (&url.URL{Scheme: "https", Host: net.JoinHostPort(host, strconv.Itoa(port))}).String())
+	return t.Addr, err
+}
+
+// Client is an HTTP client for t (from Check) that connects only to its
+// checked address and follows no redirects: for a tenant's URL that isn't
+// a signed webhook (a project's own SMS provider).
+func (s *Service) Client(t Target, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport:     s.transport(t),
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+// CheckSource validates host:port as a database a tenant asks Xenibase to
+// read from (an import's or a Supabase migration's source). Xenibase and
+// its agents connect from addresses every cluster trusts, so the rules are
+// Check's, and stricter: loopback, the platform's own networks
+// (Config.Internal) and the nodes' and instances' own addresses
+// (Config.PlatformAddrs) are refused even when the platform admin
+// allow-listed the host. It returns the address to connect to: callers
+// pin the connection to it, so a second lookup cannot rebind the name.
+func (s *Service) CheckSource(ctx context.Context, orgID uuid.UUID, host string, port int) (netip.Addr, error) {
+	host = NormalizeHost(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+	if host == "" || strings.HasPrefix(host, "/") || strings.ContainsAny(host, ",/ ") {
+		return netip.Addr{}, fmt.Errorf("%w: the source must be one host name or IP address", ErrRefused)
+	}
+	if port < 1 || port > 65535 {
+		return netip.Addr{}, fmt.Errorf("%w: bad port", ErrRefused)
+	}
+	allow, err := s.allowed(ctx, orgID, host)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	var addrs []netip.Addr
+	if a, err := netip.ParseAddr(host); err == nil {
+		addrs = []netip.Addr{a}
+	} else {
+		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		addrs, err = s.cfg.Resolve(rctx, host)
+		cancel()
+		if err != nil || len(addrs) == 0 {
+			return netip.Addr{}, fmt.Errorf("%w: %s does not resolve", ErrRefused, host)
+		}
+	}
+	internal, err := s.cfg.PlatformAddrs(ctx)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("list the platform's addresses: %w", err)
+	}
+	platform := make(map[netip.Addr]bool, len(internal))
+	for _, a := range internal {
+		platform[canon(a)] = true
+	}
+	for _, a := range addrs {
+		a = canon(a)
+		switch {
+		case in(never, a):
+			return netip.Addr{}, fmt.Errorf("%w: %s is a link-local or cloud metadata address", ErrRefused, a)
+		case a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() || platform[a] || in(s.cfg.Internal, a):
+			return netip.Addr{}, fmt.Errorf("%w: %s resolves to %s, one of Xenibase's own addresses", ErrRefused, host, a)
+		case !allow && (in(blocked, a) || in(s.cfg.Blocked, a) || a.IsPrivate()):
+			return netip.Addr{}, fmt.Errorf("%w: %s resolves to %s, a private or internal address; the platform admin can allow the host for your organisation", ErrRefused, host, a)
+		}
+	}
+	return addrs[0].Unmap(), nil
+}
+
+// platformAddrs are the addresses of every node and instance in the
+// metadata DB, host names resolved (a name that does not resolve is
+// skipped: nothing can reach it either).
+func platformAddrs(ctx context.Context, db *pgxpool.Pool, resolve func(context.Context, string) ([]netip.Addr, error)) ([]netip.Addr, error) {
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.Query(ctx, `SELECT private_addr::text FROM nodes
+		UNION SELECT host FROM instances WHERE host IS NOT NULL AND host <> ''
+		UNION SELECT admin_host FROM instances WHERE admin_host IS NOT NULL AND admin_host <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Addr
+	for _, n := range names {
+		if p, err := netip.ParsePrefix(n); err == nil {
+			n = p.Addr().String()
+		}
+		if a, err := netip.ParseAddr(n); err == nil {
+			out = append(out, a)
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		as, err := resolve(rctx, n)
+		cancel()
+		if err == nil {
+			out = append(out, as...)
+		}
+	}
+	return out, nil
 }
 
 // Request is one outbound call.
@@ -461,6 +591,32 @@ func (s *Service) Take(orgID uuid.UUID, kind string, perPeriod int64, period tim
 	}
 	b.tokens--
 	return true
+}
+
+// TakeFrom is Take for a bucket that may already be part spent: when this
+// process has none for the organisation yet, used reports how many of the
+// period's tokens went before (by another server, or before a restart), so
+// a server that takes over the work doesn't start with a full allowance.
+func (s *Service) TakeFrom(orgID uuid.UUID, kind string, perPeriod int64, period time.Duration, used func() (int64, error)) (bool, error) {
+	if perPeriod <= 0 {
+		return true, nil
+	}
+	key := kind + ":" + orgID.String()
+	s.mu.Lock()
+	_, ok := s.buckets[key]
+	s.mu.Unlock()
+	if !ok {
+		n, err := used()
+		if err != nil {
+			return false, err
+		}
+		s.mu.Lock()
+		if _, ok := s.buckets[key]; !ok {
+			s.buckets[key] = &bucket{tokens: float64(max(perPeriod-n, 0)), at: s.cfg.Now()}
+		}
+		s.mu.Unlock()
+	}
+	return s.Take(orgID, kind, perPeriod, period), nil
 }
 
 // Sweep drops counters older than 30 days.

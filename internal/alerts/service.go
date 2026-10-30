@@ -10,17 +10,20 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/faildomain"
+	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -37,7 +40,13 @@ const (
 	// Standby edge pooler (V3 §2.1).
 	KindPoolerHostNotReady = "pooler_host_not_ready"
 	KindPoolerSplitBrain   = "pooler_split_brain"
-	KindIsolationCheck     = "isolation_check_failed"
+	// A pooler ignores hba.conf (auth_type is not hba): IP allowlists are
+	// stored but not enforced.
+	KindPoolerAllowlistOff = "pooler_allowlist_off"
+	// The last pooler sync left a row out as invalid (a bad node address,
+	// say): those projects can't connect through the poolers.
+	KindPoolerSkipped  = "pooler_config_skipped"
+	KindIsolationCheck = "isolation_check_failed"
 	// Capacity automation (V3 §5.2): a proposal waits for approval, or a
 	// provisioning failed in the last day.
 	// HA members, etcd members or pooler hosts share a failure domain (V3.1 §2.4).
@@ -53,7 +62,50 @@ const (
 	nodeDiskThreshold      = 0.85
 	nodeUnreachableAfter   = 2 * time.Minute
 	projectSizeFreshWithin = 30 * time.Minute
+	clientCertWarnWithin   = 6 * time.Hour
+	// walArchiveWindow is how far back failed archiving attempts count;
+	// walArchiveStale how long a completed WAL segment may wait (with
+	// archive_timeout at 60 s, a healthy archive waits seconds).
+	walArchiveWindow = 15 * time.Minute
+	walArchiveStale  = 15 * time.Minute
+	// xenibase-server's client certificate for agents is close to expiry:
+	// renewing it keeps failing.
+	KindAgentClientCert = "agent_client_cert"
+	// A Postgres minor upgrade of an instance failed (V3 §2.4): the sweep
+	// leaves the instance on its release until a newer one or Run now.
+	KindMinorUpgradeFailed = "minor_upgrade_failed"
+	// A dedicated project's WAL archiving fails or is behind (spec §6.4's
+	// "WAL archive lag").
+	KindWALArchive = "wal_archive"
+	// A region's projects keep their files in its backup target (V4 §5.1):
+	// the edges hold credentials that can delete its backups.
+	KindFilesShareBackups = "files_share_backups"
 )
+
+// KindProjectStuck: a live project is in a status other than active with
+// no queued or running operation, 10 minutes after its last one ended: a
+// move, promotion, demotion or major upgrade whose rollback still cannot
+// unfreeze it (its instance does not answer), a create, restore or delete
+// that ended without setting the project's final status, or a project
+// left in error.
+const (
+	KindProjectStuck  = "project_stuck"
+	projectStuckAfter = 10 * time.Minute
+)
+
+// KindQueueAge: the oldest runnable operation of a class has waited too
+// long for a worker: every slot is busy (interactive), or the class is at
+// its cap (long, scheduled), or no worker runs its kind.
+const KindQueueAge = "queue_age"
+
+// queueAgeAfter is how long the oldest runnable operation of each class
+// may wait before queue_age fires. The nightly backups fill the scheduled
+// slots for a while by design, and a long kind waits for one of 2 slots.
+var queueAgeAfter = map[jobs.Class]time.Duration{
+	jobs.ClassInteractive: 15 * time.Minute,
+	jobs.ClassLong:        time.Hour,
+	jobs.ClassScheduled:   time.Hour,
+}
 
 // Config configures the service.
 type Config struct {
@@ -69,7 +121,29 @@ type Config struct {
 	// WakerAddr returns the waker's address as the poolers reach it ("" when
 	// there is none); checked for "waker down" with the poolers' grace.
 	WakerAddr func() string
+	// PoolerSkipped returns what the last pooler sync left out as invalid.
+	PoolerSkipped func() []string
+	// ClientCertExpiry returns when xenibase-server's agent client
+	// certificate expires (renewing it first when due); nil skips the check.
+	ClientCertExpiry func() time.Time
+	// OperationClass returns an operation kind's class, for queue_age
+	// (jobs.Classifier of the runner's kinds); nil counts every kind as
+	// interactive.
+	OperationClass func(kind string) jobs.Class
+	// ResolveAfter is how many evaluations in a row, from any server, must
+	// find a firing alert's condition clear before it resolves (default
+	// 3), spanning about ResolveAfter-1 intervals: a value hovering at a
+	// threshold does not fire and resolve at every crossing.
+	ResolveAfter int
+	// Retain is how long resolved alerts are kept (default 90 days).
+	Retain time.Duration
 }
+
+const (
+	defaultResolveAfter = 3
+	defaultRetain       = 90 * 24 * time.Hour
+	pruneEvery          = time.Hour
+)
 
 // Service evaluates conditions and delivers notifications.
 type Service struct {
@@ -79,8 +153,12 @@ type Service struct {
 	http    *http.Client
 	log     *slog.Logger
 
-	mu            sync.Mutex
-	poolerFailing map[string]time.Time // since when each pooler fails
+	mu sync.Mutex
+	// poolerFailing holds the grace clocks when there is no database
+	// (unit tests); otherwise they are in alert_grace, shared by every
+	// server.
+	poolerFailing map[string]time.Time
+	lastPrune     time.Time
 }
 
 // New returns a Service.
@@ -90,6 +168,12 @@ func New(db *pgxpool.Pool, keyring *crypto.Keyring, cfg Config, log *slog.Logger
 	}
 	if cfg.PoolerGrace == 0 {
 		cfg.PoolerGrace = time.Minute
+	}
+	if cfg.ResolveAfter <= 0 {
+		cfg.ResolveAfter = defaultResolveAfter
+	}
+	if cfg.Retain <= 0 {
+		cfg.Retain = defaultRetain
 	}
 	return &Service{db: db, keyring: keyring, cfg: cfg, http: &http.Client{Timeout: 15 * time.Second}, log: log,
 		poolerFailing: map[string]time.Time{}}
@@ -111,10 +195,34 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-// Tick evaluates every condition once, then delivers pending notifications.
+// Tick evaluates every condition once, then delivers pending
+// notifications, and hourly prunes old resolved alerts.
 func (s *Service) Tick(ctx context.Context) error {
 	err := s.Evaluate(ctx)
-	return errors.Join(err, s.DeliverPending(ctx))
+	err = errors.Join(err, s.DeliverPending(ctx))
+	return errors.Join(err, s.prune(ctx))
+}
+
+// prune deletes resolved alerts older than Retain, with their deliveries,
+// at most once per pruneEvery in this process.
+func (s *Service) prune(ctx context.Context) error {
+	s.mu.Lock()
+	due := time.Since(s.lastPrune) >= pruneEvery
+	if due {
+		s.lastPrune = time.Now()
+	}
+	s.mu.Unlock()
+	if !due {
+		return nil
+	}
+	n, err := store.New(s.db).PruneResolvedAlerts(ctx, time.Now().Add(-s.cfg.Retain))
+	if err != nil {
+		return fmt.Errorf("pruning resolved alerts: %w", err)
+	}
+	if n > 0 {
+		s.log.Info("pruned resolved alerts", "count", n, "older_than", s.cfg.Retain.String())
+	}
+	return nil
 }
 
 // condition is one alert that should be firing now.
@@ -125,14 +233,14 @@ type condition struct {
 
 func (c condition) key() string { return c.kind + ":" + c.targetType + ":" + c.targetID }
 
-// Evaluate fires alerts for the conditions that hold and resolves the ones
-// that no longer do. Each transition is recorded once, whichever server
-// sees it first.
+// Evaluate fires alerts for the conditions that hold and counts a clear
+// evaluation for the ones that no longer do, resolving those clear
+// ResolveAfter times in a row. Each transition is recorded once, whichever
+// server sees it first. When a source could not be read, what was read
+// still fires, but nothing is counted clear or resolved that round: the
+// failed source may be the one that would have reported it.
 func (s *Service) Evaluate(ctx context.Context) error {
-	conds, err := s.conditions(ctx)
-	if err != nil {
-		return err
-	}
+	conds, partial := s.conditions(ctx)
 	q := store.New(s.db)
 	now := map[string]bool{}
 	for _, c := range conds {
@@ -143,29 +251,44 @@ func (s *Service) Evaluate(ctx context.Context) error {
 			TargetName: c.targetName, Summary: c.summary, Detail: detail,
 		})
 		if err != nil {
-			return err
+			return errors.Join(partial, err)
 		}
 		if row.Inserted {
 			s.log.Warn("alert firing", "kind", c.kind, "target", c.targetName, "summary", c.summary, "alert_id", row.ID)
 		}
 	}
+	if partial != nil {
+		return partial
+	}
 	firing, err := q.FiringAlerts(ctx)
 	if err != nil {
 		return err
 	}
+	// The clear evaluations must span about ResolveAfter-1 intervals: with
+	// several servers evaluating, the count alone would be reached sooner.
+	span := time.Duration(s.cfg.ResolveAfter-1)*s.cfg.Interval - s.cfg.Interval/2
 	for _, a := range firing {
 		if now[a.Key] {
 			continue
 		}
-		if n, err := q.ResolveAlert(ctx, a.ID); err != nil {
+		resolved, err := q.ClearAlert(ctx, store.ClearAlertParams{
+			ResolveAfter: int32(min(s.cfg.ResolveAfter, 1000)), SpanSeconds: max(span, 0).Seconds(), ID: a.ID, //nolint:gosec // bounded
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// Another server resolved it meanwhile.
+		case err != nil:
 			return err
-		} else if n > 0 {
+		case resolved:
 			s.log.Info("alert resolved", "kind", a.Kind, "target", a.TargetName, "alert_id", a.ID)
 		}
 	}
 	return nil
 }
 
+// conditions returns every condition that holds, as far as it could tell:
+// when a source fails the error says so, and the conditions read from the
+// other sources are still returned.
 func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 	q := store.New(s.db)
 	var out []condition
@@ -190,6 +313,8 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		for _, i := range insts {
 			nodeOf[i.ID.String()] = i.NodeName
 		}
+	} else {
+		errs = append(errs, err)
 	}
 	for _, o := range ops {
 		if o.Status != "failed" {
@@ -217,7 +342,13 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		case "restore_test":
 			id, name := "all", "restore test"
 			if o.ProjectID != nil {
-				id, name = o.ProjectID.String(), names[*o.ProjectID]
+				// An on-demand test of one project: only while the project
+				// is live (a deleted one is never tested again).
+				var live bool
+				if name, live = names[*o.ProjectID]; !live {
+					continue
+				}
+				id = o.ProjectID.String()
 			}
 			out = append(out, condition{KindRestoreTestFailed, SeverityCritical, "project", id, name,
 				fmt.Sprintf("Restore test of %s failed: %s", name, msg), detail})
@@ -231,6 +362,17 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		}
 	}
 
+	minors, err := q.FailedMinorUpgrades(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, m := range minors {
+		what := m.Kind + " instance on " + m.NodeName
+		out = append(out, condition{KindMinorUpgradeFailed, SeverityCritical, "instance", m.InstanceID.String(), what,
+			fmt.Sprintf("Minor upgrade of the %s from %s to %s failed: %s", what, m.FromRelease, m.ToRelease, m.Error),
+			map[string]any{"minor_upgrade_id": m.ID, "to_release": m.ToRelease, "error": m.Error}})
+	}
+
 	overdue, err := q.OverdueBackups(ctx, backupOverdueAfter.Seconds())
 	if err != nil {
 		errs = append(errs, err)
@@ -242,6 +384,35 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		}
 		out = append(out, condition{KindBackupOverdue, SeverityWarning, "project", p.ID.String(), p.Name,
 			fmt.Sprintf("No backup of %s in 26 hours (%s)", p.Name, since), map[string]any{"last_backup_at": p.LastBackupAt}})
+	}
+
+	stuck, err := q.ListProjectsLeftWithoutOperation(ctx, projectStuckAfter.Seconds())
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, p := range stuck {
+		out = append(out, stuckCondition(p))
+	}
+
+	ages, err := q.QueuedOperationAges(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	out = append(out, queueAgeConditions(ages, s.cfg.OperationClass)...)
+	archives, err := q.WALArchiveSamples(ctx, time.Now().Add(-walArchiveWindow))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	out = append(out, walArchiveConditions(archives)...)
+
+	shared, err := q.RegionsFilesOnBackupTarget(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, r := range shared {
+		out = append(out, condition{KindFilesShareBackups, SeverityWarning, "region", r.ID, r.Name,
+			fmt.Sprintf("File storage in %s uses the region's backup target, so the edges serving its %d project(s) with storage hold credentials that can delete its backups: give the region a files target (Platform → Regions, docs/regions.md)",
+				r.Name, r.Projects), map[string]any{"projects": r.Projects}})
 	}
 
 	unreachable, err := q.UnreachableNodes(ctx, nodeUnreachableAfter.Seconds())
@@ -310,8 +481,18 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 		errs = append(errs, err)
 	}
 
-	out = append(out, s.poolerConditions(ctx)...)
-	out = append(out, s.wakerConditions(ctx)...)
+	poolerConds, err := s.poolerConditions(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	out = append(out, poolerConds...)
+	wakerConds, err := s.wakerConditions(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	out = append(out, wakerConds...)
+	out = append(out, skippedConditions(s.cfg.PoolerSkipped)...)
+	out = append(out, s.clientCertConditions()...)
 	hostConds, err := s.poolerHostConditions(ctx)
 	if err != nil {
 		errs = append(errs, err)
@@ -327,49 +508,147 @@ func (s *Service) conditions(ctx context.Context) ([]condition, error) {
 	} else {
 		errs = append(errs, err)
 	}
-	// A partial evaluation must not resolve alerts it could not check.
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
+	// A partial evaluation must not resolve alerts it could not check
+	// (Evaluate resolves nothing then), but fires what it read.
+	return out, errors.Join(errs...)
+}
+
+// graceStale is how long a grace clock nobody refreshed is kept: after
+// it, a new failure starts the clock over.
+func (s *Service) graceStale() time.Duration { return max(5*time.Minute, 3*s.cfg.Interval) }
+
+// grace records whether key is failing now and returns for how long it
+// has been, by any server's account (zero when it is not failing). The
+// clocks are in alert_grace, so with several servers one does not resolve
+// what another fired; without a database (unit tests), in memory.
+func (s *Service) grace(ctx context.Context, key string, failing bool) (time.Duration, error) {
+	if s.db == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !failing {
+			delete(s.poolerFailing, key)
+			return 0, nil
+		}
+		since, ok := s.poolerFailing[key]
+		if !ok {
+			since = time.Now()
+			s.poolerFailing[key] = since
+		}
+		return time.Since(since), nil
 	}
-	return out, nil
+	q := store.New(s.db)
+	if !failing {
+		return 0, q.GraceClear(ctx, []string{key})
+	}
+	secs, err := q.GraceFailing(ctx, store.GraceFailingParams{Key: key, StaleSeconds: s.graceStale().Seconds()})
+	return time.Duration(secs * float64(time.Second)), err
+}
+
+// graceForget drops the grace clocks of keys with prefix other than keep.
+func (s *Service) graceForget(ctx context.Context, prefix string, keep []string) error {
+	if s.db == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for key := range s.poolerFailing {
+			if strings.HasPrefix(key, prefix) && !slices.Contains(keep, key) {
+				delete(s.poolerFailing, key)
+			}
+		}
+		return nil
+	}
+	if keep == nil {
+		keep = []string{}
+	}
+	return store.New(s.db).GraceClearPrefix(ctx, store.GraceClearPrefixParams{Prefix: prefix, Keep: keep})
+}
+
+// walArchiveConditions reports dedicated projects whose WAL archiving
+// failed within the window (pg_stat_archiver's failed attempts went up) or
+// is behind: a completed segment has waited longer than walArchiveStale.
+// Either way recovery past the gap is impossible, and WAL piles up in
+// pg_wal until the volume fills, while base backups may still succeed.
+func walArchiveConditions(rows []store.WALArchiveSamplesRow) []condition {
+	var out []condition
+	for _, r := range rows {
+		failing := r.FailedFirst >= 0 && r.FailedLast > r.FailedFirst
+		stale := r.PendingAgeS > walArchiveStale.Seconds()
+		if !failing && !stale {
+			continue
+		}
+		detail := map[string]any{"failed_attempts": r.FailedLast - r.FailedFirst, "segments_waiting": r.Pending, "oldest_waiting_s": r.PendingAgeS}
+		var summary string
+		switch {
+		case stale:
+			summary = fmt.Sprintf("WAL archiving of %s is %s behind (%.0f segment(s) waiting)", r.Name, (time.Duration(r.PendingAgeS) * time.Second).Round(time.Minute), r.Pending)
+		default:
+			summary = fmt.Sprintf("WAL archiving of %s is failing (%.0f failed attempt(s) in %s)", r.Name, r.FailedLast-r.FailedFirst, walArchiveWindow)
+		}
+		out = append(out, condition{KindWALArchive, SeverityCritical, "project", r.ID.String(), r.Name, summary, detail})
+	}
+	return out
 }
 
 // poolerConditions reports poolers whose admin console has not answered
 // for the grace period.
-func (s *Service) poolerConditions(ctx context.Context) []condition {
+func (s *Service) poolerConditions(ctx context.Context) ([]condition, error) {
 	var out []condition
+	var errs []error
 	for _, a := range s.cfg.Poolers {
 		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := a.Ping(pctx)
 		cancel()
-		s.mu.Lock()
-		since, failing := s.poolerFailing[a.Name]
-		switch {
-		case err == nil:
-			delete(s.poolerFailing, a.Name)
-		case !failing:
-			since = time.Now()
-			s.poolerFailing[a.Name] = since
+		if ctx.Err() != nil {
+			return out, ctx.Err()
 		}
-		s.mu.Unlock()
-		if err != nil && ctx.Err() == nil && time.Since(since) >= s.cfg.PoolerGrace {
+		failingFor, gerr := s.grace(ctx, a.Name, err != nil)
+		if gerr != nil {
+			errs = append(errs, gerr)
+			continue
+		}
+		if err != nil && failingFor >= s.cfg.PoolerGrace {
 			out = append(out, condition{KindPoolerDown, SeverityCritical, "pooler", a.Name, a.Name + " pooler (" + a.Addr() + ")",
 				fmt.Sprintf("The %s pooler at %s is down: %v", a.Name, a.Addr(), err), map[string]any{"address": a.Addr()}})
 		}
+		if err == nil {
+			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			why, err := a.EnforcesHBA(pctx)
+			cancel()
+			if err == nil && why != "" {
+				out = append(out, condition{KindPoolerAllowlistOff, SeverityCritical, "pooler", a.Name, a.Name + " pooler (" + a.Addr() + ")",
+					why, map[string]any{"address": a.Addr()}})
+			}
+		}
 	}
-	return out
+	return out, errors.Join(errs...)
+}
+
+// skippedConditions reports rows the last pooler sync left out as invalid:
+// the rest of the configuration was applied, but those routes or logins
+// don't work until the row is fixed.
+func skippedConditions(skipped func() []string) []condition {
+	if skipped == nil {
+		return nil
+	}
+	list := skipped()
+	if len(list) == 0 {
+		return nil
+	}
+	return []condition{{KindPoolerSkipped, SeverityCritical, "pooler", "config", "pooler configuration",
+		fmt.Sprintf("The pooler configuration left out %d invalid entr%s, so those projects or logins can't connect through the poolers: %s. Fix the row (often a node's private address) and the next sync includes it.",
+			len(list), map[bool]string{true: "y", false: "ies"}[len(list) == 1], strings.Join(list, "; ")),
+		map[string]any{"skipped": list}}}
 }
 
 // wakerConditions reports a waker that hasn't accepted connections for the
 // grace period: paused Free projects can't wake from a connection, and the
 // sweep stops pausing until it is back.
-func (s *Service) wakerConditions(ctx context.Context) []condition {
+func (s *Service) wakerConditions(ctx context.Context) ([]condition, error) {
 	if s.cfg.WakerAddr == nil {
-		return nil
+		return nil, nil
 	}
 	addr := s.cfg.WakerAddr()
 	if addr == "" {
-		return nil
+		return nil, nil
 	}
 	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	c, err := (&net.Dialer{}).DialContext(dctx, "tcp", addr)
@@ -378,23 +657,33 @@ func (s *Service) wakerConditions(ctx context.Context) []condition {
 	if up {
 		_ = c.Close()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	since, failing := s.poolerFailing["waker"]
-	switch {
-	case up:
-		delete(s.poolerFailing, "waker")
-		return nil
-	case !failing:
-		since = time.Now()
-		s.poolerFailing["waker"] = since
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	if ctx.Err() != nil || time.Since(since) < s.cfg.PoolerGrace {
-		return nil
+	failingFor, err := s.grace(ctx, "waker", !up)
+	if err != nil || up || failingFor < s.cfg.PoolerGrace {
+		return nil, err
 	}
 	return []condition{{KindWakerDown, SeverityCritical, "control_plane", "waker", "waker",
 		fmt.Sprintf("The waker at %s doesn't accept connections: paused Free projects can't resume when a client connects (they can still be resumed from the dashboard), and pausing is on hold.", addr),
-		map[string]any{"address": addr}}}
+		map[string]any{"address": addr}}}, nil
+}
+
+// clientCertConditions reports xenibase-server's agent client certificate
+// when less than clientCertWarnWithin is left: it lasts a day and is
+// renewed with twelve hours left, so renewing has been failing for six
+// hours. Once it expires no agent accepts the server.
+func (s *Service) clientCertConditions() []condition {
+	if s.cfg.ClientCertExpiry == nil {
+		return nil
+	}
+	exp := s.cfg.ClientCertExpiry()
+	if time.Until(exp) > clientCertWarnWithin {
+		return nil
+	}
+	return []condition{{KindAgentClientCert, SeverityCritical, "control_plane", "agent_client_cert", "agent client certificate",
+		fmt.Sprintf("xenibase-server's client certificate for agents expires %s and could not be renewed (see the server's log). When it expires, no agent accepts the server until a renewal succeeds.", exp.UTC().Format(time.RFC3339)),
+		map[string]any{"expires_at": exp.UTC().Format(time.RFC3339)}}}
 }
 
 // poolerHostConditions reports pooler hosts (V3 §2.1) that answer but
@@ -409,23 +698,17 @@ func (s *Service) poolerHostConditions(ctx context.Context) ([]condition, error)
 	fresh := time.Now().Add(-2 * time.Minute)
 	var out []condition
 	masters := map[string][]string{}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, h := range hosts {
 		checked := h.PoolerCheckedAt != nil && h.PoolerCheckedAt.After(fresh)
 		key := "host:" + h.ID.String()
 		notReady := checked && h.Status == "healthy" && h.PoolerReady != nil && !*h.PoolerReady
-		since, failing := s.poolerFailing[key]
-		switch {
-		case !notReady:
-			delete(s.poolerFailing, key)
-		case !failing:
-			since = time.Now()
-			s.poolerFailing[key] = since
+		failingFor, err := s.grace(ctx, key, notReady)
+		if err != nil {
+			return out, err
 		}
-		if notReady && time.Since(since) >= s.cfg.PoolerGrace {
+		if notReady && failingFor >= s.cfg.PoolerGrace {
 			out = append(out, condition{KindPoolerHostNotReady, SeverityCritical, "node", h.ID.String(), h.Name,
-				fmt.Sprintf("Pooler host %s can't serve: a PgBouncer is down or its configuration is stale, so it can't take the floating IP", h.Name),
+				fmt.Sprintf("Pooler host %s can't serve: a PgBouncer is down, its configuration is stale, or it ignores hba.conf (IP allowlists not enforced), so it can't take the floating IP. Admin → Nodes shows which.", h.Name),
 				map[string]any{"generation": h.PoolerGeneration, "vrrp_state": h.PoolerVrrpState}})
 		}
 		if checked && h.Status == "healthy" && h.PoolerVrrpState != nil && *h.PoolerVrrpState == "MASTER" {
@@ -434,27 +717,27 @@ func (s *Service) poolerHostConditions(ctx context.Context) ([]condition, error)
 	}
 	// Each region's pair has its own floating IP, so split brain is two
 	// MASTERs in one region; a MASTER in each region is normal (V3 §6.1).
-	for key := range s.poolerFailing {
-		if r, ok := strings.CutPrefix(key, "split:"); ok && len(masters[r]) < 2 {
-			delete(s.poolerFailing, key)
-		}
-	}
 	regions := make([]string, 0, len(masters))
+	var split []string
 	for r := range masters {
 		regions = append(regions, r)
+		if len(masters[r]) >= 2 {
+			split = append(split, "split:"+r)
+		}
+	}
+	if err := s.graceForget(ctx, "split:", split); err != nil {
+		return out, err
 	}
 	sort.Strings(regions)
 	for _, r := range regions {
 		if len(masters[r]) < 2 {
 			continue
 		}
-		key := "split:" + r
-		since, failing := s.poolerFailing[key]
-		if !failing {
-			since = time.Now()
-			s.poolerFailing[key] = since
+		failingFor, err := s.grace(ctx, "split:"+r, true)
+		if err != nil {
+			return out, err
 		}
-		if time.Since(since) >= s.cfg.PoolerGrace {
+		if failingFor >= s.cfg.PoolerGrace {
 			out = append(out, condition{KindPoolerSplitBrain, SeverityCritical, "pooler", "edge:" + r, r + " edge pooler",
 				fmt.Sprintf("More than one pooler host in %s is keepalived MASTER (%s): check the network between them. xenibase-server keeps the floating IP on one healthy host.", r, strings.Join(masters[r], ", ")),
 				map[string]any{"masters": masters[r], "region": r}})
@@ -464,7 +747,11 @@ func (s *Service) poolerHostConditions(ctx context.Context) ([]condition, error)
 }
 
 // DeliverPending sends notifications not yet delivered (new firings and
-// resolutions, and earlier failures once their backoff passes).
+// resolutions, and earlier failures once their backoff passes). Each
+// channel is recorded on its own: one that failed is retried alone, with
+// its own backoff, and one that has the event is not sent it again. An
+// alert that resolved before its firing reached a channel is announced
+// there by its resolution alone (it carries started_at and resolved_at).
 func (s *Service) DeliverPending(ctx context.Context) error {
 	q := store.New(s.db)
 	pending, err := q.ClaimUndelivered(ctx)
@@ -475,27 +762,71 @@ func (s *Service) DeliverPending(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	names := ch.names()
 	for _, a := range pending {
 		resolved := a.Status == "resolved"
-		if !ch.any() {
+		if len(names) == 0 {
 			if err := q.SkipDelivery(ctx, a.ID); err != nil {
 				return err
 			}
 			continue
 		}
-		event := EventFiring
+		event, rec := EventFiring, "firing"
 		if resolved {
-			event = EventResolved
+			event, rec = EventResolved, "resolved"
 		}
-		if err := s.deliver(ctx, ch, s.payload(event, a)); err != nil {
-			s.log.Warn("alert delivery failed", "alert_id", a.ID, "event", event, "err", err)
-			msg := truncate(err.Error(), 1000)
-			if err := q.MarkDeliveryFailed(ctx, store.MarkDeliveryFailedParams{ID: a.ID, Error: &msg}); err != nil {
+		done, err := q.AlertDeliveries(ctx, store.AlertDeliveriesParams{AlertID: a.ID, Event: rec})
+		if err != nil {
+			return err
+		}
+		byChannel := map[string]store.AlertDelivery{}
+		for _, d := range done {
+			byChannel[d.Channel] = d
+		}
+		p := s.payload(event, a)
+		var retryAt *time.Time
+		later := func(t time.Time) {
+			if retryAt == nil || t.Before(*retryAt) {
+				retryAt = &t
+			}
+		}
+		var failures []string
+		for _, name := range names {
+			d, seen := byChannel[name]
+			if seen && d.SentAt != nil {
+				continue
+			}
+			if seen && d.NextAt != nil && d.NextAt.After(time.Now()) {
+				// This channel's own backoff has not passed.
+				later(*d.NextAt)
+				if d.Error != nil {
+					failures = append(failures, name+": "+*d.Error)
+				}
+				continue
+			}
+			if err := s.send(ctx, ch, name, p); err != nil {
+				s.log.Warn("alert delivery failed", "alert_id", a.ID, "event", event, "channel", name, "err", err)
+				msg := truncate(err.Error(), 1000)
+				next, err := q.MarkChannelFailed(ctx, store.MarkChannelFailedParams{AlertID: a.ID, Event: rec, Channel: name, Error: &msg})
+				if err != nil {
+					return err
+				}
+				later(next)
+				failures = append(failures, name+": "+msg)
+				continue
+			}
+			if err := q.MarkChannelSent(ctx, store.MarkChannelSentParams{AlertID: a.ID, Event: rec, Channel: name}); err != nil {
+				return err
+			}
+		}
+		if retryAt == nil {
+			if err := q.MarkDelivered(ctx, store.MarkDeliveredParams{ID: a.ID, Resolved: resolved}); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := q.MarkDelivered(ctx, store.MarkDeliveredParams{ID: a.ID, Resolved: resolved}); err != nil {
+		msg := truncate(strings.Join(failures, "; "), 1000)
+		if err := q.MarkDeliveryFailed(ctx, store.MarkDeliveryFailedParams{ID: a.ID, Error: &msg, RetryAt: retryAt}); err != nil {
 			return err
 		}
 	}

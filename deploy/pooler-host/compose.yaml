@@ -9,11 +9,15 @@
 #   XENIBASE_EDGE_PEER_IP=10.0.0.12     the other pooler host's
 #   XENIBASE_EDGE_INTERFACE=enp7s0      the private network's interface
 #   XENIBASE_EDGE_VRRP_PASSWORD=...     the same on both, at most 8 characters
-#   XENIBASE_AGENT_FLOATING_IP_ID=...   the Hetzner floating IP
-#   XENIBASE_AGENT_HETZNER_TOKEN=...    a Hetzner Cloud API token
+#
+# No Hetzner token here: xenibase-server moves the floating IP to the host
+# keepalived makes MASTER. (XENIBASE_AGENT_ASSIGN_FLOATING_IP=true with
+# XENIBASE_AGENT_FLOATING_IP_ID and XENIBASE_AGENT_HETZNER_TOKEN lets the agent
+# assign it too, so failover works without xenibase-server, at the cost of a
+# token that opens the whole Hetzner project on this internet-facing host.)
 #
 # Configure the floating IP on the public interface of both hosts (Hetzner's
-# "persistent" setup); the agent routes it to the host keepalived makes
+# "persistent" setup); xenibase-server routes it to the host keepalived makes
 # MASTER.
 #
 #   make pooler-host-images      (in a Xenibase checkout, then copy the images)
@@ -21,11 +25,20 @@
 
 name: xenibase-edge
 
+# Every container's log: Docker's json-file driver, rotated, so a chatty or
+# crash-looping service can't fill the disk (at most 5 x 50 MB per container).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   pooler-host:
     image: ${XENIBASE_POOLER_HOST_IMAGE:-xenibase-pooler-host:local}
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     env_file: .env
     environment:
       XENIBASE_AGENT_SERVER_ID: ${XENIBASE_AGENT_SERVER_ID:-hetzner-metadata}
@@ -41,6 +54,7 @@ services:
     image: ${XENIBASE_KEEPALIVED_IMAGE:-xenibase-keepalived:local}
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     cap_add: [NET_ADMIN, NET_BROADCAST, NET_RAW]
     volumes:
       - edge:/etc/xenibase-edge:ro

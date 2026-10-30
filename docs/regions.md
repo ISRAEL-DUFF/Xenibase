@@ -23,7 +23,9 @@ Regions are managed under **Platform → Regions** (or
 2. **Storage.** Add an S3-compatible bucket in the region as a platform
    storage target (Settings → Platform storage targets) and choose it as the
    region's **backup target**. Choose a **copy target** in another region
-   or provider for cross-region copies (below).
+   or provider for cross-region copies (below). For backend services, add
+   a second target for files and choose it as the **files target**
+   ([below](#files-target)).
 3. **Nodes.** Record each node's [failure domain](failure-domains.md)
    (its rack) as you add it. HA standbys, etcd members and pooler hosts
    are kept in different ones. Add the region's nodes (`POST /api/v1/nodes` with
@@ -33,11 +35,28 @@ Regions are managed under **Platform → Regions** (or
    [edge poolers](edge-poolers.md)), and set the region's floating IP ID.
    Point the region's hostname at that floating IP. Until a region has
    pooler hosts of its own, the home region's poolers serve its projects
-   (Platform → Regions says "served by the home poolers").
+   (Platform → Regions says "served by the home poolers"). The region's
+   pooler hosts serve a certificate for its hostname, obtained and renewed
+   the same way as the home one (`XENIBASE_POOLER_TLS`: self-signed, or from
+   the ACME CA over HTTP-01, which needs port 80 of the region's hostname to
+   reach xenibase-server's `/.well-known/acme-challenge/`; until it does, a
+   self-signed certificate for the hostname stands in). In `files` mode the one
+   certificate you supply is served everywhere, so it must name every
+   region's hostname (or be a wildcard that covers them).
 5. **Data residency** (optional): tick **Offer data residency**. It needs
    the country and an in-country backup target.
+6. **API domain** (optional, for backend services): set the region's own
+   **API domain** (`ng.api.example.com`) and run an edge in the region
+   for it (below), so its projects' API traffic stays in the region.
 
-Hidden regions take no new projects; existing ones keep running.
+Hidden regions take no new projects except from their **early-access
+organisations**; existing ones keep running. List your own organisation
+there to rehearse on the region before it opens, or a first customer to
+start on it before everyone can (Platform → Regions → the region →
+**Early-access organisations**, one organisation ID per line, or
+`early_access_org_ids` in the `PUT`). Those organisations see the region
+in New project, marked "early access"; nobody else does. Left out of a
+`PUT`, the list is kept; opening the region doesn't clear it.
 A hidden region shows its **launch checks** in its panel (and at
 `GET /api/v1/admin/regions/{id}/readiness`): healthy nodes, the pooler
 pair and its failure domains, the floating IP, the hostname, backup and
@@ -63,11 +82,53 @@ can't offer HA.
   project's region changes and so does its hostname. **The old hostname
   keeps routing for 30 days**: the old region's poolers keep a forward to
   it, and Project Settings shows when it ends. Tell the customer to update
-  their connection strings within that time.
+  their connection strings within that time. **A project with stored files
+  can't move regions** (409): its files are in its region's object store
+  and a move doesn't copy them, so it is refused while the project has
+  files or an upload in progress, when asked and again at the cutover.
+  Delete the files first (or download and upload them again after the
+  move), or move it within its region.
 
 Each region's pooler hosts get their own configuration: their projects'
 routes and logins, plus those forwarded to them, with their own
 generation and floating IP in the arbiter.
+
+## A region's API domain
+
+A project's backend services (data API, auth, files, realtime) are at
+`https://<ref>.<api-domain>`. With one platform API domain
+(`XENIBASE_API_DOMAIN`), every project's API is reached through the same
+wildcard DNS record, usually pointing at the home region, so a Lagos
+project's API calls would cross to the home region and back. Give the
+region its own API domain to keep them there:
+
+1. **DNS and TLS.** A wildcard record `*.ng.api.example.com` pointing at
+   the region's edge (a node in the region, or a floating IP in front of
+   two), and a wildcard certificate for it, obtained the same way as the
+   platform's ([Enabling backend services](enabling-backend-services.md)).
+2. **The edge.** Run xenibase-edge in the region with
+   `XENIBASE_EDGE_DOMAIN=ng.api.example.com` and
+   `XENIBASE_EDGE_REGION=ng-lagos`, and as `XENIBASE_EDGE_SECRET` a
+   credential for the region (`xenibase-server -issue-edge-credential
+   edge-lagos-1 -edge-region ng-lagos`, see
+   [Running xenibase-edge](backend-services.md#running-xenibase-edge)): it
+   serves the region's projects, and only them, and the platform-wide edge
+   secret no longer reads them. Edge nodes Xenibase adds in the region get
+   the region's domain and their own credential in their cloud-init.
+3. **Platform → Regions → the region → API domain:** `ng.api.example.com`.
+   It must differ from the platform's domain and from every other
+   region's.
+
+From then on the dashboard, the API page, `xenibase services env`,
+branches, auth emails and signed file URLs give the region's projects
+their `https://<ref>.ng.api.example.com` URL. Set it **before** the
+region's first project enables backend services: changing it later
+changes those projects' API URL, and their apps, OAuth redirect URLs and
+saved links need the new one. Once the region has its own API domain, the
+platform domain's edges (which use the platform-wide edge secret) stop
+serving its projects, so `<ref>.<platform domain>` no longer reaches them
+(unless `XENIBASE_EDGE_SECRET_ALL_REGIONS=true`, deprecated). A project
+moved to another region takes that region's API URL.
 
 ## Data residency
 
@@ -93,6 +154,53 @@ backups only on machines and buckets in the region. Whether a regulator
 requires in-country hosting is the customer's determination. A residency
 region should have its own pooler hosts, or client connections pass
 through the home region's poolers.
+
+## Files target
+
+Backend services keep projects' files (V4 §5) in the region's **files
+target**. Every edge serving the region holds that target's credentials,
+and the edge is the process that faces the internet, so the files target
+must not be able to reach the region's backups:
+
+- **A bucket of its own** (recommended): a second bucket in the region,
+  with an access key allowed only on it; or
+- **the backup bucket with credentials scoped to `files/`**, where the
+  provider supports prefix conditions (an AWS IAM or MinIO policy on
+  `arn:aws:s3:::<bucket>/<prefix>files/*`, with `s3:prefix` limited to
+  `<prefix>files/` for listing). Cloudflare R2's API tokens are per bucket,
+  so on R2 use a bucket of its own.
+
+Add it as a platform storage target, then choose it as the region's
+**Files target** (Platform → Regions → the region, or `files_target_id` in
+the region's `PUT`). It can't be the platform default or any region's
+backup or copy target, can't be deleted while it is a region's files
+target, and for a data-residency region must be marked as in the region.
+
+A region without a files target keeps its files in its backup target, as
+every region did before files targets: xenibase-server logs "file storage uses the region's backup
+target" and the **files_share_backups** alert fires for the region while
+any project there has backend services. The region's launch checks warn
+too.
+
+**Setting it doesn't move files already stored.** For a region whose
+projects already have files, copy them across around the switch, with any
+S3 tool (`rclone` here, remotes `old` for the backup target and `new` for
+the files target, `<prefix>` each target's prefix if it has one):
+
+1. `rclone copy old:<bucket>/<prefix>files/ new:<bucket>/<prefix>files/`
+   (the bulk, while the region keeps serving).
+2. Set the region's files target. Within a minute the edges and the sweep
+   use it; uploads go to the new target from then on.
+3. Run the same `rclone copy` again: it copies what was uploaded between
+   the two steps (object keys never change, so nothing is overwritten).
+   Until it finishes, those few files answer "the object's data is
+   missing". Large uploads in progress at the switch fail; the app starts
+   them again.
+4. Check Project → Storage shows no missing files after the next nightly
+   reconcile, then delete `files/` from the backup target, and remove the
+   edge's access to it if you rotated its key.
+
+Changing a region's files target later needs the same copy.
 
 ## Cross-region backup copies
 

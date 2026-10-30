@@ -92,6 +92,8 @@ var routeRules = map[string]rule{
 	"GET /api/v1/terms":                                  {scope: scopePublic, beforeTerms: true},
 	"POST /api/v1/invitations/preview":                   {scope: scopePublic},
 	"POST /api/v1/invitations/accept":                    {scope: scopePublic},
+	// The emailed link confirming a billing contact; the token is the proof.
+	"POST /api/v1/billing/contacts/confirm": {scope: scopePublic},
 	// The CLI's device login; the approval itself needs a session.
 	"POST /api/v1/auth/device":       {scope: scopePublic},
 	"POST /api/v1/auth/device/token": {scope: scopePublic},
@@ -126,7 +128,9 @@ var routeRules = map[string]rule{
 	"GET /api/v1/regions":                                {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},
 	"POST /api/v1/imports/preflight":                     {scope: scopeSelf, action: authz.Self},
 	// API tokens (V2 §7.2): a token may manage its user's tokens in its own
-	// organisation, never exceeding itself (the handlers check).
+	// organisation, never exceeding itself (the handlers check). Revoking
+	// another token is a change, so it takes write; any token may revoke
+	// itself (xenibase logout), which RevokeMyToken allows.
 	"GET /api/v1/tokens":                           {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},
 	"POST /api/v1/tokens":                          {scope: scopeSelf, action: authz.Self, token: authz.ScopeWrite},
 	"DELETE /api/v1/tokens/{token_id}":             {scope: scopeSelf, action: authz.Self, token: authz.ScopeRead},
@@ -219,6 +223,7 @@ var routeRules = map[string]rule{
 	"POST /api/v1/projects/{id}/auth/templates/preview":            {scope: scopeProject, action: authz.ServicesManage},
 	"GET /api/v1/projects/{id}/auth/signing-keys":                  {scope: scopeProject, action: authz.ServicesLogs},
 	"POST /api/v1/projects/{id}/auth/signing-keys/rotate":          {scope: scopeProject, action: authz.ServicesManage},
+	"POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke":  {scope: scopeProject, action: authz.ServicesManage},
 	"GET /api/v1/projects/{id}/auth/users":                         {scope: scopeProject, action: authz.AuthUsers},
 	"GET /api/v1/projects/{id}/files":                              {scope: scopeProject, action: authz.FilesView},
 	"GET /api/v1/projects/{id}/realtime":                           {scope: scopeProject, action: authz.RealtimeView},
@@ -254,6 +259,7 @@ var routeRules = map[string]rule{
 	"GET /api/v1/projects/{id}/replicas":                           {scope: scopeProject, action: authz.ProjectView},
 	"POST /api/v1/projects/{id}/replicas":                          {scope: scopeProject, action: authz.ProjectPromote},
 	"DELETE /api/v1/projects/{id}/replicas/{replica_id}":           {scope: scopeProject, action: authz.ProjectPromote},
+	"PATCH /api/v1/projects/{id}/replicas/{replica_id}":            {scope: scopeProject, action: authz.ProjectPromote},
 	"POST /api/v1/projects/{id}/replicas/{replica_id}/detach":      {scope: scopeProject, action: authz.ProjectPromote},
 	"POST /api/v1/projects/{id}/resume":                            {scope: scopeProject, action: authz.ProjectView},
 	"POST /api/v1/projects/{id}/upgrade/preflight":                 {scope: scopeProject, action: authz.ProjectPromote},
@@ -335,11 +341,16 @@ var routeRules = map[string]rule{
 	"GET /api/v1/projects/{id}/backup-key/download":                  {scope: scopeProject, action: authz.BackupStorage},
 	// Restoring in place needs the project admin role; the handler checks
 	// it for that mode.
-	"POST /api/v1/backups/{id}/restore":   {scope: scopeBackup, action: authz.BackupCreate},
-	"GET /api/v1/backups/{id}/download":   {scope: scopeBackup, action: authz.ProjectExport},
-	"PUT /api/v1/projects/{id}/residency": {scope: scopeProject, action: authz.ProjectResidency},
-	"GET /api/v1/operations/{id}":         {scope: scopeOperation, action: authz.ProjectView},
-	"GET /api/v1/operations/{id}/stream":  {scope: scopeOperation, action: authz.ProjectView},
+	"POST /api/v1/backups/{id}/restore":            {scope: scopeBackup, action: authz.BackupCreate},
+	"GET /api/v1/backups/{id}/download":            {scope: scopeBackup, action: authz.ProjectExport},
+	"PUT /api/v1/projects/{id}/residency":          {scope: scopeProject, action: authz.ProjectResidency},
+	"GET /api/v1/projects/{id}/network":            {scope: scopeProject, action: authz.ProjectSettings, token: authz.ScopeRead},
+	"PUT /api/v1/projects/{id}/network":            {scope: scopeProject, action: authz.ProjectSettings},
+	"GET /api/v1/projects/{id}/manage-roles":       {scope: scopeProject, action: authz.ProjectSettings, token: authz.ScopeRead},
+	"PUT /api/v1/projects/{id}/manage-roles":       {scope: scopeProject, action: authz.ProjectManageRoles},
+	"POST /api/v1/projects/{id}/manage-roles/sync": {scope: scopeProject, action: authz.ProjectSettings},
+	"GET /api/v1/operations/{id}":                  {scope: scopeOperation, action: authz.ProjectView},
+	"GET /api/v1/operations/{id}/stream":           {scope: scopeOperation, action: authz.ProjectView},
 
 	// The platform.
 	"PUT /api/v1/settings/db-host":             {scope: scopePlatform, action: authz.PlatformManage},
@@ -359,8 +370,10 @@ var routeRules = map[string]rule{
 	"PATCH /api/v1/nodes/{id}":                 {scope: scopePlatform, action: authz.PlatformManage},
 	"DELETE /api/v1/nodes/{id}":                {scope: scopePlatform, action: authz.PlatformManage},
 	// The Postgres version lifecycle (V4.1 §6.1).
-	"GET /api/v1/admin/pg-versions":           {scope: scopePlatform, action: authz.PlatformManage},
-	"PATCH /api/v1/admin/pg-versions/{major}": {scope: scopePlatform, action: authz.PlatformManage},
+	"GET /api/v1/admin/pg-versions":                {scope: scopePlatform, action: authz.PlatformManage},
+	"GET /api/v1/admin/agent-client-certs":         {scope: scopePlatform, action: authz.PlatformManage},
+	"POST /api/v1/admin/agent-client-certs/revoke": {scope: scopePlatform, action: authz.PlatformManage},
+	"PATCH /api/v1/admin/pg-versions/{major}":      {scope: scopePlatform, action: authz.PlatformManage},
 	// Capacity automation and cost attribution (V3 §5, §7.2).
 	"GET /api/v1/admin/capacity":                                         {scope: scopePlatform, action: authz.PlatformManage},
 	"GET /api/v1/admin/regions":                                          {scope: scopePlatform, action: authz.PlatformManage},

@@ -26,9 +26,17 @@ import (
 // backup, and it optionally copies existing backups.
 const KindStorageSwitch = "storage_switch"
 
-// PITRWindow is how long a retired WAL-G archive stays restorable after a
-// switch (the dedicated tier's point-in-time window, spec s4.3).
+// PITRWindow is the dedicated tier's point-in-time window (spec s4.3), the
+// least a retired WAL-G archive stays restorable after a switch.
 const PITRWindow = 7 * 24 * time.Hour
+
+// retiredArchiveKept is how long an archive retired by a switch stays
+// restorable: the project's window, 7 days or the 14 or 30 it pays for
+// (V4.1 s4.2), so recovery to before the switch lasts as long as it would
+// have without one.
+func retiredArchiveKept(inst store.Instance) time.Duration {
+	return max(PITRWindow, time.Duration(inst.PitrDays)*24*time.Hour)
+}
 
 // Storage target management errors.
 var (
@@ -142,6 +150,9 @@ func (s *Service) SaveTarget(ctx context.Context, orgID, id *uuid.UUID, in Targe
 			t.SecretKey = stored.SecretKey
 		}
 	}
+	if err := locationFree(ctx, store.New(s.db), orgID, id, t); err != nil {
+		return cur, nil, err
+	}
 	steps, ok, err := s.TestStorage(ctx, t)
 	if err != nil {
 		return cur, nil, fmt.Errorf("%w: %w", ErrInvalid, err)
@@ -151,7 +162,13 @@ func (s *Service) SaveTarget(ctx context.Context, orgID, id *uuid.UUID, in Targe
 	}
 	var out store.StorageTarget
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('xenibase_storage_target_locations'))`); err != nil {
+			return err
+		}
 		q := store.New(tx)
+		if err := locationFree(ctx, q, orgID, id, t); err != nil {
+			return err
+		}
 		tid := uuid.New()
 		if id != nil {
 			tid = *id
@@ -204,6 +221,41 @@ func (s *Service) SaveTarget(ctx context.Context, orgID, id *uuid.UUID, in Targe
 	return out, steps, err
 }
 
+// locationFree refuses t when another live target (id is the one being
+// updated) has its endpoint, bucket and prefix. Copies keep the object
+// key, so a "copy" between two such targets overwrites each object with
+// itself, and deleting the original afterwards deletes the only copy.
+func locationFree(ctx context.Context, q *store.Queries, orgID, id *uuid.UUID, t storage.Target) error {
+	rows, err := q.LiveStorageTargetLocations(ctx)
+	if err != nil {
+		return err
+	}
+	at := t.Location()
+	for _, r := range rows {
+		if (id != nil && r.ID == *id) || (storage.Target{Endpoint: r.Endpoint, Bucket: r.Bucket, Prefix: r.Prefix}).Location() != at {
+			continue
+		}
+		if (orgID == nil && r.OrgID == nil) || (orgID != nil && r.OrgID != nil && *orgID == *r.OrgID) {
+			return fmt.Errorf("%w: storage target %q already uses this bucket and prefix; give this one another prefix", ErrConflict, r.Name)
+		}
+		// Another organisation's (or the platform's): not named.
+		return fmt.Errorf("%w: another storage target already uses this bucket and prefix; give this one another prefix", ErrConflict)
+	}
+	return nil
+}
+
+// errSameLocation refuses copying, or deleting a copy, between two targets
+// that are one place: the "copy" is the original, and deleting either
+// leaves nothing behind.
+var errSameLocation = errors.New("the source and destination are the same bucket and prefix")
+
+func sameLocation(a, b storage.Target) error {
+	if a.Location() == b.Location() {
+		return errSameLocation
+	}
+	return nil
+}
+
 // DeleteTarget deletes a target. It refuses while a project uses it, and
 // while it holds unexpired backups unless acceptLoss (those backups then
 // become unrestorable). The bucket itself is left alone.
@@ -219,6 +271,14 @@ func (s *Service) DeleteTarget(ctx context.Context, orgID *uuid.UUID, id uuid.UU
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM storage_targets WHERE id = $1 FOR UPDATE`, id); err != nil {
 			return err
+		}
+		// A region's files are in its files target, with nowhere else to go.
+		var files bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM regions WHERE files_target_id = $1)`, id).Scan(&files); err != nil {
+			return err
+		}
+		if files {
+			return fmt.Errorf("%w: it holds a region's files; give the region another files target first", ErrTargetInUse)
 		}
 		q := store.New(tx)
 		u, err := q.StorageTargetUse(ctx, store.StorageTargetUseParams{ID: id})
@@ -344,7 +404,7 @@ func (s *Service) reconfigureArchive(ctx context.Context, p store.Project, pl Pl
 		}
 		if old != nil {
 			if err := q.ExpireArchiveBaseBackups(ctx, store.ExpireArchiveBaseBackupsParams{
-				ProjectID: &p.ID, WalgPrefix: old, ExpiresAt: time.Now().Add(PITRWindow),
+				ProjectID: &p.ID, WalgPrefix: old, ExpiresAt: time.Now().Add(retiredArchiveKept(inst)),
 			}); err != nil {
 				return err
 			}
@@ -387,7 +447,11 @@ func (s *Service) copyExisting(ctx context.Context, p store.Project, pl Placemen
 	}
 	var copied int
 	for _, b := range rows {
-		if err := s.copyBackup(ctx, b, pl.TargetID, dst); err != nil {
+		if err := s.copyBackup(ctx, b, pl.TargetID, dst); errors.Is(err, errSameLocation) {
+			// Already where the new target is; the original stays as it is.
+			_ = log.Warn(ctx, "copy", "%s is already in the new target's bucket and prefix; not copied", b.ObjectKey)
+			continue
+		} else if err != nil {
 			return fmt.Errorf("copy backup %s: %w", b.ID, err)
 		}
 		copied++
@@ -416,6 +480,9 @@ func (s *Service) copyBackup(ctx context.Context, b store.Backup, dstID uuid.UUI
 	}
 	src, err := s.backupTarget(ctx, b)
 	if err != nil {
+		return jobs.Permanent(err)
+	}
+	if err := sameLocation(src, dst.Target()); err != nil {
 		return jobs.Permanent(err)
 	}
 	sc, err := storage.New(src)
@@ -473,7 +540,8 @@ func (s *Service) copyBackup(ctx context.Context, b store.Backup, dstID uuid.UUI
 	return q.MarkBackupCopied(ctx, b.ID)
 }
 
-// deleteOriginal removes a copied original's object.
+// deleteOriginal removes a copied original's object, once a verified copy
+// of it is somewhere else.
 func (s *Service) deleteOriginal(ctx context.Context, b store.Backup) error {
 	q := store.New(s.db)
 	t, err := s.backupTarget(ctx, b)
@@ -482,6 +550,20 @@ func (s *Service) deleteOriginal(ctx context.Context, b store.Backup) error {
 	}
 	if err != nil {
 		return err
+	}
+	copies, err := q.VerifiedCopiesOf(ctx, &b.ID)
+	if err != nil {
+		return err
+	}
+	elsewhere := false
+	for _, c := range copies {
+		if ct, err := s.backupTarget(ctx, c); err == nil && sameLocation(t, ct) == nil {
+			elsewhere = true
+			break
+		}
+	}
+	if !elsewhere {
+		return errors.New("no verified copy of it is in another bucket or prefix")
 	}
 	c, err := storage.New(t)
 	if err != nil {

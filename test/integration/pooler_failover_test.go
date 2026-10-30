@@ -54,8 +54,9 @@ func TestPoolerHostFailover(t *testing.T) {
 	prefix := gw[:strings.LastIndex(gw, ".")+1]
 	vip := prefix + "240"
 
-	// The fake Hetzner API, where the agents (in containers) and the
-	// arbiter (here) reach it.
+	// The fake Hetzner API, where the arbiter (here) reaches it. The hosts
+	// have no token: the arbiter moves the floating IP to keepalived's
+	// MASTER.
 	fake := &floatip.Fake{Token: "edge-token", IPID: "77"}
 	ln, err := net.Listen("tcp", net.JoinHostPort(gw, "0"))
 	if err != nil {
@@ -108,8 +109,7 @@ func TestPoolerHostFailover(t *testing.T) {
 			"-v", edgeDir + ":/etc/xenibase-edge",
 			"-e", "XENIBASE_AGENT_SERVER=" + e.URL, "-e", "XENIBASE_AGENT_TOKEN=" + created.Token,
 			"-e", "XENIBASE_AGENT_ADVERTISE=" + h.ip + ":7070", "-e", "XENIBASE_AGENT_LOG_FORMAT=text",
-			"-e", "XENIBASE_AGENT_SERVER_ID=" + h.serverID, "-e", "XENIBASE_AGENT_HETZNER_API=" + hzURL,
-			"-e", "XENIBASE_AGENT_HETZNER_TOKEN=" + fake.Token, "-e", "XENIBASE_AGENT_FLOATING_IP_ID=" + fake.IPID,
+			"-e", "XENIBASE_AGENT_SERVER_ID=" + h.serverID,
 			"-e", "XENIBASE_EDGE_SELF_IP=" + h.ip, "-e", "XENIBASE_EDGE_PEER_IP=" + peer, "-e", "XENIBASE_EDGE_VIP=" + vip,
 			"-e", "XENIBASE_EDGE_VRRP_PASSWORD=edgetest", "-e", "XENIBASE_EDGE_PRIORITY=" + strconv.Itoa(110-10*i),
 			hostImage}

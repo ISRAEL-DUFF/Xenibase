@@ -35,21 +35,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error {
 // MigrateTo migrates up or down to version (-1: the latest). Tests use it
 // to load data in an older schema and upgrade it.
 func MigrateTo(ctx context.Context, pool *pgxpool.Pool, version int64, log *slog.Logger) error {
-	fsys, err := fs.Sub(migrations, "migrations")
+	p, closeDB, err := provider(pool, true)
 	if err != nil {
 		return err
 	}
-	locker, err := lock.NewPostgresSessionLocker()
-	if err != nil {
-		return err
-	}
-	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
-
-	p, err := goose.NewProvider(goose.DialectPostgres, db, fsys, goose.WithSessionLocker(locker))
-	if err != nil {
-		return fmt.Errorf("migrations: %w", err)
-	}
+	defer closeDB()
 	var results []*goose.MigrationResult
 	if version < 0 {
 		if err := refuseNewerSchema(ctx, p); err != nil {
@@ -74,6 +64,41 @@ func MigrateTo(ctx context.Context, pool *pgxpool.Pool, version int64, log *slog
 		log.Info("applied migration", "version", r.Source.Version, "file", r.Source.Path, "duration", r.Duration)
 	}
 	return nil
+}
+
+// provider opens goose on pool; locked serializes migrations across servers.
+func provider(pool *pgxpool.Pool, locked bool) (*goose.Provider, func(), error) {
+	fsys, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		return nil, nil, err
+	}
+	var opts []goose.ProviderOption
+	if locked {
+		locker, err := lock.NewPostgresSessionLocker()
+		if err != nil {
+			return nil, nil, err
+		}
+		opts = append(opts, goose.WithSessionLocker(locker))
+	}
+	db := stdlib.OpenDBFromPool(pool)
+	p, err := goose.NewProvider(goose.DialectPostgres, db, fsys, opts...)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("migrations: %w", err)
+	}
+	return p, func() { _ = db.Close() }, nil
+}
+
+// CheckSchema returns an error wrapping ErrSchemaNewer when a newer release
+// has migrated the database, which can happen while this server runs (a
+// rolling upgrade, or a second control-plane server upgraded first).
+func CheckSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	p, closeDB, err := provider(pool, false)
+	if err != nil {
+		return err
+	}
+	defer closeDB()
+	return refuseNewerSchema(ctx, p)
 }
 
 // refuseNewerSchema fails when the database's applied version is beyond the

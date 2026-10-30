@@ -155,8 +155,8 @@ type Transform struct {
 }
 
 // Token is what a signed URL carries: the project, bucket, path and expiry,
-// HMAC'd with the project's storage secret, so the edge checks it without a
-// policy query (the policies were checked when it was made).
+// HMAC'd with the project's storage secret, so the edge checks a download
+// token without a policy query (the policies were checked when it was made).
 type Token struct {
 	Kind      string     `json:"k"`
 	Ref       string     `json:"r"`
@@ -167,6 +167,9 @@ type Token struct {
 	Transform *Transform `json:"t,omitempty"`
 	Upsert    bool       `json:"u,omitempty"`
 	Owner     *uuid.UUID `json:"o,omitempty"`
+	// ID names an upload token's row in xb_storage.upload_tokens, which
+	// holds the signer's role and claims and goes when the token is used.
+	ID *uuid.UUID `json:"i,omitempty"`
 }
 
 // Sign makes t's token.

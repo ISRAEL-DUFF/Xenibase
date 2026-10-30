@@ -124,11 +124,15 @@ cd deploy/compose
 It asks for the web UI hostname and an email for Let's Encrypt notices
 (or reads `XENIBASE_UI_DOMAIN` and `XENIBASE_ACME_EMAIL`), then:
 
-1. writes `deploy/compose/.env` with freshly generated secrets;
+1. writes `deploy/compose/.env` with freshly generated secrets, readable
+   by its owner only (mode 600; an existing `.env` is set to 600 too);
 2. builds the images (PostgreSQL 18 with WAL-G, xenibase-server, the agent);
 3. starts Caddy, xenibase-server, the metadata database, the shared
    PostgreSQL 18 cluster, both poolers, and the agent;
 4. prints the web UI's address and a **one-time setup code**.
+
+Container logs are rotated (Docker's `json-file` driver, 5 files of 50 MB per
+container), so they can't fill the disk.
 
 The first run takes a few minutes, mostly building images.
 

@@ -152,18 +152,25 @@ var promHelp = map[string]string{
 	PoolerWaiting:     "Clients waiting for a server connection in the poolers.",
 	TPS:               "Transactions (commits and rollbacks) per second.",
 	CacheHitRatio:     "Share of block reads served from shared buffers.",
-	CPUPercent:        "CPU busy percentage.",
-	Load1:             "1-minute load average.",
-	MemUsedBytes:      "Memory in use (total less available).",
-	MemTotalBytes:     "Total memory.",
-	DiskUsedBytes:     "Used bytes on the data disk.",
-	DiskTotalBytes:    "Size of the data disk.",
-	DiskReadBPS:       "Disk read bytes per second.",
-	DiskWriteBPS:      "Disk written bytes per second.",
+	// Dedicated projects only.
+	WALArchiveFailed:     "Failed WAL archiving attempts since the statistics were reset.",
+	WALArchiveAge:        "Seconds since a WAL segment was last archived.",
+	WALArchivePending:    "Completed WAL segments waiting to be archived.",
+	WALArchivePendingAge: "Seconds the oldest WAL segment waiting to be archived has waited (0 when none waits).",
+	CPUPercent:           "CPU busy percentage.",
+	Load1:                "1-minute load average.",
+	MemUsedBytes:         "Memory in use (total less available).",
+	MemTotalBytes:        "Total memory.",
+	DiskUsedBytes:        "Used bytes on the data disk.",
+	DiskTotalBytes:       "Size of the data disk.",
+	DiskReadBPS:          "Disk read bytes per second.",
+	DiskWriteBPS:         "Disk written bytes per second.",
+	// Instances (shared clusters and dedicated instances).
+	WebhookListenConnections: "Direct connections the webhook deliverer holds LISTENing on the instance's databases, outside the poolers.",
 }
 
 // WritePrometheus writes the latest point of every metric in the text
-// exposition format, with project and node labels.
+// exposition format, with project, node and instance labels.
 //
 // Project series are labelled by the opaque project id, the tier, and the
 // owning organisation, never by the project's or database's name: whoever
@@ -199,6 +206,13 @@ func WritePrometheus(ctx context.Context, w io.Writer, db store.DBTX, interval t
 	}
 	for _, n := range ns {
 		labels[n.ID] = fmt.Sprintf(`node_id="%s",node=%s`, n.ID, quote(n.Name))
+	}
+	insts, err := q.ListInstanceLabels(ctx)
+	if err != nil {
+		return err
+	}
+	for _, i := range insts {
+		labels[i.ID] = fmt.Sprintf(`instance_id="%s",kind=%s,node_id="%s",node=%s`, i.ID, quote(i.Kind), i.NodeID, quote(i.Node))
 	}
 
 	type sample struct {

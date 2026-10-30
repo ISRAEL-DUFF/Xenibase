@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/agentca"
+	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/store"
 	"github.com/israel-duff/xenibase/internal/version"
 )
@@ -40,15 +42,19 @@ var (
 
 // Service manages nodes and their agents.
 type Service struct {
-	db         *pgxpool.Pool
-	ca         *agentca.CA
-	clientCert tls.Certificate
-	bootstrap  string // install-time token, see Register
-	home       string // the home region (V3 §6.1)
-	log        *slog.Logger
+	db        *pgxpool.Pool
+	ca        *agentca.CA
+	certs     *clientCerts // this server's client certificate
+	name      string       // this server, in its client certificates
+	allow     allowList    // the agents' allow list, as last read
+	bootstrap string       // install-time token, see Register
+	bootNode  string       // the only node it registers
+	home      string       // the home region (V3 §6.1)
+	log       *slog.Logger
 
 	mu     sync.Mutex
 	health map[uuid.UUID]Status
+	agents agentClients
 }
 
 // Status is the last known state of a node's agent.
@@ -77,15 +83,44 @@ func (s *Service) regionOr(r string) string {
 }
 
 // NewService returns a Service. bootstrapToken (XENIBASE_AGENT_BOOTSTRAP_TOKEN)
-// lets the install bundle's own agent register the local node without an
+// lets the install bundle's own agent register the local node (named
+// "local" unless SetBootstrapNode says otherwise) once, without an
 // operator; empty disables it.
+//
+// The server issues itself a client certificate for its agents at once,
+// named after its host (a day long, renewed at half-life), and records its
+// serial in the metadata database, which agents' allow lists are made from.
 func NewService(db *pgxpool.Pool, ca *agentca.CA, bootstrapToken string, log *slog.Logger) (*Service, error) {
-	cert, err := ca.ServerClientCert()
-	if err != nil {
-		return nil, err
-	}
-	return &Service{db: db, ca: ca, clientCert: cert, bootstrap: bootstrapToken, log: log, health: map[uuid.UUID]Status{}}, nil
+	return newService(db, ca, bootstrapToken, defaultServerName(), log)
 }
+
+func newService(db *pgxpool.Pool, ca *agentca.CA, bootstrapToken, name string, log *slog.Logger) (*Service, error) {
+	s := &Service{db: db, ca: ca, name: name, bootstrap: bootstrapToken, bootNode: "local", log: log, health: map[uuid.UUID]Status{}}
+	s.certs = newClientCerts(func(now time.Time) (tls.Certificate, error) { return ca.ServerClientCertFor(s.name, now) }, time.Now, log)
+	s.certs.register = s.registerClientCert
+	s.certs.after = func(ctx context.Context) {
+		if err := s.refreshAllow(ctx); err != nil {
+			log.Warn("reading the agent allow list failed", "err", err)
+		}
+		s.agents.closeIdle()
+	}
+	if _, err := s.certs.get(); err != nil {
+		return nil, fmt.Errorf("agent client certificate: %w", err)
+	}
+	return s, nil
+}
+
+// SetBootstrapNode names the node the bootstrap token registers: the
+// bundle's local node (XENIBASE_SHARED_NODE_NAME).
+func (s *Service) SetBootstrapNode(name string) {
+	if name != "" {
+		s.bootNode = name
+	}
+}
+
+// bootstrapUsedKey is the settings row recording that the bootstrap token
+// registered its node. From then on it registers nothing.
+const bootstrapUsedKey = "agent_bootstrap_used"
 
 // newToken returns a registration token, its hash, and its expiry (a day).
 func newToken() (token, hash string, exp time.Time, err error) {
@@ -130,14 +165,32 @@ func (s *Service) Register(ctx context.Context, req agentapi.RegisterRequest) (a
 		q := store.New(tx)
 		var node store.Node
 		var err error
-		if s.bootstrap != "" && req.Node != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.bootstrap)) == 1 {
+		bootstrap := s.bootstrap != "" && req.Node != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.bootstrap)) == 1
+		if bootstrap {
+			// The bootstrap token registers one node, once, and only while
+			// it has never had an agent: it never expires and sits in the
+			// bundle's .env, so it must not claim a node an operator or
+			// capacity automation added, or bring back a removed one.
+			// Re-registering needs a token from the UI.
+			if req.Node != s.bootNode {
+				return fmt.Errorf("%w: the bootstrap token only registers node %q", ErrBadToken, s.bootNode)
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('xenibase_agent_bootstrap'))`); err != nil {
+				return err
+			}
+			if _, err := q.GetSetting(ctx, bootstrapUsedKey); err == nil {
+				return fmt.Errorf("%w: the bootstrap token has already registered node %q; issue a new token from the UI", ErrBadToken, req.Node)
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
 			node, err = q.GetNodeByName(ctx, req.Node)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("%w: no node named %q", ErrBadToken, req.Node)
 			}
+			if err == nil && node.Status == "removed" {
+				return fmt.Errorf("%w: node %q was removed", ErrBadToken, req.Node)
+			}
 			if err == nil && node.AgentCertFp != nil {
-				// The bootstrap token only claims nodes without an agent;
-				// re-registering needs a token from the UI.
 				return fmt.Errorf("%w: node %q already has an agent; issue a new token from the UI", ErrBadToken, req.Node)
 			}
 		} else {
@@ -159,6 +212,12 @@ func (s *Service) Register(ctx context.Context, req agentapi.RegisterRequest) (a
 			ID: node.ID, AgentCertFp: &fp, AgentHost: &req.AdvertiseHost, AgentPort: int32(req.AdvertisePort), AgentVersion: &v,
 		}); err != nil {
 			return err
+		}
+		if bootstrap {
+			used, _ := json.Marshal(map[string]any{"node_id": node.ID, "used_at": time.Now().UTC()})
+			if err := q.PutSetting(ctx, store.PutSettingParams{Key: bootstrapUsedKey, Value: used}); err != nil {
+				return err
+			}
 		}
 		out = agentapi.RegisterResponse{NodeID: node.ID.String(), CertPEM: string(certPEM), CAPEM: string(s.ca.CertPEM())}
 		s.log.Info("agent registered", "node", node.Name, "advertise", fmt.Sprintf("%s:%d", req.AdvertiseHost, req.AdvertisePort), "fingerprint", fp)
@@ -254,6 +313,15 @@ func (s *Service) Run(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
+		// The allow list first: a revoked serial reaches every agent at this
+		// pass, and a revoked certificate of this server's is replaced.
+		if err := s.refreshAllow(ctx); err != nil {
+			s.log.Warn("reading the agent allow list failed", "err", err)
+		}
+		s.checkOwnSerial()
+		if _, err := s.certs.get(); err != nil {
+			s.log.Error("no agent client certificate", "err", err)
+		}
 		ns, err := store.New(s.db).ListNodes(ctx)
 		if err == nil {
 			for _, n := range ns {
@@ -301,8 +369,8 @@ func (s *Service) CreateNode(ctx context.Context, name, privateAddr, role, regio
 		return store.Node{}, "", time.Time{}, fmt.Errorf("%w: role must be shared, dedicated, both, pooler or edge", ErrInvalid)
 	}
 	privateAddr = strings.TrimSpace(privateAddr)
-	if privateAddr == "" || strings.ContainsAny(privateAddr, " /:") {
-		return store.Node{}, "", time.Time{}, fmt.Errorf("%w: private address must be a host name or IP", ErrInvalid)
+	if err := CheckAddr(privateAddr); err != nil {
+		return store.Node{}, "", time.Time{}, err
 	}
 	token, hash, exp, err := newToken()
 	if err != nil {
@@ -322,6 +390,21 @@ func (s *Service) CreateNode(ctx context.Context, name, privateAddr, role, regio
 		n, err = store.New(s.db).SetNodeFailureDomain(ctx, store.SetNodeFailureDomainParams{ID: n.ID, FailureDomain: &failureDomain})
 	}
 	return n, token, exp, err
+}
+
+// CheckAddr checks a node's private address: a host name or an IPv4 or
+// IPv6 address, which the poolers can route to. The poolers' renderer
+// refuses anything else (an underscore, a space, a port), so it is refused
+// here, where the operator can correct it, rather than in every later
+// pooler sync.
+func CheckAddr(addr string) error {
+	if addr == "" || strings.ContainsAny(addr, " /") || !pooler.ValidHost(addr) {
+		return fmt.Errorf("%w: private address %q must be a host name (letters, digits, dots and dashes) or an IP address", ErrInvalid, addr)
+	}
+	if _, err := netip.ParseAddr(addr); err != nil && strings.Contains(addr, ":") {
+		return fmt.Errorf("%w: private address %q: give the address without a port", ErrInvalid, addr)
+	}
+	return nil
 }
 
 var domainName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$`)

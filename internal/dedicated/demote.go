@@ -243,7 +243,7 @@ func (s *Service) preflight(ctx context.Context, p store.Project, o DemoteOption
 
 	// Roles: only the owner, the read-only role, the console's, and
 	// members' personal logins.
-	known := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName)}
+	known := []string{p.OwnerRole, provision.ReadOnlyRole(p.DbName), provision.ConsoleRole(p.DbName), provision.ConsoleReadOnlyRole(p.DbName)}
 	if p.LegacyOwnerRole != nil {
 		known = append(known, *p.LegacyOwnerRole)
 	}
@@ -495,6 +495,9 @@ func (s *Service) runDemote(ctx context.Context, op store.Operation, log *jobs.S
 	if p.InstanceID != params.SourceInstance {
 		return jobs.Permanent(errors.New("the project is no longer on the instance being demoted"))
 	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
+	}
 
 	// The checks again, against the cluster chosen (V2 §5.2).
 	plan, err := s.preflight(ctx, p, DemoteOptions{ConsoleWritable: params.ConsoleWritable}, &params.TargetInstance)
@@ -659,14 +662,17 @@ func (s *Service) failDemote(ctx context.Context, op store.Operation, log *jobs.
 		return s.finishDemotion(ctx, op, p, params.SourceInstance, log, time.Time{})
 	}
 	s.moveFailed(ctx, op, p.InstanceID, params.TargetInstance, p.DbName, log)
-	if err := s.unfreeze(ctx, p, log, "dedicated instance writable again; route resumed"); err != nil {
-		return err
-	}
-	if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
-		return err
+	thawErr := s.unfreeze(ctx, p, log, "dedicated instance writable again; route resumed")
+	if thawErr == nil {
+		if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
+			return err
+		}
 	}
 	if err := s.dropCopy(ctx, params.TargetInstance, p.DbName, p.OwnerRole); err != nil {
 		_ = log.Warn(ctx, "rollback", "could not drop the partial shared copy: %v", err)
+	}
+	if thawErr != nil {
+		return s.stuck(ctx, p, log, thawErr)
 	}
 	return log.Warn(ctx, "rollback", "demotion rolled back; the project stays on its dedicated instance with no data lost")
 }

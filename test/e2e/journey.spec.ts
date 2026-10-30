@@ -596,6 +596,16 @@ test.describe("with the saved session", () => {
     await seed.query(readFileSync(fileURLToPath(new URL("./supabase-fixture.sql", import.meta.url)), "utf8"));
     await seed.end();
 
+    // The source is on the bundle's private network, which imports refuse
+    // unless the platform admin allow-lists the host for the organisation.
+    const mine = (await page.evaluate(async () => (await fetch("/api/v1/projects")).json())) as { items: { name: string; org_id: string }[] };
+    const notesOrg = mine.items.find((p) => p.name === "Notes")!.org_id;
+    await page.goto(`/admin/orgs/${notesOrg}`);
+    await page.getByTestId("outbound-allowlist").fill(new URL(supabaseURL!).hostname);
+    await page.getByRole("button", { name: "Save allow-list" }).click();
+    await expect(page.getByRole("button", { name: "Save allow-list" })).toBeDisabled();
+    await page.goto("/projects");
+
     await page.getByRole("link", { name: "Import" }).click();
     await page.getByLabel("Source connection string").fill(supabaseURL!);
     await page.getByRole("button", { name: "Run preflight" }).click();
@@ -1462,6 +1472,7 @@ test.describe("with the saved session", () => {
     await page.getByTestId("token-some-projects").check();
     await page.getByTestId("token-project-Team data").check();
     await page.getByTestId("create-token").click();
+    await stepUpIfAsked(page); // a session creates a token after a recent step-up
     const token = await revealedValue(page, "token-secret");
     expect(token).toMatch(/^xb_[0-9A-Za-z]{43}$/);
     await shot(page, "37-token-created");
@@ -1489,6 +1500,7 @@ test.describe("with the saved session", () => {
     await page.getByTestId("device-org").selectOption(metered.id);
     await shot(page, "38-device-login");
     await page.getByTestId("device-approve").click();
+    await stepUpIfAsked(page);
     await expect(page.getByTestId("device-approved")).toBeVisible();
     const collected = await page.evaluate(async (device) => {
       const r = await fetch("/api/v1/auth/device/token", { method: "POST", credentials: "omit", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_code: device }) });

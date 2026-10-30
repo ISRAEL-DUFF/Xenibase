@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,6 +50,9 @@ func (s *Server) authError(w http.ResponseWriter, what string, err error) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", err.Error())
 	case errors.Is(err, auth.ErrLocked):
+		if until, ok := auth.LockedUntil(err); ok {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(time.Until(until).Seconds())))))
+		}
 		writeError(w, http.StatusTooManyRequests, "locked", err.Error())
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", err.Error())

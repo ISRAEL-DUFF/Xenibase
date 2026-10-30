@@ -460,6 +460,11 @@ func (c *Client) StopContainer(ctx context.Context, id string, timeout time.Dura
 		url.Values{"t": {fmt.Sprint(int(timeout.Seconds()))}}, nil, nil)
 }
 
+// RenameContainer gives a container another name.
+func (c *Client) RenameContainer(ctx context.Context, id, name string) error {
+	return c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/rename", url.Values{"name": {name}}, nil, nil)
+}
+
 // RemoveContainer force-removes a container (not its named volumes); a
 // missing one is not an error.
 func (c *Client) RemoveContainer(ctx context.Context, id string) error {

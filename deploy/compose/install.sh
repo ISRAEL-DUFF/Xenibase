@@ -9,10 +9,26 @@
 # the stack, and prints the one-time setup code. Run it again after
 # `git checkout <new tag>` to upgrade: .env is kept.
 #
+# The two halves can run on their own, as upgrade.sh does to back up the
+# metadata database between them with nothing writing to it:
+#   ./install.sh --build-only   build the images and stop; nothing is
+#                               (re)started, the running version keeps serving
+#   ./install.sh --no-build     start with the images already built
+#
 # XENIBASE_BUILD_FLAGS is passed to `docker build` (e.g. a proxy CA secret);
 # COMPOSE_FILE and COMPOSE_PROJECT_NAME work as for docker compose.
 set -eu
 cd "$(dirname "$0")"
+
+build=1 start=1
+for a in "$@"; do
+	case "$a" in
+	--build-only) start=0 ;;
+	--no-build) build=0 ;;
+	*) echo "usage: $0 [--build-only | --no-build]" >&2; exit 64 ;;
+	esac
+done
+[ "$build" -eq 1 ] || [ "$start" -eq 1 ] || { echo "--build-only and --no-build together do nothing" >&2; exit 64; }
 
 command -v docker >/dev/null || { echo "Docker is required: https://docs.docker.com/engine/install/" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required." >&2; exit 1; }
@@ -53,29 +69,47 @@ POOLER_ADMIN_PASSWORD=$(rand_url 24)
 ENV
 	echo "Wrote .env (mode 600)."
 fi
+# It holds the master key: only its owner may read it. One copied by hand from
+# .env.example keeps the copy's mode, usually 644.
+case "$(ls -ln .env | cut -c5-10)" in
+------) ;;
+*)
+	if chmod 600 .env 2>/dev/null; then
+		echo "warning: .env was open to other users; set it to mode 600 (it holds XENIBASE_MASTER_KEY)" >&2
+	else
+		echo "warning: .env is open to other users and this user can't change that: chmod 600 it as its owner (it holds XENIBASE_MASTER_KEY)" >&2
+	fi
+	;;
+esac
 # Added in later releases; older .env files lack them.
 grep -q '^AGENT_BOOTSTRAP_TOKEN=' .env || echo "AGENT_BOOTSTRAP_TOKEN=$(rand_url 32)" >> .env
 grep -q '^XENIBASE_PUBLIC_URL=' .env || echo "XENIBASE_PUBLIC_URL=https://$(grep '^XENIBASE_UI_DOMAIN=' .env | cut -d= -f2-)" >> .env
 
-# Dedicated instances and agent-run shared clusters run this image
-# (PostgreSQL + WAL-G, one image per supported major).
-# shellcheck disable=SC2086 # XENIBASE_BUILD_FLAGS is a list of flags
-for major in 17 18; do
-	docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg PG_MAJOR=$major -t xenibase-postgres:$major-walg3.0.9 ../images/postgres
-done
-# The binaries report the release they were built from (git describe: the tag
-# itself on a tagged checkout), which upgrade.sh and the Nodes page rely on.
-version=$(git describe --tags --always 2>/dev/null || echo dev)
-commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-# shellcheck disable=SC2086
-docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" -t "${XENIBASE_IMAGE:-xenibase:local}" ../..
-# shellcheck disable=SC2086
-docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" --target agent -t "${XENIBASE_AGENT_IMAGE:-xenibase-agent:local}" ../..
-# The edge is built here too, once backend services are on: its image is local,
-# so without this an upgrade keeps running the old edge.
-if grep -qE '^COMPOSE_PROFILES=.*services' .env && [ -z "${XENIBASE_EDGE_IMAGE:-}" ]; then
+if [ "$build" -eq 1 ]; then
+	# Dedicated instances and agent-run shared clusters run this image
+	# (PostgreSQL + WAL-G, one image per supported major).
+	# shellcheck disable=SC2086 # XENIBASE_BUILD_FLAGS is a list of flags
+	for major in 17 18; do
+		sh ../images/postgres/build.sh "$major" ${XENIBASE_BUILD_FLAGS:-}
+	done
+	# The binaries report the release they were built from (git describe: the tag
+	# itself on a tagged checkout), which upgrade.sh and the Nodes page rely on.
+	version=$(git describe --tags --always 2>/dev/null || echo dev)
+	commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 	# shellcheck disable=SC2086
-	docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" -f ../edge/Dockerfile -t xenibase-edge:local ../..
+	docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" -t "${XENIBASE_IMAGE:-xenibase:local}" ../..
+	# shellcheck disable=SC2086
+	docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" --target agent -t "${XENIBASE_AGENT_IMAGE:-xenibase-agent:local}" ../..
+	# The edge is built here too, once backend services are on: its image is local,
+	# so without this an upgrade keeps running the old edge.
+	if grep -qE '^COMPOSE_PROFILES=.*services' .env && [ -z "${XENIBASE_EDGE_IMAGE:-}" ]; then
+		# shellcheck disable=SC2086
+		docker build ${XENIBASE_BUILD_FLAGS:-} --build-arg "VERSION=$version" --build-arg "COMMIT=$commit" -f ../edge/Dockerfile -t xenibase-edge:local ../..
+	fi
+fi
+if [ "$start" -eq 0 ]; then
+	echo "Images built (--build-only). Nothing was restarted: the running version serves until ./install.sh --no-build."
+	exit 0
 fi
 docker compose up -d --no-build --wait
 # The poolers bind-mount single config files. A checkout replaces the file

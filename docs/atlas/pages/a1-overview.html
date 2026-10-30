@@ -1,0 +1,152 @@
+<!--atlas
+{
+  "id": "overview",
+  "title": "System overview",
+  "part": "A",
+  "order": 1,
+  "summary": "What Xenibase is, the binaries in cmd/ and what each runs, how they talk to each other, and a map of every package under internal/.",
+  "verified": "b45797127b806235ef770f1c3981a8f5eea1cc38",
+  "sources": ["cmd/server/main.go", "cmd/agent/main.go", "cmd/edge/main.go", "cmd/status/main.go", "cmd/cli/main.go", "cmd/docsite/main.go", "internal/edgeapi/edgeapi.go", "internal/signature/signature.go", "internal/pooler/render.go", "deploy/pgbouncer/", "go.mod", "web/package.json", "Xenibase — V1 Specification & Build Plan.md"]
+}
+-->
+<h2>What Xenibase is</h2>
+<p>Xenibase is a Postgres platform that one company runs for many customers. A customer signs up, gets an organisation, and creates projects. A project is a Postgres database with a stable connection string. On the <em>shared tier</em> it is one database among hundreds in a shared cluster. On the <em>dedicated tier</em> it is a Postgres container of its own on a node, archived continuously with WAL-G, optionally with a standby on another node and read replicas. Around the databases sit backups and restores, branches, a SQL console and table editor, database webhooks and scheduled jobs, and since V4 a set of backend services that make a project usable straight from an app: a data API, project auth, file storage and realtime, served by <code>xenibase-edge</code>.</p>
+<p>The product grew through five specifications, all at the repository root. V1 is the core: shared and dedicated tiers, the pooler, operations, backups and the operator UI. V2 added organisations, roles, API tokens, branches, webhooks and multi-tenant hardening. V3 and V3.1 added HA, the standby pooler, billing, the Free tier, regions and capacity automation. V4 and V4.1 added the backend services and the edge. <code>docs/decisions.md</code> records the choices made while building, milestone by milestone, and is the first place to look when the code and a spec disagree.</p>
+
+<h2>By the numbers</h2>
+<p>Counted from the repository by the build, so these figures are as current as the build.</p>
+<div class="stats">
+  <div class="stat"><x-stat name="go-lines-nontest"/><span class="stat-k">lines of Go, not counting tests</span></div>
+  <div class="stat"><x-stat name="go-test-lines"/><span class="stat-k">lines of Go tests</span></div>
+  <div class="stat"><x-stat name="packages"/><span class="stat-k">packages under <code>internal/</code></span></div>
+  <div class="stat"><x-stat name="migrations"/><span class="stat-k">metadata migrations, numbered up to <x-stat name="migrations-latest"/></span></div>
+  <div class="stat"><x-stat name="api-operations"/><span class="stat-k">operations in the OpenAPI document</span></div>
+  <div class="stat"><x-stat name="web-pages"/><span class="stat-k">screens in the web app</span></div>
+  <div class="stat"><x-stat name="integration-tests"/><span class="stat-k">integration test files</span></div>
+  <div class="stat"><x-stat name="decisions"/><span class="stat-k">recorded implementation decisions</span></div>
+</div>
+
+<h2>The binaries</h2>
+<p>Every directory in <code>cmd/</code> is one command (<x-stat name="binaries"/> of them); five are released. The Makefile's <code>build-go</code> target builds them all with <code>CGO_ENABLED=0</code>, and <code>release-check</code> refuses a server or edge binary that links purego, so both stay static.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Binary</th><th>Where it runs</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path="cmd/server/main.go"><code>xenibase-server</code></x-ref></td><td>The control node, behind Caddy</td><td>The REST API and the embedded web UI, the operation workers, and about thirty background loops. It owns the metadata database (it runs the migrations at startup) and the pooler files. It also has offline modes: <code>-gen-master-key</code>, <code>-rotate-master-key</code>, <code>admin</code> and <code>mail-preview</code>.</td></tr>
+    <tr><td><x-ref path="cmd/agent/main.go"><code>xenibase-agent</code></x-ref></td><td>Every node, including pooler hosts</td><td><code>register</code> once with a one-time token, then <code>run</code>: an HTTPS service behind mutual TLS with a fixed set of commands (health, host metrics, dump, restore, copy, dedicated instances through Docker, pooler files and keepalived on pooler hosts). <code>decrypt</code> opens a backup with an exported key.</td></tr>
+    <tr><td><x-ref path="cmd/edge/main.go"><code>xenibase-edge</code></x-ref></td><td>One or more per region</td><td>The backend services gateway at <code>https://&lt;ref&gt;.&lt;domain&gt;</code>. It is stateless: it follows <code>xenibase-server</code>'s configuration feed, serves data, auth, storage and realtime, and reports usage back. Image transforms run in child processes (<code>render-worker</code>) with capped memory.</td></tr>
+    <tr><td><x-ref path="cmd/status/main.go"><code>xenibase-status</code></x-ref></td><td>Another provider, on purpose</td><td>The public status page. It probes Xenibase from outside and takes signed heartbeats and incidents, so an outage cannot take down the page that announces it.</td></tr>
+    <tr><td><x-ref path="cmd/cli/main.go"><code>xenibase</code></x-ref></td><td>Developers' machines and CI</td><td>The command-line tool: contexts, device login, and commands for organisations, projects, branches, SQL, backups and more, all through the public API with an API token.</td></tr>
+  </tbody>
+</table></div>
+<p>The sixth, <x-ref path="cmd/docsite/main.go"><code>cmd/docsite</code></x-ref>, builds the documentation site from <code>docs/</code> and fails on a broken link. It is a build tool, not a release binary.</p>
+
+<h3>What xenibase-server switches on</h3>
+<p><code>run</code> in <code>cmd/server/main.go</code> builds each service in turn and hands them all to <x-ref path="internal/api/server.go" symbol="func NewHandler("><code>api.NewHandler</code></x-ref>. Much of it depends on configuration. Without <code>XENIBASE_POOLER_CONFIG_DIR</code> there is no pooler, and so no provisioning, backups, dedicated tier, branches, Free tier, backend services or webhooks; the server still serves accounts, organisations and billing.</p>
+<x-code path="cmd/server/main.go" start="if pc.ConfigDir == &quot;&quot; {" lines="4" caption="the switch that turns projects off"/>
+<p>Each service that does long work contributes operation kinds to one map, and a single <code>jobs.Runner</code> serves all of them:</p>
+<x-code path="cmd/server/main.go" start="notifier := jobs.NewNotifier(pool, log)" lines="5"/>
+<p>Background loops are goroutines on a context that is cancelled only after the HTTP server has drained, so open Server-Sent Event streams end before shutdown waits on them and interrupted operations are requeued.</p>
+
+<h2 id="overview--how-they-talk">How they talk</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>From</th><th>To</th><th>How</th></tr></thead>
+  <tbody>
+    <tr><td>Browser, CLI, SDK scripts</td><td><code>xenibase-server</code></td><td>HTTPS through Caddy. Sessions in <code>__Host-</code> cookies with a double-submit CSRF token, or a bearer API token. Every route declares its authorization (<x-ref path="internal/api/routes.go" symbol="var routeRules = map[string]rule{"><code>routeRules</code></x-ref>), and the guard refuses a route that does not.</td></tr>
+    <tr><td><code>xenibase-server</code></td><td>Shared clusters, dedicated instances</td><td>Direct Postgres connections over the private network as an admin role whose credential is sealed in the metadata database. This is how roles, databases, grants and extensions are made.</td></tr>
+    <tr><td><code>xenibase-server</code></td><td>Agents</td><td>HTTPS with mutual TLS. <code>xenibase-server</code> is a small CA (<code>internal/agentca</code>): it issues each agent a server certificate at registration, pinned by fingerprint, and each server presents a day-long client certificate of its own, whose serial agents check against a list the servers push (<x-page id="nodes-agents--identity">Nodes and agents</x-page>).</td></tr>
+    <tr><td><code>xenibase-server</code></td><td>PgBouncer</td><td>Files written atomically into the pooler directory (or pushed to pooler hosts through their agents), then <code>RELOAD</code>, <code>PAUSE</code>, <code>RESUME</code>, <code>KILL</code> on the admin console.</td></tr>
+    <tr><td>App servers</td><td>PgBouncer</td><td>Postgres over TLS (<code>client_tls_sslmode = require</code>). <code>:5432</code> is session mode, <code>:6543</code> transaction mode. PgBouncer authenticates with the SCRAM verifier and passes SCRAM through to the backend.</td></tr>
+    <tr><td><code>xenibase-edge</code></td><td><code>xenibase-server</code></td><td>Long-polled configuration feed and reports, signed with the edge's own region-bound credential or the platform-wide edge secret (<x-ref path="internal/edgeapi/edgeapi.go" symbol="func Signed("><code>edgeapi.Signed</code></x-ref>: HMAC-SHA256 over the time, method, request URI and body, five minutes' tolerance).</td></tr>
+    <tr><td><code>xenibase-edge</code></td><td>PgBouncer</td><td>Transaction-mode connections as the project's request roles, one transaction per request.</td></tr>
+    <tr><td><code>xenibase-server</code></td><td><code>xenibase-status</code></td><td>Signed heartbeats and incidents (<code>internal/statusapi</code>).</td></tr>
+  </tbody>
+</table></div>
+<x-include name="architecture-map.html"/>
+<div class="callout"><span class="callout-label">Resolved</span>
+  <p>One edge secret for the whole platform used to authenticate every edge, and the feed returned every region's projects when the caller left <code>region</code> empty, so the secret of any one edge node read the database logins of every project in every region. An edge in a region with its own API domain now has its own credential, bound to that region on the server (<x-ref path="internal/services/edgecreds.go" symbol="func (s *Service) VerifyEdge("><code>VerifyEdge</code></x-ref>), and the platform-wide secret serves only the regions without their own domain (<x-ref path="docs/backend-services.md" symbol="**Edge credentials.**">backend services guide</x-ref>).</p>
+</div>
+
+<h2>Repository layout</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Directory</th><th>What it holds</th></tr></thead>
+  <tbody>
+    <tr><td><x-ref path="cmd/"><code>cmd</code></x-ref></td><td>The binaries above. Each <code>main.go</code> is wiring; the logic is in <code>internal/</code>.</td></tr>
+    <tr><td><x-ref path="internal/"><code>internal</code></x-ref></td><td>Every package of the server, agent, edge and status page. The package map below covers all of them.</td></tr>
+    <tr><td><x-ref path="api/openapi.yaml"><code>api/openapi.yaml</code></x-ref></td><td>The REST API's contract. <code>oapi-codegen</code> generates the server interface in <code>internal/api/gen</code> and a Go client; <code>openapi-typescript</code> generates the web app's types. <code>make check-generated</code> fails CI when either is stale.</td></tr>
+    <tr><td><x-ref path="web/"><code>web</code></x-ref></td><td>The dashboard: React, TanStack Router and Query, Tailwind, Vite. Built into <code>web/dist</code> and embedded in <code>xenibase-server</code>.</td></tr>
+    <tr><td><x-ref path="sdk/"><code>sdk</code></x-ref></td><td>Client SDKs for the backend services in JavaScript, Go and Dart.</td></tr>
+    <tr><td><x-ref path="deploy/"><code>deploy</code></x-ref></td><td>The single-VPS compose bundle and its install and upgrade scripts, the dev environment, PgBouncer configurations, the Postgres plus WAL-G image, the pooler host and edge images, the status page, load test kit.</td></tr>
+    <tr><td><x-ref path="test/"><code>test</code></x-ref></td><td>Integration and isolation suites against real Postgres and PgBouncer, load tests, browser end-to-end tests of the bundle, upgrade rehearsals and an install-from-the-docs test.</td></tr>
+    <tr><td><x-ref path="docs/"><code>docs</code></x-ref></td><td>Operator and user guides, runbooks, <code>decisions.md</code>, and this atlas.</td></tr>
+    <tr><td><x-ref path="brand/"><code>brand</code></x-ref></td><td>The mark and icon, and the script that renders their PNGs.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>The package map</h2>
+<p>Every package under <code>internal/</code>, grouped by the part of the atlas that covers it. Each card shows the package's size (Go lines, not counting tests) and the first sentence of its own package comment. The build reads both from the code. A new package that is not yet placed here appears at the end and the build reports it.</p>
+
+<h3>B · The control plane</h3>
+<p>The API and its guard, the operations queue, provisioning, settings and the console.</p>
+<x-packages names="api,jobs,provision,config,settings,console,insights"/>
+
+<h3>B · Nodes and agents</h3>
+<x-packages names="nodes,agentapi,agentca,agentsvc,docker,cloud"/>
+
+<h3>B · Connections</h3>
+<x-packages names="pooler,floatip,tlscert,waker,edge,edgeapi,edgecred,bloom"/>
+
+<h3>B · The metadata data model</h3>
+<x-packages names="store,auditlog"/>
+
+<h3>C · Data safety</h3>
+<p>Backups and their format, imports, branches, the dedicated tier with HA and moves, and Postgres versions.</p>
+<x-packages names="backup,walg,backupfmt,pgpstream,pgverify,pgsource,branching,dedicated,ha,faildomain,regions,logical,pgversions"/>
+
+<h3>D · Backend services</h3>
+<p>The control side of the services, the catalog the data API serves, schema editing and generated types, project auth, files, and database webhooks and jobs. The data plane of these services is the <code>edge</code> package above.</p>
+<x-packages names="services,datacat,schemaedit,typegen,projauth,jwtes,messaging,files,storage,cdn,webhooks,schedjobs"/>
+
+<h3>E · Trust and business</h3>
+<x-packages names="auth,authz,orgs,totp,tokens,argonpw,mail,crypto,rotate,isocheck,outbound,signature,tenancy,billing,freetier,costs,capacity,legal"/>
+
+<h3>F · Running it</h3>
+<x-packages names="alerts,metrics,logging,statuspage,statusapi,incidents,support,version,docsite,cli,brand"/>
+
+<h3>Not yet placed</h3>
+<x-packages rest/>
+
+<div class="callout note"><span class="callout-label">Where the outline moved a package</span>
+  <p>Three packages sit somewhere other than their names suggest. <code>logical</code> is not realtime: it moves a database between servers with logical replication, so it is on the HA and moves page. <code>pgpstream</code> encrypts backup objects as OpenPGP messages, so it is with backups. Realtime has no package of its own; it is part of <code>edge</code> (<code>rthub.go</code>, <code>rtproto.go</code>, <code>rtbroadcast.go</code>).</p>
+</div>
+
+<h2>Technology, as built</h2>
+<p>Taken from <code>go.mod</code> and <code>web/package.json</code>, not from the spec.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Layer</th><th>What the code uses</th></tr></thead>
+  <tbody>
+    <tr><td>Language</td><td>Go <x-stat name="go-version"/>. One module, <code>github.com/israel-duff/xenibase</code></td></tr>
+    <tr><td>HTTP</td><td>chi v5, with handlers generated by oapi-codegen</td></tr>
+    <tr><td>Database access</td><td>pgx v5, and sqlc for the metadata database (<x-stat name="query-files"/> query files in <code>internal/store/queries</code>)</td></tr>
+    <tr><td>Migrations</td><td>goose, embedded (<x-ref path="internal/store/migrate.go" symbol="func Migrate("><code>store.Migrate</code></x-ref>)</td></tr>
+    <tr><td>Pooler</td><td>PgBouncer, two processes per pooler host, with generated <code>databases.ini</code>, <code>userlist.txt</code> and <code>hba.conf</code></td></tr>
+    <tr><td>Certificates</td><td>certmagic for the database hostname (HTTP-01), Caddy for the web UI</td></tr>
+    <tr><td>Object storage</td><td>aws-sdk-go-v2 (S3), which works with R2, B2 and MinIO</td></tr>
+    <tr><td>Backup encryption</td><td>Its own format plus OpenPGP (ProtonMail go-crypto); WAL-G on dedicated instances</td></tr>
+    <tr><td>Realtime</td><td>WebSockets (coder/websocket) from the edge</td></tr>
+    <tr><td>Images</td><td>WebAssembly AVIF and WebP codecs (gen2brain), in capped child processes</td></tr>
+    <tr><td>Web app</td><td>React 19, TanStack Router and Query, Tailwind 4, Vite 8</td></tr>
+  </tbody>
+</table></div>
+<div class="callout drift"><span class="callout-label">Spec and code differ</span>
+  <p>V1's technology table (<x-ref path="Xenibase — V1 Specification &amp; Build Plan.md" symbol="### 3.4 Key technology choices">V1 3.4</x-ref>) names the Docker Engine SDK for Go. The code has its own small client instead (<code>internal/docker</code>, covering images, volumes, containers and exec), so the module does not depend on Docker's SDK. The rest of the table holds.</p>
+</div>
+
+<h2>Where the specs and the code disagree</h2>
+<p>These are the differences found in Part A. Each is explained where it matters.</p>
+<ol>
+  <li>Database names are opaque (<code>p_</code> and ten base32 letters), not V1's <code>&lt;slug&gt;_&lt;4 characters&gt;</code>. V2 §10.2 made the change; V1 projects keep their old name as a pooler alias. <x-page id="life-of-a-project--names">Life of a project</x-page></li>
+  <li>The plaintext password is kept, sealed, in the create operation's parameters until it finishes, although V1 §5.3 says it is never stored reversibly (decision M1 #3). <x-page id="life-of-a-project--t1">Life of a project</x-page></li>
+  <li>A new shared project goes to the cluster with the fewest projects, not the one "with the most free capacity". <x-page id="life-of-a-project--t1">Life of a project</x-page></li>
+  <li>The smoke test through the poolers is skipped for a project with an IP allowlist. <x-page id="life-of-a-project--smoke">Life of a project</x-page></li>
+  <li>The Docker Engine SDK is not used (above).</li>
+</ol>

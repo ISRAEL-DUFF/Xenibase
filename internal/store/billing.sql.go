@@ -16,7 +16,7 @@ import (
 
 const addBillingContact = `-- name: AddBillingContact :one
 INSERT INTO billing_contacts (org_id, email, name) VALUES ($1, $2, $3)
-ON CONFLICT (org_id, email) DO UPDATE SET name = EXCLUDED.name RETURNING org_id, email, name, created_at, status_emails
+ON CONFLICT (org_id, email) DO UPDATE SET name = EXCLUDED.name RETURNING org_id, email, name, created_at, status_emails, verified_at, verify_token_hash, verify_expires_at, verify_sent_at
 `
 
 type AddBillingContactParams struct {
@@ -35,6 +35,10 @@ func (q *Queries) AddBillingContact(ctx context.Context, arg AddBillingContactPa
 		&i.Name,
 		&i.CreatedAt,
 		&i.StatusEmails,
+		&i.VerifiedAt,
+		&i.VerifyTokenHash,
+		&i.VerifyExpiresAt,
+		&i.VerifySentAt,
 	)
 	return i, err
 }
@@ -243,6 +247,35 @@ func (q *Queries) ClearDebitConsent(ctx context.Context, orgID uuid.UUID) (Billi
 	return i, err
 }
 
+const confirmBillingContact = `-- name: ConfirmBillingContact :one
+UPDATE billing_contacts SET verified_at = $1, verify_token_hash = NULL, verify_expires_at = NULL
+WHERE verify_token_hash = $2 AND verify_expires_at > $1 AND verified_at IS NULL
+RETURNING org_id, email, name, created_at, status_emails, verified_at, verify_token_hash, verify_expires_at, verify_sent_at
+`
+
+type ConfirmBillingContactParams struct {
+	Now       *time.Time
+	TokenHash []byte
+}
+
+// tenant: system - the confirmation link's token names the contact; it is unguessable and expires.
+func (q *Queries) ConfirmBillingContact(ctx context.Context, arg ConfirmBillingContactParams) (BillingContact, error) {
+	row := q.db.QueryRow(ctx, confirmBillingContact, arg.Now, arg.TokenHash)
+	var i BillingContact
+	err := row.Scan(
+		&i.OrgID,
+		&i.Email,
+		&i.Name,
+		&i.CreatedAt,
+		&i.StatusEmails,
+		&i.VerifiedAt,
+		&i.VerifyTokenHash,
+		&i.VerifyExpiresAt,
+		&i.VerifySentAt,
+	)
+	return i, err
+}
+
 const countLedgerTxn = `-- name: CountLedgerTxn :one
 SELECT count(*)::int FROM ledger_entries WHERE txn_id = $1
 `
@@ -341,6 +374,61 @@ func (q *Queries) DeletePriceBookDraft(ctx context.Context, version int32) (int6
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const draftsDue = `-- name: DraftsDue :many
+SELECT id, org_id, number, period_start, period_end, status, held, hold_reason, subtotal_minor, vat_minor, total_minor, wht_expected_minor, vat_rate, bill_to, seller, due_at, issued_at, paid_at, pdf_object_key, price_book_version, created_at, paid_minor, wht_deducted_minor, wht_evidenced_at, usd_subtotal_minor, usd_vat_minor, usd_total_minor, fx FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= $1
+ORDER BY period_start, created_at
+`
+
+// tenant: system - unheld drafts of a month and every earlier one, for issuing.
+func (q *Queries) DraftsDue(ctx context.Context, through pgtype.Date) ([]Invoice, error) {
+	rows, err := q.db.Query(ctx, draftsDue, through)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Invoice
+	for rows.Next() {
+		var i Invoice
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrgID,
+			&i.Number,
+			&i.PeriodStart,
+			&i.PeriodEnd,
+			&i.Status,
+			&i.Held,
+			&i.HoldReason,
+			&i.SubtotalMinor,
+			&i.VatMinor,
+			&i.TotalMinor,
+			&i.WhtExpectedMinor,
+			&i.VatRate,
+			&i.BillTo,
+			&i.Seller,
+			&i.DueAt,
+			&i.IssuedAt,
+			&i.PaidAt,
+			&i.PdfObjectKey,
+			&i.PriceBookVersion,
+			&i.CreatedAt,
+			&i.PaidMinor,
+			&i.WhtDeductedMinor,
+			&i.WhtEvidencedAt,
+			&i.UsdSubtotalMinor,
+			&i.UsdVatMinor,
+			&i.UsdTotalMinor,
+			&i.Fx,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const draftsForPeriod = `-- name: DraftsForPeriod :many
@@ -1050,6 +1138,24 @@ func (q *Queries) InvoiceLines(ctx context.Context, invoiceID uuid.UUID) ([]Invo
 	return items, nil
 }
 
+const isVerifiedMemberEmail = `-- name: IsVerifiedMemberEmail :one
+SELECT EXISTS (SELECT 1 FROM org_members m JOIN users u ON u.id = m.user_id
+  WHERE m.org_id = $1 AND u.email = $2::citext AND u.email_verified_at IS NOT NULL AND u.disabled_at IS NULL)::boolean
+`
+
+type IsVerifiedMemberEmailParams struct {
+	OrgID uuid.UUID
+	Email string
+}
+
+// Whether email is the verified address of an enabled member of the org.
+func (q *Queries) IsVerifiedMemberEmail(ctx context.Context, arg IsVerifiedMemberEmailParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isVerifiedMemberEmail, arg.OrgID, arg.Email)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const issueInvoice = `-- name: IssueInvoice :one
 UPDATE invoices SET status = $1, number = $2, issued_at = $3, due_at = $4,
   bill_to = $5, seller = $6, paid_at = $7
@@ -1291,7 +1397,7 @@ func (q *Queries) ListBillingAccounts(ctx context.Context) ([]ListBillingAccount
 
 const listBillingContacts = `-- name: ListBillingContacts :many
 
-SELECT org_id, email, name, created_at, status_emails FROM billing_contacts WHERE org_id = $1 ORDER BY email
+SELECT org_id, email, name, created_at, status_emails, verified_at, verify_token_hash, verify_expires_at, verify_sent_at FROM billing_contacts WHERE org_id = $1 ORDER BY email
 `
 
 // ---- Contacts -------------------------------------------------------------
@@ -1311,6 +1417,10 @@ func (q *Queries) ListBillingContacts(ctx context.Context, orgID uuid.UUID) ([]B
 			&i.Name,
 			&i.CreatedAt,
 			&i.StatusEmails,
+			&i.VerifiedAt,
+			&i.VerifyTokenHash,
+			&i.VerifyExpiresAt,
+			&i.VerifySentAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1598,6 +1708,22 @@ func (q *Queries) LockInvoice(ctx context.Context, id uuid.UUID) (Invoice, error
 		&i.Fx,
 	)
 	return i, err
+}
+
+const markBillingContactVerified = `-- name: MarkBillingContactVerified :exec
+UPDATE billing_contacts SET verified_at = coalesce(verified_at, $1), verify_token_hash = NULL, verify_expires_at = NULL
+WHERE org_id = $2 AND email = $3
+`
+
+type MarkBillingContactVerifiedParams struct {
+	Now   *time.Time
+	OrgID uuid.UUID
+	Email string
+}
+
+func (q *Queries) MarkBillingContactVerified(ctx context.Context, arg MarkBillingContactVerifiedParams) error {
+	_, err := q.db.Exec(ctx, markBillingContactVerified, arg.Now, arg.OrgID, arg.Email)
+	return err
 }
 
 const markPlanChangeApplied = `-- name: MarkPlanChangeApplied :exec
@@ -2089,6 +2215,30 @@ func (q *Queries) SetBillingAdmin(ctx context.Context, arg SetBillingAdminParams
 		&i.DebitTermsVersion,
 	)
 	return i, err
+}
+
+const setBillingContactVerifyToken = `-- name: SetBillingContactVerifyToken :exec
+UPDATE billing_contacts SET verify_token_hash = $1, verify_expires_at = $2, verify_sent_at = $3
+WHERE org_id = $4 AND email = $5 AND verified_at IS NULL
+`
+
+type SetBillingContactVerifyTokenParams struct {
+	TokenHash []byte
+	ExpiresAt *time.Time
+	Now       *time.Time
+	OrgID     uuid.UUID
+	Email     string
+}
+
+func (q *Queries) SetBillingContactVerifyToken(ctx context.Context, arg SetBillingContactVerifyTokenParams) error {
+	_, err := q.db.Exec(ctx, setBillingContactVerifyToken,
+		arg.TokenHash,
+		arg.ExpiresAt,
+		arg.Now,
+		arg.OrgID,
+		arg.Email,
+	)
+	return err
 }
 
 const setBillingPlan = `-- name: SetBillingPlan :one

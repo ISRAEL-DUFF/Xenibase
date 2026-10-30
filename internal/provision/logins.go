@@ -40,8 +40,9 @@ func (s *Service) loginAttr(ctx context.Context, p store.Project) (string, error
 }
 
 // ProjectLogins are the login roles apps and members use for p: the owner,
-// the V1 owner during a switch to opaque credentials, personal logins, and
-// the backend services' edge login.
+// the V1 owner during a switch to opaque credentials, personal logins, the
+// logins the owner of a dedicated project with role management created
+// (project_owned_logins), and the backend services' logins.
 // The console role is not one of them: it keeps working through locks so
 // a team can clean up (V2 §10.4).
 func (s *Service) ProjectLogins(ctx context.Context, p store.Project) ([]string, error) {
@@ -49,12 +50,20 @@ func (s *Service) ProjectLogins(ctx context.Context, p store.Project) ([]string,
 	if p.LegacyOwnerRole != nil {
 		roles = append(roles, *p.LegacyOwnerRole)
 	}
-	users, err := store.New(s.db).ListProjectDBUsers(ctx, p.ID)
+	q := store.New(s.db)
+	users, err := q.ListProjectDBUsers(ctx, p.ID)
 	if err != nil {
 		return nil, err
 	}
 	for _, u := range users {
 		roles = append(roles, u.RoleName)
+	}
+	owned, err := q.ListOwnedLogins(ctx, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range owned {
+		roles = append(roles, o.RoleName)
 	}
 	// Backend services' logins (V4 §2.3), when there are some.
 	roles = append(roles, store.ServiceRoles(p.DbName)...)
@@ -123,7 +132,7 @@ func (s *Service) SetReadOnly(ctx context.Context, p store.Project, on, endIdle 
 	}
 	if on && endIdle {
 		_, err = conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-			WHERE datname = $1 AND state = 'idle' AND usename <> $2 AND pid <> pg_backend_pid()`, p.DbName, ConsoleRole(p.DbName))
+			WHERE datname = $1 AND state = 'idle' AND usename <> ALL($2) AND pid <> pg_backend_pid()`, p.DbName, []string{ConsoleRole(p.DbName), ConsoleReadOnlyRole(p.DbName)})
 	}
 	return err
 }

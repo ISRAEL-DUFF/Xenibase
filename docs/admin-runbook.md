@@ -130,7 +130,7 @@ the first real invoice:
 
 | Situation | Do |
 | --- | --- |
-| Someone lost their authenticator and recovery codes | Confirm who they are out of band (a call, not the email that asks), then Users → the user → **Reset two-factor**. It is audited and they are emailed. (Ordinary accounts then sign in with a password until they turn two-factor back on; platform staff set up a new authenticator at their next sign-in.) |
+| Someone lost their authenticator and recovery codes | Confirm who they are out of band (a call, not the email that asks), then Users → the user → **Reset two-factor**. It ends their sessions and revokes their API tokens, is audited, and they are emailed. (Ordinary accounts then sign in with a password until they turn two-factor back on; platform staff set up a new authenticator at their next sign-in.) |
 | A colleague should help run the platform | They need an active account with two-factor set up. Users → **Platform role** → platform admin. It asks for your password and a code, signs them out, emails them, and is audited. Choosing *user* reverses it; the last admin can't be removed. |
 | A colleague should answer support tickets | Users → **Platform role** → *support staff*. They see Platform → Support and the metadata of the organisations that write in, and nothing else of the platform's. See [support](support.md). |
 | Nobody can sign in as a platform admin | On the server: `docker compose exec xenibase-server xenibase-server admin list`, then `promote <email>`, `reset-2fa <email>` or `reset-password <email>` (prints a one-hour link when email is down). Audited as done on the server. See [operations](operations.md#platform-admins-and-recovery). |
@@ -157,6 +157,14 @@ the first real invoice:
   means lost backups.
 - The **master key** (`XENIBASE_MASTER_KEY`) seals credentials; rotate it with
   `xenibase-server -rotate-master-key` ([operations](operations.md#secrets)).
+- A **server's agent certificate** may have been copied (a server's memory
+  or a core dump exposed): `GET /api/v1/admin/agent-client-certs` lists each
+  server's certificates (a day long, named after its host), and `POST
+  /api/v1/admin/agent-client-certs/revoke` with `{"server": "<host>"}`, or
+  `{"serial": "<hex>"}`, withdraws them. Every agent gets the new list at
+  once (the answer names any that didn't; they get it at their next health
+  check), and the server issues itself a new certificate. It does not help
+  if the master key went too: rotate that as well.
 - A full rebuild of the control node: [disaster recovery](disaster-recovery.md).
 
 ## Releases

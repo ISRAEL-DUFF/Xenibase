@@ -1,0 +1,65 @@
+# Weekly update proposals for every dependency tree in the repository: the
+# Go modules, the npm trees, the Docker base images and pinned images, and
+# the workflows' actions. Each ecosystem's updates come grouped in one pull
+# request (security updates too), so a week costs a handful of reviews, not
+# dozens. CI runs on each like on any pull request. Major versions are
+# proposed separately, since they are the ones that break.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories: ["/", "/sdk/go", "/test/acmedns"]
+    schedule: { interval: weekly, day: monday, time: "05:00" }
+    groups:
+      go:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      go-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directories: ["/web", "/test/e2e", "/sdk/js"]
+    schedule: { interval: weekly, day: monday, time: "05:00" }
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # Dockerfiles. A FROM made from a build argument (${REGISTRY}, the mirror;
+  # caddy-dns's ${CADDY_VERSION}) may not be one Dependabot can read; those
+  # are updated by hand, and the image scan still reports what they carry.
+  # Caddy's version is in three places (caddy-dns/Dockerfile and the two
+  # compose files), which move together.
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/deploy/compose/caddy-dns"
+      - "/deploy/edge"
+      - "/deploy/images/postgres"
+      - "/deploy/pooler-host"
+      - "/deploy/status"
+      - "/test/e2e/bundle"
+    schedule: { interval: weekly, day: monday, time: "05:00" }
+    groups:
+      docker:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The images compose files run as they are: Caddy, PgBouncer, Postgres.
+  - package-ecosystem: docker-compose
+    directories: ["/deploy/compose", "/deploy/status", "/deploy/dev"]
+    schedule: { interval: weekly, day: monday, time: "05:00" }
+    groups:
+      compose:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly, day: monday, time: "05:00" }
+    groups:
+      actions:
+        patterns: ["*"]

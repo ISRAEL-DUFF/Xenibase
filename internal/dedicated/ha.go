@@ -122,6 +122,19 @@ func (s *Service) memberSpec(ctx context.Context, inst store.Instance, member uu
 	// A read replica (V4 §7) never leads and never holds up commits.
 	if m, err := store.New(s.db).GetInstanceMember(ctx, member); err == nil && m.Replica {
 		spec.Patroni.ReadReplica, spec.Patroni.PreferPort = true, replicaPort(inst.ID)
+		// Its standby settings, so a recreated container starts with them.
+		rs := DefaultReplicaSettings
+		if r, err := store.New(s.db).GetReadReplica(ctx, member); err == nil {
+			rs = settingsOf(r)
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return spec, err
+		}
+		if spec.Settings == nil {
+			spec.Settings = map[string]string{}
+		}
+		for k, v := range rs.parameters() {
+			spec.Settings[k] = v
+		}
 	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return spec, err
 	}

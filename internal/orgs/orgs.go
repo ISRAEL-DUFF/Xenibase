@@ -39,10 +39,30 @@ var (
 	ErrConflict     = errors.New("conflict")
 	ErrSignInFirst  = errors.New("this invitation is for an existing account: sign in to accept it")
 	ErrWrongAccount = errors.New("this invitation was sent to a different email address")
+	// ErrTooManyInvitations: a daily invitation cap is reached; LimitError
+	// says when the next one may go.
+	ErrTooManyInvitations = errors.New("too many invitations today")
 )
+
+// LimitError is ErrTooManyInvitations with the wait.
+type LimitError struct {
+	Msg        string
+	RetryAfter time.Duration
+}
+
+func (e LimitError) Error() string { return e.Msg }
+func (LimitError) Unwrap() error   { return ErrTooManyInvitations }
 
 // InvitationTTL is how long an invitation stays valid (V2 §3.2).
 const InvitationTTL = 7 * 24 * time.Hour
+
+// Default daily invitation caps (XENIBASE_INVITES_PER_ORG_DAY,
+// XENIBASE_INVITES_PER_USER_DAY): every user owns an organisation, so
+// without them an invitation is a way to send any address email.
+const (
+	DefaultInvitesPerOrgDay  = 100
+	DefaultInvitesPerUserDay = 50
+)
 
 // Service runs organisations.
 type Service struct {
@@ -53,12 +73,48 @@ type Service struct {
 	publicURL string
 	log       *slog.Logger
 	now       func() time.Time
+	// perOrg and perUser cap organisation invitations in any 24 hours, per
+	// organisation and per inviter (0: no cap).
+	perOrg, perUser int
 }
 
 // New returns a Service. projects may be nil in tests that never touch
 // database credentials.
 func New(db *pgxpool.Pool, a *auth.Service, projects *provision.Service, mailer auth.Mailer, publicURL string, log *slog.Logger) *Service {
-	return &Service{db: db, auth: a, projects: projects, mailer: mailer, publicURL: strings.TrimRight(publicURL, "/"), log: log, now: time.Now}
+	return &Service{db: db, auth: a, projects: projects, mailer: mailer, publicURL: strings.TrimRight(publicURL, "/"), log: log, now: time.Now,
+		perOrg: DefaultInvitesPerOrgDay, perUser: DefaultInvitesPerUserDay}
+}
+
+// SetInvitationLimits sets how many organisation invitations one
+// organisation, and one inviter, may send in any 24 hours (0: no cap).
+func (s *Service) SetInvitationLimits(perOrg, perUser int) { s.perOrg, s.perUser = perOrg, perUser }
+
+// checkInvitationLimits refuses an organisation invitation past the daily
+// caps, saying when the oldest one counted leaves the window.
+func (s *Service) checkInvitationLimits(ctx context.Context, q *store.Queries, orgID, inviter uuid.UUID) error {
+	since := s.now().Add(-24 * time.Hour)
+	wait := func(oldest time.Time) time.Duration {
+		return max(time.Second, oldest.Add(24*time.Hour).Sub(s.now()).Round(time.Second))
+	}
+	if s.perOrg > 0 {
+		c, err := q.CountOrgInvitationsSince(ctx, store.CountOrgInvitationsSinceParams{OrgID: &orgID, Since: since})
+		if err != nil {
+			return err
+		}
+		if int(c.Sent) >= s.perOrg {
+			return LimitError{Msg: fmt.Sprintf("this organisation has sent %d invitations in the last 24 hours, the most it may; try again later", c.Sent), RetryAfter: wait(c.Oldest)}
+		}
+	}
+	if s.perUser > 0 {
+		c, err := q.CountInviterInvitationsSince(ctx, store.CountInviterInvitationsSinceParams{InvitedBy: inviter, Since: since})
+		if err != nil {
+			return err
+		}
+		if int(c.Sent) >= s.perUser {
+			return LimitError{Msg: fmt.Sprintf("you have sent %d invitations in the last 24 hours, the most you may; try again later", c.Sent), RetryAfter: wait(c.Oldest)}
+		}
+	}
+	return nil
 }
 
 // Hooks are the account hooks auth runs.
@@ -398,6 +454,11 @@ func (s *Service) deleteMembership(ctx context.Context, q *store.Queries, orgID,
 	if _, err := q.RevokeUserOrgTokens(ctx, store.RevokeUserOrgTokensParams{OrgID: orgID, UserID: userID}); err != nil {
 		return err
 	}
+	// A billing contact at their address no longer routes support tickets
+	// to the organisation until it is confirmed by link.
+	if err := q.UnverifyLeavingMemberContact(ctx, store.UnverifyLeavingMemberContactParams{OrgID: orgID, UserID: userID}); err != nil {
+		return err
+	}
 	_, err := q.DeleteOrgMember(ctx, store.DeleteOrgMemberParams{OrgID: orgID, UserID: userID})
 	return err
 }
@@ -529,15 +590,24 @@ func (s *Service) AddProjectMember(ctx context.Context, p store.Project, userID 
 	return s.refreshAccess(ctx, p.OrgID, userID)
 }
 
-// RemoveProjectMember takes p away from userID: the membership, then their
-// login on the project.
+// RemoveProjectMember takes p away from userID: the membership, and their
+// memberships of p's branches, which hold its data (V2 §8.1), then their
+// logins on them.
 func (s *Service) RemoveProjectMember(ctx context.Context, p store.Project, userID uuid.UUID) error {
-	n, err := store.New(s.db).DeleteProjectMember(ctx, store.DeleteProjectMemberParams{ProjectID: p.ID, UserID: userID, OrgID: p.OrgID})
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		n, err := q.DeleteProjectMember(ctx, store.DeleteProjectMemberParams{ProjectID: p.ID, UserID: userID, OrgID: p.OrgID})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		_, err = q.DeleteBranchMemberships(ctx, store.DeleteBranchMembershipsParams{ParentID: &p.ID, OrgID: p.OrgID, UserID: userID})
+		return err
+	})
 	if err != nil {
 		return err
-	}
-	if n == 0 {
-		return ErrNotFound
 	}
 	return s.refreshAccess(ctx, p.OrgID, userID)
 }
@@ -559,7 +629,8 @@ func (s *Service) IssueCredentials(ctx context.Context, p store.Project, userID 
 
 // Transfer moves p into toOrg (V2 §2.1). The caller has checked the actor
 // owns both organisations. Project members come along, joining toOrg as
-// members if they are not in it yet; their logins keep working.
+// members if they are not in it yet; their logins keep working. Branches,
+// and parents with live branches, are refused.
 func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID) error {
 	if p.OrgID == toOrg {
 		return fmt.Errorf("%w: the project is already in that organisation", ErrInvalid)
@@ -567,10 +638,26 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 	if p.Status != provision.StatusActive {
 		return fmt.Errorf("%w: the project is %s", ErrConflict, p.Status)
 	}
-	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	// Project members who are billing members of toOrg keep that role, and
+	// so lose the project there; their logins on it go after the move.
+	var billing []uuid.UUID
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		q := store.New(tx)
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM projects WHERE id = $1 AND org_id = $2 FOR UPDATE`, p.ID, p.OrgID); err != nil {
+		var parent *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT parent_project_id FROM projects WHERE id = $1 AND org_id = $2 FOR UPDATE`, p.ID, p.OrgID).Scan(&parent); errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
 			return err
+		}
+		// A branch and its parent share an organisation (V2 §8.1): a branch
+		// stays with its parent, and a parent goes once its branches have.
+		if parent != nil {
+			return fmt.Errorf("%w: a branch stays in its parent's organisation; detach it to transfer it", ErrConflict)
+		}
+		if n, err := q.CountLiveBranches(ctx, store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("%w: the project has %d branch(es); delete or detach them first", ErrConflict, n)
 		}
 		// Org targets stay with their organisation (V2 §6): a project using
 		// one, or with backups on one, moves to platform storage first.
@@ -587,18 +674,26 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 			if err := q.InsertOrgMember(ctx, store.InsertOrgMemberParams{OrgID: toOrg, UserID: m.UserID, Role: authz.OrgMember}); err != nil {
 				return err
 			}
+			if dm, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: toOrg, UserID: m.UserID}); err != nil {
+				return err
+			} else if dm.Role == authz.OrgBilling {
+				billing = append(billing, m.UserID)
+			}
 		}
-		if err := q.MoveProjectMembers(ctx, store.MoveProjectMembersParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
+		// Every table that carries the project's org_id (members, their
+		// logins, saved queries, reaped sessions, editor preferences,
+		// dedicated requests) follows it by its foreign key to
+		// projects (id, org_id), ON UPDATE CASCADE (migration 00068).
+		if err := q.SetProjectOrg(ctx, store.SetProjectOrgParams{ID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
 			return err
 		}
-		if err := q.MoveProjectDBUsers(ctx, store.MoveProjectDBUsersParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
-			return err
+		for _, id := range billing {
+			if _, err := q.DeleteProjectMember(ctx, store.DeleteProjectMemberParams{ProjectID: p.ID, UserID: id, OrgID: toOrg}); err != nil {
+				return err
+			}
 		}
-		// Saved queries go with the project, favourites included.
+		// Favourites of the project's saved queries go too.
 		if err := q.MoveProjectSavedQueryFavorites(ctx, store.MoveProjectSavedQueryFavoritesParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
-			return err
-		}
-		if err := q.MoveProjectSavedQueries(ctx, store.MoveProjectSavedQueriesParams{ProjectID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg}); err != nil {
 			return err
 		}
 		// Tokens of the old organisation lose the project; those left
@@ -606,11 +701,19 @@ func (s *Service) Transfer(ctx context.Context, p store.Project, toOrg uuid.UUID
 		if err := q.DropProjectFromTokens(ctx, store.DropProjectFromTokensParams{OrgID: p.OrgID, ProjectID: p.ID}); err != nil {
 			return err
 		}
-		if _, err := q.RevokeEmptiedTokens(ctx, p.OrgID); err != nil {
-			return err
-		}
-		return q.SetProjectOrg(ctx, store.SetProjectOrgParams{ID: p.ID, OrgID: p.OrgID, NewOrgID: toOrg})
+		_, err = q.RevokeEmptiedTokens(ctx, p.OrgID)
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, id := range billing {
+		if err := s.refreshAccess(ctx, toOrg, id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ---- Invitations ------------------------------------------------------------------
@@ -658,6 +761,14 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 	var orgRole *string
 	orgName := ""
 	q := store.New(s.db)
+	// Nobody invites themselves: a member has no need to, and someone who
+	// is not one could only be a platform admin under break-glass, whose
+	// access must end with the session (V2 §2.4).
+	if inviter, err := q.GetUser(ctx, p.InvitedBy); err == nil && strings.EqualFold(inviter.Email, email) {
+		return Invited{}, fmt.Errorf("%w: you can't invite yourself", ErrForbidden)
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Invited{}, err
+	}
 	if p.OrgID != nil {
 		kind = "org"
 		if !validOrgRole(p.OrgRole) {
@@ -688,9 +799,17 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 			}
 		}
 		if existing, err := q.GetUserByEmail(ctx, email); err == nil {
-			if _, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: *p.OrgID, UserID: existing.ID}); err == nil && len(p.Projects) == 0 {
-				return Invited{}, fmt.Errorf("%w: %s is already a member", ErrConflict, email)
+			// A member's role changes with SetMemberRole, and their projects
+			// with AddProjectMember, whose rules (owners hand out billing,
+			// billing has no projects) an invitation would get round.
+			if _, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: *p.OrgID, UserID: existing.ID}); err == nil {
+				return Invited{}, fmt.Errorf("%w: %s is already a member; change their role or add them to projects instead", ErrConflict, email)
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				return Invited{}, err
 			}
+		}
+		if err := s.checkInvitationLimits(ctx, q, *p.OrgID, p.InvitedBy); err != nil {
+			return Invited{}, err
 		}
 	} else if len(p.Projects) > 0 {
 		return Invited{}, fmt.Errorf("%w: platform invitations carry no project roles", ErrInvalid)
@@ -714,12 +833,14 @@ func (s *Service) Invite(ctx context.Context, p InviteParams) (Invited, error) {
 		return Invited{}, err
 	}
 	out := Invited{Invitation: inv, URL: s.publicURL + "/invite?token=" + token}
+	// The names are the inviter's choice, sent to any address: mail.Inert
+	// keeps a web address in one from becoming a link.
 	what := "Xenibase"
 	if orgName != "" {
-		what = "the " + orgName + " organisation on Xenibase"
+		what = "the " + mail.Inert(orgName) + " organisation on Xenibase"
 	}
-	who := p.InviterName
-	if strings.TrimSpace(who) == "" {
+	who := mail.Inert(strings.TrimSpace(p.InviterName))
+	if who == "" {
 		who = "Someone"
 	}
 	invite := mail.Content{
@@ -792,7 +913,7 @@ func (s *Service) AcceptToken(ctx context.Context, token string, signedIn *uuid.
 		return store.User{}, nil, err
 	}
 	invitation := store.Invitation{ID: inv.ID, Email: inv.Email, Kind: inv.Kind, OrgID: inv.OrgID, OrgRole: inv.OrgRole,
-		ProjectRoles: inv.ProjectRoles, ExpiresAt: inv.ExpiresAt, AcceptedAt: inv.AcceptedAt, RevokedAt: inv.RevokedAt}
+		ProjectRoles: inv.ProjectRoles, InvitedBy: inv.InvitedBy, ExpiresAt: inv.ExpiresAt, AcceptedAt: inv.AcceptedAt, RevokedAt: inv.RevokedAt}
 	return s.accept(ctx, invitation, signedIn, acc, ip)
 }
 
@@ -827,6 +948,11 @@ func (s *Service) accept(ctx context.Context, inv store.Invitation, signedIn *uu
 			if *signedIn != existing.ID {
 				return ErrWrongAccount
 			}
+			if inv.InvitedBy == existing.ID {
+				// Only a break-glass session could have sent it (Invite
+				// refuses one's own address now; older ones may wait).
+				return fmt.Errorf("%w: you can't accept an invitation you sent yourself", ErrForbidden)
+			}
 			u = existing
 		case errors.Is(err, pgx.ErrNoRows):
 			if signedIn != nil {
@@ -853,6 +979,11 @@ func (s *Service) accept(ctx context.Context, inv store.Invitation, signedIn *uu
 		}
 		if err := q.InsertOrgMember(ctx, store.InsertOrgMemberParams{OrgID: *inv.OrgID, UserID: u.ID, Role: *inv.OrgRole}); err != nil {
 			return err
+		}
+		if m, err := q.GetOrgMember(ctx, store.GetOrgMemberParams{OrgID: *inv.OrgID, UserID: u.ID}); err != nil {
+			return err
+		} else if m.Role == authz.OrgBilling {
+			return nil // made a billing member since: no project access (V3 §3.2)
 		}
 		for _, pr := range roles {
 			p, err := q.GetOrgProject(ctx, store.GetOrgProjectParams{ID: pr.ProjectID, OrgID: *inv.OrgID})
