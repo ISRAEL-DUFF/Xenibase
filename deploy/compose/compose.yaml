@@ -41,11 +41,17 @@ services:
     ports:
       - "${XENIBASE_HTTP_PORT:-80}:80"
       - "${XENIBASE_HTTPS_PORT:-443}:443"
+      # HTTP/3 (QUIC). Caddy offers it on 443; without this, clients fall
+      # back to HTTP/2 after a failed try.
+      - "${XENIBASE_HTTPS_PORT:-443}:443/udp"
     environment:
       XENIBASE_UI_DOMAIN: ${XENIBASE_UI_DOMAIN:?set XENIBASE_UI_DOMAIN in .env}
       XENIBASE_ACME_EMAIL: ${XENIBASE_ACME_EMAIL:?set XENIBASE_ACME_EMAIL in .env}
       CADDY_UI_TLS: ${CADDY_UI_TLS:-}
       CADDY_GLOBAL_OPTIONS: ${CADDY_GLOBAL_OPTIONS:-}
+      # Where port 80 sends hosts that aren't Caddy's own sites: the web UI.
+      # compose.cohost.yaml sends them to HTTPS on their own name instead.
+      CADDY_HTTP_REDIRECT: ${CADDY_HTTP_REDIRECT:-https://${XENIBASE_UI_DOMAIN}{uri}}
       # Backend services (./enable-services.sh), read by caddy.d/api.caddy.
       XENIBASE_API_DOMAIN: ${XENIBASE_API_DOMAIN:-}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
@@ -105,8 +111,9 @@ services:
       XENIBASE_TENANCY_SWEEP_INTERVAL: ${XENIBASE_TENANCY_SWEEP_INTERVAL:-5m}
       # Webhook delivery's direct LISTEN connections, outside the poolers:
       # at most this many per instance (the shared cluster below has
-      # max_connections=500), released after the outbox has had nothing to
-      # send for IDLE_AFTER; other projects are polled every IDLE_POLL.
+      # max_connections=500 unless SHARED_PG_MAX_CONNECTIONS says otherwise),
+      # released after the outbox has had nothing to send for IDLE_AFTER;
+      # other projects are polled every IDLE_POLL.
       XENIBASE_WEBHOOK_LISTEN_MAX: ${XENIBASE_WEBHOOK_LISTEN_MAX:-50}
       XENIBASE_WEBHOOK_IDLE_AFTER: ${XENIBASE_WEBHOOK_IDLE_AFTER:-10m}
       XENIBASE_WEBHOOK_IDLE_POLL: ${XENIBASE_WEBHOOK_IDLE_POLL:-30s}
@@ -307,25 +314,26 @@ services:
       POSTGRES_PASSWORD: ${SHARED_ADMIN_PASSWORD:?}
       POSTGRES_DB: postgres
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=trust"
-    # §11.2 tuning for an 8 GB host; adjust for yours.
+    # §11.2 tuning for an 8 GB host. For another size, or a server shared
+    # with another app, set these in .env (docs/cohosting.md has profiles).
     command:
       - postgres
       - -c
-      - max_connections=500
+      - max_connections=${SHARED_PG_MAX_CONNECTIONS:-500}
       - -c
       - shared_buffers=${SHARED_PG_SHARED_BUFFERS:-2GB}
       - -c
       - effective_cache_size=${SHARED_PG_EFFECTIVE_CACHE_SIZE:-6GB}
       - -c
-      - work_mem=8MB
+      - work_mem=${SHARED_PG_WORK_MEM:-8MB}
       - -c
-      - maintenance_work_mem=256MB
+      - maintenance_work_mem=${SHARED_PG_MAINTENANCE_WORK_MEM:-256MB}
       - -c
       - wal_compression=on
       - -c
       - checkpoint_timeout=15min
       - -c
-      - autovacuum_max_workers=5
+      - autovacuum_max_workers=${SHARED_PG_AUTOVACUUM_MAX_WORKERS:-5}
       - -c
       - password_encryption=scram-sha-256
       - -c

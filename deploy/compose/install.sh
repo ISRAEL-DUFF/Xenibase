@@ -16,7 +16,10 @@
 #   ./install.sh --no-build     start with the images already built
 #
 # XENIBASE_BUILD_FLAGS is passed to `docker build` (e.g. a proxy CA secret);
-# COMPOSE_FILE and COMPOSE_PROJECT_NAME work as for docker compose.
+# COMPOSE_FILE and COMPOSE_PROJECT_NAME work as for docker compose, from the
+# environment or .env. Co-hosting another app behind this Caddy
+# (docs/cohosting.md) is COMPOSE_FILE=compose.yaml:compose.cohost.yaml in
+# .env; this script then creates the shared network if it's missing.
 set -eu
 cd "$(dirname "$0")"
 
@@ -111,12 +114,40 @@ if [ "$start" -eq 0 ]; then
 	echo "Images built (--build-only). Nothing was restarted: the running version serves until ./install.sh --no-build."
 	exit 0
 fi
+
+# Co-hosting: compose.cohost.yaml in COMPOSE_FILE (as docker compose reads it:
+# the environment first, then .env) puts Caddy on an external network shared
+# with the other app. Whichever installer runs first creates it.
+env_get() { grep "^$1=" .env | tail -1 | cut -d= -f2- | tr -d "\"'"; }
+compose_files=${COMPOSE_FILE:-$(env_get COMPOSE_FILE)}
+case ":$compose_files:" in
+*:compose.cohost.yaml:* | *:./compose.cohost.yaml:*)
+	net=${XENIBASE_COHOST_NETWORK:-$(env_get XENIBASE_COHOST_NETWORK)}
+	net=${net:-cohost}
+	case "$net" in
+	"" | -* | *[!A-Za-z0-9_.-]*) echo "invalid XENIBASE_COHOST_NETWORK: '$net'" >&2; exit 1 ;;
+	esac
+	if ! docker network inspect "$net" >/dev/null 2>&1; then
+		# The other installer may have made it a moment ago.
+		docker network create "$net" >/dev/null 2>&1 || docker network inspect "$net" >/dev/null 2>&1 ||
+			{ echo "couldn't create the co-hosting network '$net'" >&2; exit 1; }
+		echo "Created the co-hosting network '$net'."
+	fi
+	;;
+esac
+
 docker compose up -d --no-build --wait
 # The poolers bind-mount single config files. A checkout replaces the file
 # (a new inode), so a running pooler keeps reading the old one, or a
 # truncated copy of it, and compose sees no change. Recreate them so they
 # pick up this version's config; clients reconnect within a second or two.
 docker compose up -d --no-build --wait --force-recreate --no-deps pooler-session pooler-tx
+# Caddy's Caddyfile is a single bound file too: recreate it only when the one
+# it reads isn't this version's (a reload, here or by a co-hosted app, would
+# read the old one). caddy.d is a bound directory and needs nothing.
+if ! docker compose exec -T caddy cat /etc/caddy/Caddyfile 2>/dev/null | cmp -s - Caddyfile; then
+	docker compose up -d --no-build --wait --force-recreate --no-deps caddy
+fi
 
 echo
 echo "Xenibase is running: https://$(grep '^XENIBASE_UI_DOMAIN=' .env | cut -d= -f2-)"

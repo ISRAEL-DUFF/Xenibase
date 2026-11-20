@@ -339,8 +339,15 @@ func (s *Service) PayInvoiceFromWallet(ctx context.Context, orgID, invoiceID uui
 // call; one that gets no answer stays pending and is resolved by looking the
 // key up at the provider before another is made, and the amount is read
 // again under the invoice's lock as the attempt is recorded, so an invoice
-// is never debited twice.
+// is never debited twice. While the attempt waits for the provider it holds
+// its intent's row lock, which keeps re-queries and other attempts off it.
 func (s *Service) chargeInvoiceFromWallet(ctx context.Context, inv store.Invoice, explicit bool) (WalletCharge, error) {
+	return s.chargeWallet(ctx, inv, explicit, 1)
+}
+
+// chargeWallet is chargeInvoiceFromWallet; retries is how many times it
+// starts again when a re-query closed its intent before it was sent.
+func (s *Service) chargeWallet(ctx context.Context, inv store.Invoice, explicit bool, retries int) (WalletCharge, error) {
 	q := store.New(s.db)
 	a, err := q.GetBillingAccount(ctx, inv.OrgID)
 	if err != nil {
@@ -424,42 +431,86 @@ func (s *Service) chargeInvoiceFromWallet(ctx context.Context, inv store.Invoice
 		s.declineWalletCharge(ctx, inv, owed, !explicit, msg)
 		return WalletCharge{Message: msg}, nil
 	}
-	tr, err := s.wallets.Transfer(ctx, TransferRequest{
-		From: wid, To: op, AmountMinor: owed, IdempotencyKey: ref, Narration: "Xenibase " + deref(inv.Number),
-	})
-	switch {
-	case errors.Is(err, ErrInsufficientFunds), errors.Is(err, ErrWalletInactive), errors.Is(err, ErrWalletLimit):
-		msg := err.Error()
-		_ = q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("declined: " + msg)})
-		s.notifyDeclined(ctx, inv, !explicit, msg)
-		return WalletCharge{Message: msg}, nil
-	case err != nil:
-		// No answer: did it post? The key tells (and a missing one means no).
-		st, lerr := s.wallets.Request(ctx, ref)
-		switch {
-		case errors.Is(lerr, ErrRequestNotFound):
-			_ = q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("provider unavailable: " + err.Error())})
-			return WalletCharge{Unavailable: true, Message: err.Error()}, nil
-		case lerr != nil || !st.Terminal:
-			return WalletCharge{Unavailable: true, Message: "the debit is being confirmed: " + err.Error()}, nil
-		case st.Failed():
-			// It ended and moved nothing: a decline, booked as nothing.
-			msg := "the provider says the debit " + st.Status
-			_ = q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("declined: " + msg)})
-			s.notifyDeclined(ctx, inv, !explicit, msg)
-			return WalletCharge{Message: msg}, nil
-		case !st.Succeeded():
-			// Ended in a state nobody has written down: neither booked nor
-			// tried again (either could be wrong), but left for a person.
-			s.log.Error("billing: a wallet debit ended in a state Xenibase doesn't know; left pending", "reference", ref, "invoice", deref(inv.Number), "status", st.Status)
-			return WalletCharge{Unavailable: true, Message: "the debit is being confirmed: the provider says " + st.Status}, nil
+	// The provider is called, and what it did is recorded, under the intent's
+	// row lock, so the attempt in flight is the only one that acts on its
+	// intent: a re-query or another attempt that comes meanwhile skips the
+	// locked intent and treats it as still being confirmed. (Without the lock,
+	// one could find nothing under the key yet and close the intent as "nothing
+	// was posted", freeing the invoice for a second debit while this one goes
+	// through; or find it posted and book it, and this attempt book it again.)
+	// The intent was committed first, so a crash mid-call leaves it pending
+	// and unlocked, for a re-query to resolve by its key.
+	var (
+		res      WalletCharge
+		declined string
+		booked   bool
+		closed   bool
+	)
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		tq := store.New(tx)
+		// A re-query that took the intent in the moment since it was
+		// committed is waited for; if it found nothing under the key, it
+		// closed the intent, and this attempt sends nothing under it.
+		cur, err := tq.LockPaymentIntent(ctx, ref)
+		if err != nil {
+			return err
 		}
-		tr = TransferResult{TransferID: st.ResourceID, At: s.Now()}
-	}
-	if err := s.settleWalletDebit(ctx, intent, inv.ID, owed, wid, tr); err != nil {
+		if cur.Status != "pending" {
+			closed = true
+			return nil
+		}
+		tr, err := s.wallets.Transfer(ctx, TransferRequest{
+			From: wid, To: op, AmountMinor: owed, IdempotencyKey: ref, Narration: "Xenibase " + deref(inv.Number),
+		})
+		switch {
+		case errors.Is(err, ErrInsufficientFunds), errors.Is(err, ErrWalletInactive), errors.Is(err, ErrWalletLimit):
+			declined = err.Error()
+			res = WalletCharge{Message: declined}
+			return tq.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("declined: " + declined)})
+		case err != nil:
+			// No answer: did it post? The key tells (and a missing one means no).
+			st, lerr := s.wallets.Request(ctx, ref)
+			switch {
+			case errors.Is(lerr, ErrRequestNotFound):
+				res = WalletCharge{Unavailable: true, Message: err.Error()}
+				return tq.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("provider unavailable: " + err.Error())})
+			case lerr != nil || !st.Terminal:
+				res = WalletCharge{Unavailable: true, Message: "the debit is being confirmed: " + err.Error()}
+				return nil
+			case st.Failed():
+				// It ended and moved nothing: a decline, booked as nothing.
+				declined = "the provider says the debit " + st.Status
+				res = WalletCharge{Message: declined}
+				return tq.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: ref, Status: "failed", Error: ptr0("declined: " + declined)})
+			case !st.Succeeded():
+				// Ended in a state nobody has written down: neither booked nor
+				// tried again (either could be wrong), but left for a person.
+				s.log.Error("billing: a wallet debit ended in a state Xenibase doesn't know; left pending", "reference", ref, "invoice", deref(inv.Number), "status", st.Status)
+				res = WalletCharge{Unavailable: true, Message: "the debit is being confirmed: the provider says " + st.Status}
+				return nil
+			}
+			tr = TransferResult{TransferID: st.ResourceID, At: s.Now()}
+		}
+		if inv, err = s.bookWalletDebit(ctx, tx, intent, inv.ID, owed, wid, tr); err != nil {
+			return err
+		}
+		booked, res = true, WalletCharge{Succeeded: true, Paid: owed}
+		return nil
+	})
+	if err != nil {
 		return WalletCharge{}, err
 	}
-	return WalletCharge{Succeeded: true, Paid: owed}, nil
+	switch {
+	case closed && retries > 0:
+		return s.chargeWallet(ctx, inv, explicit, retries-1)
+	case closed:
+		return WalletCharge{Unavailable: true, Message: "the debit was closed before it was sent"}, nil
+	case booked:
+		s.afterWalletDebit(ctx, intent.OrgID, deref(inv.Number), owed)
+	case declined != "":
+		s.notifyDeclined(ctx, inv, !explicit, declined)
+	}
+	return res, nil
 }
 
 // declineWalletCharge records a charge that wasn't even tried because the
@@ -504,10 +555,11 @@ func (s *Service) notifyDeclined(ctx context.Context, inv store.Invoice, automat
 	}
 }
 
-// settleWalletDebit books a completed debit: the invoice is paid from the
-// wallet's balance (Dr wallet balance, Cr receivable), with a payment that
-// records the rate the invoice was converted at.
-func (s *Service) settleWalletDebit(ctx context.Context, intent store.PaymentIntent, invoiceID uuid.UUID, amount int64, wid string, tr TransferResult) error {
+// bookWalletDebit books a completed debit in tx, which holds the intent's
+// row lock: the invoice is paid from the wallet's balance (Dr wallet
+// balance, Cr receivable), with a payment that records the rate the invoice
+// was converted at. It returns the invoice as it now stands.
+func (s *Service) bookWalletDebit(ctx context.Context, tx pgx.Tx, intent store.PaymentIntent, invoiceID uuid.UUID, amount int64, wid string, tr TransferResult) (store.Invoice, error) {
 	txn := tr.TxnID
 	if txn == "" {
 		txn = tr.TransferID
@@ -516,68 +568,66 @@ func (s *Service) settleWalletDebit(ctx context.Context, intent store.PaymentInt
 	if at.IsZero() {
 		at = s.Now()
 	}
-	var inv store.Invoice
-	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
-		q := store.New(tx)
-		if _, err := q.LockBillingAccount(ctx, intent.OrgID); err != nil {
-			return err
-		}
-		var err error
-		if inv, err = q.LockInvoice(ctx, invoiceID); err != nil {
-			return err
-		}
-		owed, err := outstanding(ctx, q, inv)
-		if err != nil {
-			return err
-		}
-		paid := min(amount, max(owed, 0))
-		ref := intent.Reference
-		pay, err := q.InsertPayment(ctx, store.InsertPaymentParams{
-			OrgID: intent.OrgID, Provider: ProviderISwallet, Channel: ChannelWallet, ProviderRef: wid + RefSep + txn, Reference: &ref,
-			AmountMinor: amount, FxQuote: inv.Fx, ReceivedAt: at,
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Already booked (a retry of this very settlement): only the
-			// intent may still be open.
-			return q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: intent.Reference, Status: "succeeded"})
-		}
-		if err != nil {
-			return err
-		}
-		if paid > 0 {
-			status := StatusPaid
-			if paid < owed {
-				status = StatusPartiallyPaid
-			}
-			if inv, err = q.SettleInvoice(ctx, store.SettleInvoiceParams{ID: inv.ID, PaidMinor: paid, Status: status}); err != nil {
-				return err
-			}
-			if err := q.InsertAllocation(ctx, store.InsertAllocationParams{PaymentID: pay.ID, InvoiceID: inv.ID, AmountMinor: paid}); err != nil {
-				return err
-			}
-		}
-		org := intent.OrgID
-		t := Txn{Key: "payment:" + pay.ID.String(), SourceType: SourcePayment, SourceID: ProviderISwallet + ":" + wid + RefSep + txn,
-			Memo:    "Wallet debit for " + deref(inv.Number),
-			Entries: []Entry{Dr(AccWalletBalance, &org, amount)}}
-		if paid > 0 {
-			t.Entries = append(t.Entries, Cr(AccReceivable, &org, paid))
-		}
-		if extra := amount - paid; extra > 0 { // the invoice was settled meanwhile: what is left is credit
-			t.Entries = append(t.Entries, Cr(AccCreditBalance, &org, extra))
-		}
-		if _, err := Post(ctx, tx, t); err != nil {
-			return err
-		}
-		return q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: intent.Reference, Status: "succeeded"})
-	})
-	if err != nil {
-		return err
+	q := store.New(tx)
+	if _, err := q.LockBillingAccount(ctx, intent.OrgID); err != nil {
+		return store.Invoice{}, err
 	}
-	s.afterPayment(ctx, intent.OrgID)
-	subject, content := s.walletPaidEmail(s.orgName(ctx, intent.OrgID), intent.OrgID, deref(inv.Number), amount)
-	s.notifyContent(ctx, intent.OrgID, "billing.receipt", subject, content)
-	return nil
+	inv, err := q.LockInvoice(ctx, invoiceID)
+	if err != nil {
+		return store.Invoice{}, err
+	}
+	owed, err := outstanding(ctx, q, inv)
+	if err != nil {
+		return store.Invoice{}, err
+	}
+	paid := min(amount, max(owed, 0))
+	ref := intent.Reference
+	pay, err := q.InsertPayment(ctx, store.InsertPaymentParams{
+		OrgID: intent.OrgID, Provider: ProviderISwallet, Channel: ChannelWallet, ProviderRef: wid + RefSep + txn, Reference: &ref,
+		AmountMinor: amount, FxQuote: inv.Fx, ReceivedAt: at,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Already booked (a retry of this very settlement): only the
+		// intent may still be open.
+		return inv, q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: intent.Reference, Status: "succeeded"})
+	}
+	if err != nil {
+		return store.Invoice{}, err
+	}
+	if paid > 0 {
+		status := StatusPaid
+		if paid < owed {
+			status = StatusPartiallyPaid
+		}
+		if inv, err = q.SettleInvoice(ctx, store.SettleInvoiceParams{ID: inv.ID, PaidMinor: paid, Status: status}); err != nil {
+			return store.Invoice{}, err
+		}
+		if err := q.InsertAllocation(ctx, store.InsertAllocationParams{PaymentID: pay.ID, InvoiceID: inv.ID, AmountMinor: paid}); err != nil {
+			return store.Invoice{}, err
+		}
+	}
+	org := intent.OrgID
+	t := Txn{Key: "payment:" + pay.ID.String(), SourceType: SourcePayment, SourceID: ProviderISwallet + ":" + wid + RefSep + txn,
+		Memo:    "Wallet debit for " + deref(inv.Number),
+		Entries: []Entry{Dr(AccWalletBalance, &org, amount)}}
+	if paid > 0 {
+		t.Entries = append(t.Entries, Cr(AccReceivable, &org, paid))
+	}
+	if extra := amount - paid; extra > 0 { // the invoice was settled meanwhile: what is left is credit
+		t.Entries = append(t.Entries, Cr(AccCreditBalance, &org, extra))
+	}
+	if _, err := Post(ctx, tx, t); err != nil {
+		return store.Invoice{}, err
+	}
+	return inv, q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: intent.Reference, Status: "succeeded"})
+}
+
+// afterWalletDebit runs once a debit is booked: dunning re-evaluates, and a
+// receipt is emailed.
+func (s *Service) afterWalletDebit(ctx context.Context, orgID uuid.UUID, number string, amount int64) {
+	s.afterPayment(ctx, orgID)
+	subject, content := s.walletPaidEmail(s.orgName(ctx, orgID), orgID, number, amount)
+	s.notifyContent(ctx, orgID, "billing.receipt", subject, content)
 }
 
 // resolveWalletCharges settles or closes the debits of invoiceID that got no
@@ -599,45 +649,74 @@ func (s *Service) resolveWalletCharges(ctx context.Context, invoiceID uuid.UUID)
 	return stillPending, nil
 }
 
-// resolveWalletIntent looks one debit's key up at the provider.
+// resolveWalletIntent looks one debit's key up at the provider, and records
+// what it says, under the intent's row lock. An intent whose attempt is
+// still waiting for the provider holds that lock: it is left to the attempt
+// and reported as unresolved.
 func (s *Service) resolveWalletIntent(ctx context.Context, in store.PaymentIntent) (bool, error) {
 	if s.wallets == nil || in.InvoiceID == nil {
 		return false, nil
 	}
-	st, err := s.wallets.Request(ctx, in.Reference)
-	q := store.New(s.db)
-	switch {
-	case errors.Is(err, ErrRequestNotFound):
-		// Nothing was posted: the attempt failed and may be made again. (The
-		// provider's replay window is 24 hours; a key this old is never retried.)
-		_ = q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: in.Reference, Status: "failed", Error: ptr0("provider unavailable: nothing was posted")})
-		return true, nil
-	case err != nil:
-		return false, nil // still can't tell
-	case !st.Terminal:
-		return false, nil
-	case st.Failed():
-		// It ended and moved nothing: a decline, booked as nothing.
-		msg := "the provider says the debit " + st.Status
-		if err := q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: in.Reference, Status: "failed", Error: ptr0("declined: " + msg)}); err != nil {
-			return false, err
+	var (
+		done, booked bool
+		declined     string
+		inv          store.Invoice
+	)
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		cur, err := q.LockPendingIntent(ctx, in.Reference)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Resolved meanwhile, or in flight (its attempt, or another
+			// resolver, holds it).
+			status, err := q.PaymentIntentStatus(ctx, in.Reference)
+			done = status != "pending"
+			return err
 		}
-		if inv, err := q.GetInvoice(ctx, *in.InvoiceID); err == nil {
-			s.notifyDeclined(ctx, inv, in.Automatic, msg)
+		if err != nil {
+			return err
 		}
-		return true, nil
-	case !st.Succeeded():
-		s.log.Error("billing: a wallet debit ended in a state Xenibase doesn't know; left pending", "reference", in.Reference, "status", st.Status)
-		return false, nil
-	}
-	a, err := q.GetBillingAccount(ctx, in.OrgID)
+		st, err := s.wallets.Request(ctx, cur.Reference)
+		switch {
+		case errors.Is(err, ErrRequestNotFound):
+			// Nothing was posted: the attempt failed and may be made again. (The
+			// provider's replay window is 24 hours; a key this old is never retried.)
+			done = true
+			return q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: cur.Reference, Status: "failed", Error: ptr0("provider unavailable: nothing was posted")})
+		case err != nil:
+			return nil // still can't tell
+		case !st.Terminal:
+			return nil
+		case st.Failed():
+			// It ended and moved nothing: a decline, booked as nothing.
+			done, declined = true, "the provider says the debit "+st.Status
+			if inv, err = q.GetInvoice(ctx, *cur.InvoiceID); err != nil {
+				return err
+			}
+			return q.FinishPaymentIntent(ctx, store.FinishPaymentIntentParams{Reference: cur.Reference, Status: "failed", Error: ptr0("declined: " + declined)})
+		case !st.Succeeded():
+			s.log.Error("billing: a wallet debit ended in a state Xenibase doesn't know; left pending", "reference", cur.Reference, "status", st.Status)
+			return nil
+		}
+		a, err := q.GetBillingAccount(ctx, cur.OrgID)
+		if err != nil {
+			return err
+		}
+		if inv, err = s.bookWalletDebit(ctx, tx, cur, *cur.InvoiceID, cur.AmountMinor, walletID(a), TransferResult{TransferID: st.ResourceID}); err != nil {
+			return err
+		}
+		done, booked = true, true
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	if err := s.settleWalletDebit(ctx, in, *in.InvoiceID, in.AmountMinor, walletID(a), TransferResult{TransferID: st.ResourceID}); err != nil {
-		return false, err
+	switch {
+	case booked:
+		s.afterWalletDebit(ctx, in.OrgID, deref(inv.Number), in.AmountMinor)
+	case declined != "":
+		s.notifyDeclined(ctx, inv, in.Automatic, declined)
 	}
-	return true, nil
+	return done, nil
 }
 
 func ptr0[T any](v T) *T { return &v }

@@ -206,14 +206,17 @@ test-e2e: e2e-images
 	@$(E2E_INSTANCES)
 	$(E2E_COMPOSE) down -v --remove-orphans
 
-## test-deploy: upgrade.sh, deploy-ssh.sh and install.sh against a fake docker (no Docker).
+## test-deploy: upgrade.sh, deploy-ssh.sh, install.sh and enable-services.sh against
+## a fake docker (no Docker), co-hosting included, and preflight.sh's memory check.
 test-deploy:
 	sh test/deploy/upgrade_test.sh
 	sh test/deploy/install_test.sh
 	sh test/deploy/enable_services_test.sh
+	sh test/deploy/preflight_test.sh
 
 ## test-acmedns: what Caddy's acme-dns plugin does with the config enable-services.sh
-## writes (a fake acme-dns server; needs Go and network access).
+## writes (a fake acme-dns server), and the bundle's Caddyfile loaded by Caddy
+## with a co-hosted app's files (docs/cohosting.md); needs Go and network access.
 test-acmedns:
 	sh test/acmedns/run.sh
 

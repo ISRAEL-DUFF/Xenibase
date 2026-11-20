@@ -63,6 +63,16 @@ sh ./enable-services.sh --config-only api.example.test desec >/dev/null
 check "desec: the token block" has caddy.d/api.caddy "token {env.DESEC_TOKEN}"
 check "desec: the challenge is delegated" has caddy.d/api.caddy "dns_challenge_override_domain acme.example.org"
 
+# --- a co-hosted app's files in caddy.d (docs/cohosting.md) are left alone.
+fresh CLOUDFLARE_API_TOKEN=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN
+printf 'app.taskiem.test {\n\treverse_proxy taskiem:8080\n}\n' > caddy.d/taskiem.caddy
+printf 'on_demand_tls {\n\task http://taskiem-public:9090/tls/ask\n}\n' > caddy.d/taskiem.global
+cp caddy.d/taskiem.caddy "$work/t.caddy"; cp caddy.d/taskiem.global "$work/t.global"
+sh ./enable-services.sh --config-only api.example.test cloudflare >/dev/null
+check "co-hosting: taskiem.caddy is untouched" cmp caddy.d/taskiem.caddy "$work/t.caddy"
+check "co-hosting: taskiem.global is untouched" cmp caddy.d/taskiem.global "$work/t.global"
+check "co-hosting: api.caddy is written beside them" test -s caddy.d/api.caddy
+
 # --- the script refuses what it should.
 fresh
 check "no provider credentials: refused" sh -c '! sh ./enable-services.sh --config-only api.example.test cloudflare'

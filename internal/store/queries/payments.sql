@@ -40,6 +40,19 @@ RETURNING *;
 UPDATE payment_intents SET status = @status, error = sqlc.narg(error), completed_at = now()
 WHERE reference = @reference AND status = 'pending';
 
+-- name: LockPendingIntent :one
+-- tenant: system - a wallet debit still unresolved, locked by whoever acts on it (the attempt that made it, while it
+-- waits for the provider, or a resolver); one that another session holds is skipped, not waited for.
+SELECT * FROM payment_intents WHERE reference = @reference AND status = 'pending' FOR UPDATE SKIP LOCKED;
+
+-- name: LockPaymentIntent :one
+-- tenant: system - a wallet debit, locked by the attempt that made it (waiting for a resolver that holds it).
+SELECT * FROM payment_intents WHERE reference = @reference FOR UPDATE;
+
+-- name: PaymentIntentStatus :one
+-- tenant: system - a wallet debit's status.
+SELECT status FROM payment_intents WHERE reference = @reference;
+
 -- name: PendingIntents :many
 -- tenant: system - a provider's charges still open, for re-querying.
 SELECT * FROM payment_intents WHERE provider = @provider AND status = 'pending' AND created_at > @since ORDER BY created_at;

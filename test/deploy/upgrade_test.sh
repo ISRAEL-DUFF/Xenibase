@@ -35,6 +35,13 @@ setup() {
 	git init -q . && git config user.email t@t && git config user.name t && git checkout -q -b main
 	cp "$script" deploy/compose/upgrade.sh
 	: > deploy/compose/.env
+	# COHOST=1: co-hosting is on (docs/cohosting.md), in both releases unless
+	# COHOST_DROP=1 removes compose.cohost.yaml from v2.0.0.
+	if [ -n "${COHOST:-}" ]; then
+		echo 'COMPOSE_FILE=compose.yaml:compose.cohost.yaml' > deploy/compose/.env
+		echo 'services: {}' > deploy/compose/compose.yaml
+		echo 'services: {}' > deploy/compose/compose.cohost.yaml
+	fi
 	cat > deploy/compose/install.sh <<'I'
 #!/bin/sh
 # Fake installer: "installs" whatever is checked out. Failure scenarios apply to v2.0.0 only.
@@ -46,6 +53,7 @@ mode=$(cat "$FAKE/mode" 2>/dev/null || echo ok)
 [ "${1:-}" = --build-only ] && { echo "INSTALL build-only $ver" >> "$FAKE/calls"; [ "$ver:$mode" = v2.0.0:build_fail ] && exit 1; exit 0; }
 step=full; [ "${1:-}" = --no-build ] && step=start
 echo "INSTALL ${step:-full} $ver" >> "$FAKE/calls"
+docker compose up -d --no-build --wait || exit 1
 echo running > "$FAKE/server"
 n=$(ls "$(git rev-parse --show-toplevel)"/internal/store/migrations/*.sql | wc -l | tr -d ' ')
 if [ "$ver" = v2.0.0 ]; then
@@ -72,13 +80,25 @@ I
 	if [ -n "${LEGACY:-}" ]; then
 		grep -v -e '--build-only' -e '--no-build' deploy/compose/install.sh > "$T/install.sh" && cat "$T/install.sh" > deploy/compose/install.sh
 	fi
+	[ -z "${COHOST_DROP:-}" ] || git rm -q deploy/compose/compose.cohost.yaml
 	git add -A && git commit -q -m v2 && git tag v2.0.0
 	git checkout -q v1.0.0 && git checkout -q -B main v1.0.0 # production is on v1.0.0, on main
 	# the fake docker
+	# Like docker compose, it reads COMPOSE_FILE from the environment or .env;
+	# it records which files each compose call reads, and fails, as compose
+	# does, when a file named there is missing.
 	cat > "$FAKE/bin/docker" <<'D'
 #!/bin/sh
 echo "docker $*" >> "$FAKE/calls"
+if [ "$1" = compose ]; then
+	files=${COMPOSE_FILE:-$(grep '^COMPOSE_FILE=' .env 2>/dev/null | tail -1 | cut -d= -f2-)}
+	echo "${files:-default} :: $(git describe --tags --always) :: $*" >> "$FAKE/files"
+	IFS=:
+	for f in $files; do [ -f "$f" ] || { echo "open $f: no such file or directory" >&2; exit 14; }; done
+	unset IFS
+fi
 case "$*" in
+"compose up -d --no-build --wait") ;;
 "compose version"*) echo "Docker Compose version v2.29.0" ;;
 "compose ps -a"*) cat "$FAKE/ps" ;;
 "compose exec -T xenibase-server xenibase-server -version") echo "xenibase-server $(cat "$FAKE/version") (commit x)" ;;
@@ -287,6 +307,33 @@ check "old install.sh, fails: schema is 3 again" [ "$(cat "$FAKE/schema")" = 3 ]
 setup; mkdir -m 755 upgrade-backups; run v2.0.0 --yes
 check "existing folder: exit 0" [ "$rc" = 0 ]
 check "existing folder: now drwx------" mode_is drwx------ upgrade-backups
+
+# 17. Co-hosting on (COMPOSE_FILE in .env): every compose call of the upgrade
+# reads compose.cohost.yaml, and another app's files in caddy.d survive it.
+# only_cohost: every compose call read both files, and there was one.
+only_cohost() { ! grep -v '^compose.yaml:compose.cohost.yaml :: ' "$FAKE/files" | grep -q . && grep -q . "$FAKE/files"; }
+foreign() { mkdir -p caddy.d && echo 'app.taskiem.test { }' > caddy.d/taskiem.caddy && echo 'on_demand_tls { }' > caddy.d/taskiem.global; }
+foreign_intact() { [ "$(cat caddy.d/taskiem.caddy)" = 'app.taskiem.test { }' ] && [ "$(cat caddy.d/taskiem.global)" = 'on_demand_tls { }' ]; }
+COHOST=1 setup; unset COHOST; foreign; run v2.0.0 --yes
+check "co-hosting: exit 0" [ "$rc" = 0 ]
+check "co-hosting: upgraded" head_is v2.0.0
+check "co-hosting: every compose call read compose.cohost.yaml" only_cohost
+check "co-hosting: the new release was started with it" has "$FAKE/files" ":: v2.0.0 :: compose up"
+check "co-hosting: taskiem.caddy and taskiem.global survive" foreign_intact
+# A rollback reads it too, with the previous release checked out.
+COHOST=1 setup; unset COHOST; foreign; echo install_fail > "$FAKE/mode"; run v2.0.0 --yes
+check "co-hosting rollback: exit 2" [ "$rc" = 2 ]
+check "co-hosting rollback: back on v1.0.0" head_is v1.0.0
+check "co-hosting rollback: restored" has "$FAKE/events" RESTORE-LOAD
+check "co-hosting rollback: every compose call read compose.cohost.yaml" only_cohost
+check "co-hosting rollback: the old release was started with it" has "$FAKE/files" ":: v1.0.0 :: compose up"
+check "co-hosting rollback: taskiem.caddy and taskiem.global survive" foreign_intact
+# A tag without compose.cohost.yaml is refused before anything changes.
+COHOST=1 COHOST_DROP=1 setup; unset COHOST COHOST_DROP; run v2.0.0 --yes
+check "tag without compose.cohost.yaml: exit 1" [ "$rc" = 1 ]
+check "tag without compose.cohost.yaml: says why" has "$T/out" "COMPOSE_FILE names compose.cohost.yaml"
+check "tag without compose.cohost.yaml: nothing changed" head_is v1.0.0
+check "tag without compose.cohost.yaml: no backup" hasnt "$FAKE/calls" pg_dump
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

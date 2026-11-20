@@ -4,6 +4,9 @@
 {
 	email {$XENIBASE_ACME_EMAIL}
 	{$CADDY_GLOBAL_OPTIONS}
+	# Global options of another app served by this Caddy (docs/cohosting.md),
+	# e.g. caddy.d/taskiem.global with on_demand_tls. None by default.
+	import /etc/caddy/caddy.d/*.global
 }
 
 {$XENIBASE_UI_DOMAIN} {
@@ -12,17 +15,21 @@
 	reverse_proxy xenibase-server:8080
 }
 
-# Backend services' wildcard API domain, written by enable-services.sh. Nothing
-# matches (and nothing is served) until then.
+# More sites: backend services' wildcard API domain (api.caddy, written by
+# enable-services.sh), and another app's sites when co-hosting (its own
+# file). Nothing matches (and nothing is served) until then.
 import /etc/caddy/caddy.d/*.caddy
 
-# Any other host on port 80: ACME challenges go to xenibase-server (for the
-# DB hostname's certificate); everything else is sent to the UI.
+# Any other host on port 80. Caddy answers the HTTP-01 challenges of the
+# certificates it gets itself before any of this (on-demand ones included);
+# the rest go to xenibase-server, which gets the DB hostname's certificate.
+# Everything else is redirected (308): to the UI, or with co-hosting to HTTPS
+# on the same name (CADDY_HTTP_REDIRECT, set in compose.yaml).
 http:// {
 	handle /.well-known/acme-challenge/* {
 		reverse_proxy xenibase-server:8080
 	}
 	handle {
-		redir https://{$XENIBASE_UI_DOMAIN}{uri}
+		redir {$CADDY_HTTP_REDIRECT} 308
 	}
 }
