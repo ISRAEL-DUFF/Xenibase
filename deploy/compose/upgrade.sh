@@ -145,6 +145,20 @@ if [ "$force" -eq 0 ]; then
 	bad=$(unhealthy)
 	[ -z "$bad" ] || die "the current install isn't healthy: $bad (fix it first, or use --force)"
 fi
+# Every docker compose command here, install.sh's and a rollback's included,
+# reads COMPOSE_FILE (from the environment or .env; compose.cohost.yaml when
+# co-hosting, docs/cohosting.md). A file in it that this release ships but the
+# tag doesn't would stop compose after the checkout: refuse now instead.
+compose_files=${COMPOSE_FILE:-$(grep '^COMPOSE_FILE=' .env | tail -1 | cut -d= -f2- | tr -d "\"'")}
+old_ifs=$IFS
+IFS=:
+for f in $compose_files; do
+	IFS=$old_ifs
+	if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 && ! git cat-file -e "$target:./$f" 2>/dev/null; then
+		die "COMPOSE_FILE names $f, which $tag doesn't have (co-hosting needs a release that has it)"
+	fi
+done
+IFS=$old_ifs
 free_gb=$(df -Pk . | awk 'NR==2 {print int($4/1024/1024)}')
 [ "${free_gb:-0}" -ge "$min_free" ] || die "only ${free_gb}GB free here; need at least ${min_free}GB to build the images (UPGRADE_MIN_FREE_GB)"
 

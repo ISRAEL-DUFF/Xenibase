@@ -78,7 +78,7 @@ jobs:
       - name: Deploy scripts (upgrade.sh, deploy-ssh.sh, enable-services.sh)
         run: make test-deploy
 
-      - name: Caddy's acme-dns plugin with the config enable-services.sh writes
+      - name: Caddy's acme-dns plugin with the config enable-services.sh writes, and the bundle's Caddyfile with co-hosting
         run: make test-acmedns
 
       - name: Frontend type-check and tests
