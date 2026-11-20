@@ -289,6 +289,11 @@ Restore with standard tools (no Xenibase needed)
      gpg --batch --decrypt backup.dump.gpg > backup.dump
    gpg checks the backup's integrity at its end: if it reports an error,
    backup.dump is incomplete; don't restore it.
+   If gpg says "Bad secret key", check "gpg --version": libgcrypt 1.12.0
+   (Ubuntu 26.04's) has a bug that rejects valid Curve25519 keys at
+   random once imported (libgcrypt T8094, fixed in 1.12.1). The key and
+   backup are fine: use a gpg with another libgcrypt, e.g. in a
+   debian:trixie container.
 3. Restore into any PostgreSQL 18 database:
      createdb restored
      pg_restore --no-owner --no-acl -d restored backup.dump

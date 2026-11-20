@@ -82,6 +82,16 @@ bundle share one version (spec §11.5).
   provider, and a resolver skips a locked debit. The re-query also no
   longer treats a listed wallet debit as money received (it failed
   verification and was retried for 30 days).
+- **The backup key's README says what to do when gpg reports "Bad secret
+  key".** libgcrypt 1.12.0, which Ubuntu 26.04 ships, rejects valid
+  Curve25519 secret keys at random once imported (its T8094, fixed in
+  1.12.1); keys GnuPG exports itself fail the same way, and Xenibase's keys
+  and backups are unaffected. The README in a downloaded project key and
+  the disaster-recovery guide name the bug and the way round it (a gpg with
+  another libgcrypt). The gpg test reports this case as a skip rather than
+  a failure, and a new test checks every derived key's secret packets
+  (clamped big-endian cv25519 scalar matching its point, canonical MPIs,
+  checksums) without gpg.
 - **Built with Go 1.26.11.** Go 1.26.10's `net/http` server can crash on
   a race between `MaxBytesReader` and the request headers (GO-2026-6859);
   every Xenibase binary serves HTTP, so `go.mod` now asks for 1.26.11.
