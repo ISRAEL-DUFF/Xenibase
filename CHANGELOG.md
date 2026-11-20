@@ -68,6 +68,20 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **A wallet debit still waiting for the provider can't be paid twice.**
+  The hourly re-query (and the next debit attempt for the invoice) resolved
+  every pending debit by looking its key up at the provider, including one
+  whose attempt was still in flight. Before the transfer reached the
+  provider, the lookup found nothing and closed the debit as "nothing was
+  posted", which freed the invoice for a second debit (a deposit, the daily
+  run or "Pay from wallet") while the first went through: the wallet was
+  debited twice. Just after it posted, the lookup booked it under the
+  transfer's id and its attempt booked it again under the transaction's,
+  leaving the invoice's amount as credit and the books short of the wallet.
+  An attempt now holds its debit's row lock while it waits for the
+  provider, and a resolver skips a locked debit. The re-query also no
+  longer treats a listed wallet debit as money received (it failed
+  verification and was retried for 30 days).
 - **Built with Go 1.26.11.** Go 1.26.10's `net/http` server can crash on
   a race between `MaxBytesReader` and the request headers (GO-2026-6859);
   every Xenibase binary serves HTTP, so `go.mod` now asks for 1.26.11.

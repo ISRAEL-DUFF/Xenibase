@@ -255,7 +255,11 @@ func (s *Service) Requery(ctx context.Context, from, to time.Time) (int, error) 
 			continue
 		}
 		for _, tx := range txs {
-			if tx.Status != TxSucceeded {
+			// A wallet debit is Xenibase's own: it is booked by the attempt
+			// that made it, or by resolving its key below, never as money
+			// received (one in flight isn't booked yet, and the provider's
+			// verify endpoint only confirms deposits).
+			if tx.Status != TxSucceeded || tx.Channel == ChannelWallet {
 				continue
 			}
 			if _, err := q.GetPaymentByProviderRef(ctx, store.GetPaymentByProviderRefParams{Provider: name, ProviderRef: tx.ProviderRef}); err == nil {
