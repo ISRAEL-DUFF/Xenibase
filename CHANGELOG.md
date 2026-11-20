@@ -68,6 +68,10 @@ bundle share one version (spec §11.5).
   created); a restore test run for a dedicated project does the same.
 
 ### Fixed
+- **Built with Go 1.26.11.** Go 1.26.10's `net/http` server can crash on
+  a race between `MaxBytesReader` and the request headers (GO-2026-6859);
+  every Xenibase binary serves HTTP, so `go.mod` now asks for 1.26.11.
+  Images built from the Dockerfiles already take the newest 1.26 release.
 - **Caddy reads the new Caddyfile after an upgrade.** The Caddyfile is a
   single bind-mounted file, and a checkout replaces it with a new inode, so
   a running Caddy kept the old one until something recreated it, and a
