@@ -35,6 +35,10 @@ https:// {
 	}
 	reverse_proxy taskiem-public:8082
 }
+
+http://*.preview.taskiem.test {
+	redir https://{host}{uri} 308
+}
 `
 	cohostGlobal = `on_demand_tls {
 	ask http://taskiem-public:9090/tls/ask

@@ -23,13 +23,13 @@ import /etc/caddy/caddy.d/*.caddy
 # Any other host on port 80. Caddy answers the HTTP-01 challenges of the
 # certificates it gets itself before any of this (on-demand ones included);
 # the rest go to xenibase-server, which gets the DB hostname's certificate.
-# Everything else is redirected: to the UI, or with co-hosting to HTTPS on
-# the same name (CADDY_HTTP_REDIRECT, set in compose.yaml).
+# Everything else is redirected (308): to the UI, or with co-hosting to HTTPS
+# on the same name (CADDY_HTTP_REDIRECT, set in compose.yaml).
 http:// {
 	handle /.well-known/acme-challenge/* {
 		reverse_proxy xenibase-server:8080
 	}
 	handle {
-		redir {$CADDY_HTTP_REDIRECT}
+		redir {$CADDY_HTTP_REDIRECT} 308
 	}
 }
