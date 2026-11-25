@@ -5,6 +5,8 @@ bundle share one version (spec §11.5).
 
 ## Unreleased
 
+## v4.2.4
+
 ### Added
 - **Xenibase and another app on one server, behind one Caddy.** Only one
   program can hold ports 80 and 443, so a second app (Taskiem) on the same
@@ -66,6 +68,48 @@ bundle share one version (spec §11.5).
   dedicated project's base backup and WAL to the present into a scratch
   instance on its node, reads every table and removes it (no project is
   created); a restore test run for a dedicated project does the same.
+- **A region's own API domain.** Platform → Regions → **API domain**
+  (`api_domain` on `PUT /api/v1/admin/regions/{id}`) gives a region's projects
+  `https://<ref>.<api-domain>` for their backend services, served by an edge in
+  the region (`XENIBASE_EDGE_DOMAIN` set to it, `XENIBASE_EDGE_REGION` to the
+  region), so a Lagos project's API traffic stays in Lagos instead of crossing
+  to the home region. Edge nodes Xenibase adds in the region get it in their
+  cloud-init. See `docs/regions.md`.
+- **Role management on dedicated projects.** An organisation owner can let a
+  dedicated project's owner role create roles (`CREATEROLE`, Project Settings →
+  Compute → Database roles, or `PUT /api/v1/projects/{id}/manage-roles`), for
+  applications whose migrations create their own roles. Postgres 16+ limits it
+  to the roles the owner creates. Logins it creates named `<database>_<name>`
+  connect through the poolers within 30 seconds (`POST …/manage-roles/sync` for
+  at once), with the project's connection limit; moves and major upgrades take
+  the roles along. See `docs/database-roles.md`.
+- **An IP allowlist per project.** Project Settings → Network access (or
+  `PUT /api/v1/projects/{id}/network` with `allowed_cidrs`, up to 50 addresses
+  or CIDR ranges) makes the poolers accept the project's logins only from
+  those addresses; Xenibase's own services (backend services, the dashboard's
+  SQL editor, probes) still connect. `GET` returns the caller's address and
+  whether it is allowed. Enforced by PgBouncer HBA rules in each region's
+  pooler configuration. See `docs/network-access.md`.
+- **Early access to hidden regions.** A hidden region takes new projects from
+  the organisations in its **Early-access organisations** list
+  (`early_access_org_ids`), for rehearsals before it opens or a first customer;
+  `GET /api/v1/regions` lists it to their members. Before, a hidden region
+  refused every project, so the Lagos launch rehearsals could not run until it
+  was open.
+- **Standby settings per read replica.** Hot standby feedback (off by
+  default) and how long replay waits for a conflicting query before cancelling
+  it (30 s by default, 0 to 900; `max_standby_streaming_delay` and
+  `max_standby_archive_delay`), set when a replica is added
+  (`hot_standby_feedback`, `max_standby_delay_seconds` on
+  `POST /api/v1/projects/{id}/replicas`) or changed later
+  (`PATCH /api/v1/projects/{id}/replicas/{replica_id}`, the replica's
+  **Settings…** in the dashboard, `xenibase replicas set`). A change applies to
+  that replica alone with a reload, without a restart; the primary and HA
+  standbys keep Postgres's defaults. See `docs/read-replicas.md`.
+
+### Security
+- Built with Go 1.26.10, which distrusts compromised intermediate certificates
+  in `crypto/x509` (GO-2026-6809); the agent's TLS connections reached it.
 
 ### Fixed
 - **A wallet debit still waiting for the provider can't be paid twice.**
@@ -1213,6 +1257,8 @@ bundle share one version (spec §11.5).
   Order and at-least-once delivery are unchanged. `/metrics` shows the
   number held as `xenibase_instance_webhook_listen_connections`, labelled
   by instance, kind and node.
+- **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.
+- **A source that doesn't answer is explained, not an "internal error".** When the import's preflight (or the import itself) can't read the source in time, for example because a pooler in front of it has no free connection for that login, or a query is refused, the answer is now a clear request error naming the likely cause (the password is redacted). It was a 500 after the preflight's one-minute limit.
 
 ### Upgrading
 - Caddy is recreated once by this upgrade (its Caddyfile changed): the web
@@ -1405,54 +1451,6 @@ bundle share one version (spec §11.5).
   see it for such projects at the first evaluation after the upgrade.
   Delete a project in `error`; the others need repair by hand
   (`docs/operations.md`, "Projects stuck in a status").
-
-## v4.2.4
-
-### Added
-- **A region's own API domain.** Platform → Regions → **API domain**
-  (`api_domain` on `PUT /api/v1/admin/regions/{id}`) gives a region's projects
-  `https://<ref>.<api-domain>` for their backend services, served by an edge in
-  the region (`XENIBASE_EDGE_DOMAIN` set to it, `XENIBASE_EDGE_REGION` to the
-  region), so a Lagos project's API traffic stays in Lagos instead of crossing
-  to the home region. Edge nodes Xenibase adds in the region get it in their
-  cloud-init. See `docs/regions.md`.
-- **Role management on dedicated projects.** An organisation owner can let a
-  dedicated project's owner role create roles (`CREATEROLE`, Project Settings →
-  Compute → Database roles, or `PUT /api/v1/projects/{id}/manage-roles`), for
-  applications whose migrations create their own roles. Postgres 16+ limits it
-  to the roles the owner creates. Logins it creates named `<database>_<name>`
-  connect through the poolers within 30 seconds (`POST …/manage-roles/sync` for
-  at once), with the project's connection limit; moves and major upgrades take
-  the roles along. See `docs/database-roles.md`.
-- **An IP allowlist per project.** Project Settings → Network access (or
-  `PUT /api/v1/projects/{id}/network` with `allowed_cidrs`, up to 50 addresses
-  or CIDR ranges) makes the poolers accept the project's logins only from
-  those addresses; Xenibase's own services (backend services, the dashboard's
-  SQL editor, probes) still connect. `GET` returns the caller's address and
-  whether it is allowed. Enforced by PgBouncer HBA rules in each region's
-  pooler configuration. See `docs/network-access.md`.
-- **Early access to hidden regions.** A hidden region takes new projects from
-  the organisations in its **Early-access organisations** list
-  (`early_access_org_ids`), for rehearsals before it opens or a first customer;
-  `GET /api/v1/regions` lists it to their members. Before, a hidden region
-  refused every project, so the Lagos launch rehearsals could not run until it
-  was open.
-- **Standby settings per read replica.** Hot standby feedback (off by
-  default) and how long replay waits for a conflicting query before cancelling
-  it (30 s by default, 0 to 900; `max_standby_streaming_delay` and
-  `max_standby_archive_delay`), set when a replica is added
-  (`hot_standby_feedback`, `max_standby_delay_seconds` on
-  `POST /api/v1/projects/{id}/replicas`) or changed later
-  (`PATCH /api/v1/projects/{id}/replicas/{replica_id}`, the replica's
-  **Settings…** in the dashboard, `xenibase replicas set`). A change applies to
-  that replica alone with a reload, without a restart; the primary and HA
-  standbys keep Postgres's defaults. See `docs/read-replicas.md`.
-
-### Security
-- Built with Go 1.26.10, which distrusts compromised intermediate certificates
-  in `crypto/x509` (GO-2026-6809); the agent's TLS connections reached it.
-
-### Upgrading
 - Migration 00056 adds `regions.api_domain` and `region_early_access`. Nothing
   changes until a region is given a domain or an early-access list.
 - Migration 00057 adds `projects.manage_roles` and `project_owned_logins`.
@@ -1467,10 +1465,6 @@ bundle share one version (spec §11.5).
   recreate the poolers.
 - Migration 00059 adds the settings to `read_replicas`. Existing replicas keep
   Postgres's defaults (feedback off, 30 s), which they already ran with.
-
-### Fixed
-- **Importing a database through a PgBouncer failed.** The import (and the Supabase migration) opened its connection to the source with `default_transaction_read_only=on` as a startup parameter. A PgBouncer in front of the source, such as the pooler of a Xenibase V2 instance, refuses any startup parameter it doesn't ignore, so the preflight stopped with "FATAL: unsupported startup parameter: default_transaction_read_only". Both now connect plainly and make the session read-only with `SET` once connected, which works through a pooler in session mode and straight to Postgres. The copy itself is made by `pg_dump`, which reads in its own read-only snapshot. Tests run the connection against a fake pooler that refuses the parameter.
-- **A source that doesn't answer is explained, not an "internal error".** When the import's preflight (or the import itself) can't read the source in time, for example because a pooler in front of it has no free connection for that login, or a query is refused, the answer is now a clear request error naming the likely cause (the password is redacted). It was a 500 after the preflight's one-minute limit.
 
 ## v4.2.3
 
