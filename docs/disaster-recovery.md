@@ -93,6 +93,17 @@ are both yours.
    gpg checks the message's integrity only at its end: if it reports an
    error, `backup.dump` is incomplete, so don't restore it.
 
+   If gpg says `Bad secret key`, check `gpg --version`: libgcrypt 1.12.0,
+   which Ubuntu 26.04 ships, rejects valid Curve25519 secret keys at
+   random once they are imported (its secret-key check computes with MPIs
+   that lack the limbs it needs, so whether it fails depends on the
+   agent's memory: even the length of `GNUPGHOME` changes it). It is libgcrypt's
+   bug [T8094](https://dev.gnupg.org/T8094), fixed in 1.12.1, and keys
+   GnuPG itself exports fail the same way: the key file and the backup are
+   fine. Use a gpg built with another libgcrypt, for example
+   `docker run --rm -it -v "$PWD:/w" -w /w debian:trixie` with
+   `apt-get install -y gnupg`.
+
 3. Restore the `pg_dump` custom-format archive into any PostgreSQL 18:
 
    ```sh

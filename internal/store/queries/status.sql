@@ -38,7 +38,8 @@ GROUP BY region ORDER BY region;
 
 -- name: ProviderUnavailableSince :many
 -- tenant: system - payment providers whose last automatic charge since a time hit an outage.
-SELECT DISTINCT ON (provider) provider, (error LIKE 'provider unavailable%')::bool AS unavailable
+-- A succeeded charge has no error: coalesce, or the NULL fails the scan into a bool.
+SELECT DISTINCT ON (provider) provider, coalesce(error LIKE 'provider unavailable%', false)::bool AS unavailable
 FROM payment_intents WHERE automatic AND created_at > @since AND status IN ('succeeded', 'failed')
 ORDER BY provider, created_at DESC;
 

@@ -1065,6 +1065,63 @@ func (q *Queries) LockPayment(ctx context.Context, id uuid.UUID) (Payment, error
 	return i, err
 }
 
+const lockPaymentIntent = `-- name: LockPaymentIntent :one
+SELECT id, org_id, reference, provider, channel, purpose, invoice_id, method_id, amount_minor, status, checkout_url, automatic, error, created_at, completed_at FROM payment_intents WHERE reference = $1 FOR UPDATE
+`
+
+// tenant: system - a wallet debit, locked by the attempt that made it (waiting for a resolver that holds it).
+func (q *Queries) LockPaymentIntent(ctx context.Context, reference string) (PaymentIntent, error) {
+	row := q.db.QueryRow(ctx, lockPaymentIntent, reference)
+	var i PaymentIntent
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Reference,
+		&i.Provider,
+		&i.Channel,
+		&i.Purpose,
+		&i.InvoiceID,
+		&i.MethodID,
+		&i.AmountMinor,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.Automatic,
+		&i.Error,
+		&i.CreatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
+const lockPendingIntent = `-- name: LockPendingIntent :one
+SELECT id, org_id, reference, provider, channel, purpose, invoice_id, method_id, amount_minor, status, checkout_url, automatic, error, created_at, completed_at FROM payment_intents WHERE reference = $1 AND status = 'pending' FOR UPDATE SKIP LOCKED
+`
+
+// tenant: system - a wallet debit still unresolved, locked by whoever acts on it (the attempt that made it, while it
+// waits for the provider, or a resolver); one that another session holds is skipped, not waited for.
+func (q *Queries) LockPendingIntent(ctx context.Context, reference string) (PaymentIntent, error) {
+	row := q.db.QueryRow(ctx, lockPendingIntent, reference)
+	var i PaymentIntent
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Reference,
+		&i.Provider,
+		&i.Channel,
+		&i.Purpose,
+		&i.InvoiceID,
+		&i.MethodID,
+		&i.AmountMinor,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.Automatic,
+		&i.Error,
+		&i.CreatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
 const openInvoices = `-- name: OpenInvoices :many
 SELECT id, org_id, number, period_start, period_end, status, held, hold_reason, subtotal_minor, vat_minor, total_minor, wht_expected_minor, vat_rate, bill_to, seller, due_at, issued_at, paid_at, pdf_object_key, price_book_version, created_at, paid_minor, wht_deducted_minor, wht_evidenced_at, usd_subtotal_minor, usd_vat_minor, usd_total_minor, fx FROM invoices WHERE org_id = $1 AND status IN ('issued', 'partially_paid') AND total_minor > 0
 ORDER BY issued_at, number FOR UPDATE
@@ -1389,6 +1446,18 @@ func (q *Queries) PaymentAllocationsForUpdate(ctx context.Context, paymentID uui
 		return nil, err
 	}
 	return items, nil
+}
+
+const paymentIntentStatus = `-- name: PaymentIntentStatus :one
+SELECT status FROM payment_intents WHERE reference = $1
+`
+
+// tenant: system - a wallet debit's status.
+func (q *Queries) PaymentIntentStatus(ctx context.Context, reference string) (string, error) {
+	row := q.db.QueryRow(ctx, paymentIntentStatus, reference)
+	var status string
+	err := row.Scan(&status)
+	return status, err
 }
 
 const paymentRefunds = `-- name: PaymentRefunds :many

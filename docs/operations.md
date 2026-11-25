@@ -440,8 +440,12 @@ token, so the token rules above apply to it; users disconnect an app under
 
 ## Capacity
 
-- The shared cluster's tuning is in `compose.yaml` (`SHARED_PG_SHARED_BUFFERS`,
-  `SHARED_PG_EFFECTIVE_CACHE_SIZE` in `.env` for other host sizes). Each
+- The shared cluster's tuning is in `compose.yaml`; for other host sizes,
+  or a server shared with another app, set `SHARED_PG_SHARED_BUFFERS`,
+  `SHARED_PG_EFFECTIVE_CACHE_SIZE`, `SHARED_PG_MAX_CONNECTIONS`,
+  `SHARED_PG_WORK_MEM`, `SHARED_PG_MAINTENANCE_WORK_MEM` and
+  `SHARED_PG_AUTOVACUUM_MAX_WORKERS` in `.env`
+  ([profiles](cohosting.md#sizing-sharing-the-server-with-another-app)). Each
   shared project gets a pool of 5 server connections in transaction mode and
   up to 20 backends; the load test ([load test](load-test.md)) ran 150
   projects with ten busy ones on 4 vCPU.

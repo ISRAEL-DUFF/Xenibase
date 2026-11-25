@@ -32,6 +32,7 @@ Xenibase needs these inbound ports:
 | --- | --- |
 | 80/tcp | Let's Encrypt HTTP challenges, and the redirect to HTTPS |
 | 443/tcp | The web UI |
+| 443/udp | The web UI over HTTP/3 (optional: without it, browsers use HTTP/2) |
 | 5432/tcp | Databases, session mode (PgBouncer) |
 | 6543/tcp | Databases, transaction mode (PgBouncer) |
 
@@ -41,6 +42,7 @@ With `ufw`:
 sudo ufw allow OpenSSH
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
+sudo ufw allow 443/udp
 sudo ufw allow 5432/tcp
 sudo ufw allow 6543/tcp
 sudo ufw enable
@@ -112,6 +114,11 @@ SHARED_PG_EFFECTIVE_CACHE_SIZE=2GB
 
 Run the installer inside `tmux` or `screen`: on one CPU the first build takes
 10–25 minutes, and a dropped SSH session would stop it.
+
+**Sharing the server with another app.** Only one program can hold ports
+80 and 443. To run another app beside Xenibase (Taskiem, for one) behind
+Xenibase's Caddy, with memory settings for a shared server, follow
+[Xenibase and Taskiem on one server](cohosting.md) instead of this page.
 
 ## 5. Run the installer
 
