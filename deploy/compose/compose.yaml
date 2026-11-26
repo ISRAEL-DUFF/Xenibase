@@ -19,7 +19,7 @@ x-logging: &logging
     max-file: "5"
 
 x-pooler: &pooler
-  image: edoburu/pgbouncer:v1.25.1-p0
+  image: edoburu/pgbouncer:v1.26.1-p0
   restart: unless-stopped
   logging: *logging
   depends_on:
@@ -35,7 +35,7 @@ services:
   caddy:
     # The stock image, unless backend services are on: enable-services.sh builds
     # one with the Cloudflare DNS plugin for the wildcard certificate.
-    image: ${CADDY_IMAGE:-caddy:2.10.0}
+    image: ${CADDY_IMAGE:-caddy:2.11.9}
     restart: unless-stopped
     logging: *logging
     ports:

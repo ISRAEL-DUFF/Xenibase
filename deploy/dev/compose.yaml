@@ -84,7 +84,7 @@ services:
       retries: 30
 
   pooler-session:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    image: edoburu/pgbouncer:v1.26.1-p0
     depends_on:
       shared-pg:
         condition: service_healthy
@@ -101,7 +101,7 @@ services:
       retries: 30
 
   pooler-tx:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    image: edoburu/pgbouncer:v1.26.1-p0
     depends_on:
       shared-pg:
         condition: service_healthy
@@ -116,7 +116,7 @@ services:
   # A second pooler pair for the integration and isolation tests (`--profile
   # test`), so tests never rewrite the routes of a running dev server.
   pooler-session-test:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    image: edoburu/pgbouncer:v1.26.1-p0
     profiles: [test]
     depends_on:
       shared-pg:
@@ -129,7 +129,7 @@ services:
     healthcheck: *pooler-health
 
   pooler-tx-test:
-    image: edoburu/pgbouncer:v1.25.1-p0
+    image: edoburu/pgbouncer:v1.26.1-p0
     profiles: [test]
     depends_on:
       shared-pg:
@@ -246,7 +246,7 @@ services:
   # the gateway address so the control plane (host) and the agent
   # (container) use one connection string.
   src-supabase:
-    image: mirror.gcr.io/supabase/postgres:17.6.1.003
+    image: mirror.gcr.io/supabase/postgres:17.12.0.005
     profiles: [test]
     environment:
       POSTGRES_PASSWORD: supabase-source
@@ -275,7 +275,7 @@ services:
   # Supabase's Postgres, its auth server (GoTrue) and its storage server
   # (with the S3 protocol), wired as Supabase's self-hosted setup does.
   supa-db:
-    image: mirror.gcr.io/supabase/postgres:17.6.1.003
+    image: mirror.gcr.io/supabase/postgres:17.12.0.005
     profiles: [test]
     environment:
       POSTGRES_PASSWORD: supabase-hobby
@@ -290,7 +290,7 @@ services:
       retries: 60
 
   supa-auth:
-    image: mirror.gcr.io/supabase/gotrue:v2.180.0
+    image: mirror.gcr.io/supabase/gotrue:v2.198.0
     profiles: [test]
     depends_on:
       supa-db:
@@ -320,7 +320,7 @@ services:
       retries: 60
 
   supa-storage:
-    image: mirror.gcr.io/supabase/storage-api:v1.28.0
+    image: mirror.gcr.io/supabase/storage-api:v1.99.2
     profiles: [test]
     depends_on:
       supa-db:
