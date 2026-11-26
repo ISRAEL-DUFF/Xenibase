@@ -259,7 +259,7 @@ services:
       retries: 60
 
   src-pg15:
-    image: mirror.gcr.io/library/postgres:15
+    image: mirror.gcr.io/library/postgres:19
     profiles: [test]
     environment:
       POSTGRES_PASSWORD: pg15-source
