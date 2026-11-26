@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +25,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/nodes"
+	"github.com/israel-duff/xenibase/internal/outbound"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/storage"
 	"github.com/israel-duff/xenibase/internal/store"
@@ -71,6 +74,10 @@ type Config struct {
 	// MetadataPG is the metadata DB as the agent reaches it, for
 	// self-backups (spec §11.6). Zero disables them.
 	MetadataPG agentapi.PGConn
+	// SourceBlock and SourceInternal are outbound.Config's Blocked and
+	// Internal for import sources: extra ranges refused unless
+	// allow-listed, and the platform's own networks, always refused.
+	SourceBlock, SourceInternal []netip.Prefix
 }
 
 func (c *Config) setDefaults() {
@@ -87,22 +94,32 @@ func (c *Config) setDefaults() {
 
 // Service is the backup service.
 type Service struct {
-	db        *pgxpool.Pool
-	keyring   *crypto.Keyring
-	nodes     *nodes.Service
-	projects  *provision.Service
-	cfg       Config
-	log       *slog.Logger
-	ephemeral *Ephemeral
+	db       *pgxpool.Pool
+	keyring  *crypto.Keyring
+	nodes    *nodes.Service
+	projects *provision.Service
+	cfg      Config
+	log      *slog.Logger
 	// Dedicated runs base backups and point-in-time recovery; nil without
 	// the dedicated tier.
 	Dedicated *dedicated.Service
+	// CheckSource checks an import source's address for an organisation
+	// (outbound.Service.CheckSource, by default with SourceBlock and
+	// SourceInternal).
+	CheckSource func(ctx context.Context, org uuid.UUID, host string, port int) (netip.Addr, error)
+	// filesWarned is when FilesTarget last warned that a region's files
+	// share its backup target (by region).
+	filesWarned sync.Map
+	// verify is verifyRestore; tests without agents replace it.
+	verify func(ctx context.Context, p store.Project, b store.Backup, log *jobs.StepLogger) error
 }
 
 // NewService returns a Service and hooks final backups into deletes.
 func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps *provision.Service, cfg Config, log *slog.Logger) *Service {
 	cfg.setDefaults()
-	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log, ephemeral: NewEphemeral()}
+	s := &Service{db: db, keyring: keyring, nodes: ns, projects: ps, cfg: cfg, log: log,
+		CheckSource: outbound.New(db, outbound.Config{Blocked: cfg.SourceBlock, Internal: cfg.SourceInternal}, log).CheckSource}
+	s.verify = s.verifyRestore
 	ps.FinalBackup = s.finalBackup
 	return s
 }
@@ -110,13 +127,13 @@ func NewService(db *pgxpool.Pool, keyring *crypto.Keyring, ns *nodes.Service, ps
 // Kinds returns the operation kinds this service runs.
 func (s *Service) Kinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
-		KindBackup:         {Handler: s.runBackup, MaxAttempts: 3, Timeout: 6 * time.Hour},
+		KindBackup:         {Handler: s.runBackup, MaxAttempts: 3, Timeout: 6 * time.Hour, Class: jobs.ClassScheduled},
 		KindRestore:        {Handler: s.runRestore, OnFail: s.failRestore, MaxAttempts: 2, Timeout: 6 * time.Hour},
-		KindRestoreTest:    {Handler: s.runRestoreTest, MaxAttempts: 1, Timeout: 6 * time.Hour},
-		KindMetadataBackup: {Handler: s.runMetadataBackup, MaxAttempts: 3, Timeout: time.Hour},
-		KindImport:         {Handler: s.runImport, OnFail: s.projects.Rollback, MaxAttempts: 1, Timeout: 12 * time.Hour},
-		KindBaseBackup:     {Handler: s.runBaseBackup, MaxAttempts: 3, Timeout: 12 * time.Hour},
-		KindStorageSwitch:  {Handler: s.runStorageSwitch, MaxAttempts: 3, Timeout: 12 * time.Hour},
+		KindRestoreTest:    {Handler: s.runRestoreTest, OnFail: s.failRestoreTest, MaxAttempts: 1, Timeout: 6 * time.Hour, Class: jobs.ClassScheduled},
+		KindMetadataBackup: {Handler: s.runMetadataBackup, MaxAttempts: 3, Timeout: time.Hour, Class: jobs.ClassScheduled},
+		KindImport:         {Handler: s.runImport, OnFail: s.projects.Rollback, MaxAttempts: 1, Timeout: 12 * time.Hour, Class: jobs.ClassLong},
+		KindBaseBackup:     {Handler: s.runBaseBackup, MaxAttempts: 3, Timeout: 12 * time.Hour, Class: jobs.ClassScheduled},
+		KindStorageSwitch:  {Handler: s.runStorageSwitch, MaxAttempts: 3, Timeout: 12 * time.Hour, Class: jobs.ClassScheduled},
 	}
 }
 
@@ -488,7 +505,9 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 				// Daily base backup; WAL is archived continuously (spec §6.4).
 				kind, params = KindBaseBackup, map[string]any{"scheduled": true}
 			}
-			if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &id, Params: params}); err != nil {
+			// The list was read without locks: queue only on a project
+			// still idle under its row lock, as a request would.
+			if _, err := provision.EnqueueIfIdleTx(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &id, Params: params}); err != nil {
 				return err
 			}
 		}
@@ -502,7 +521,7 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 			}
 			for _, p := range drift {
 				id := p.ID
-				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindStorageSwitch, ProjectID: &id, Params: map[string]any{}}); err != nil {
+				if _, err := provision.EnqueueIfIdleTx(ctx, tx, jobs.EnqueueParams{Kind: KindStorageSwitch, ProjectID: &id, Params: map[string]any{}}); err != nil {
 					return err
 				}
 			}
@@ -518,11 +537,28 @@ func (s *Service) Schedule(ctx context.Context, now time.Time) error {
 		}
 		last, err := q.LastOperationOfKind(ctx, KindRestoreTest)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && now.Sub(last.CreatedAt) >= 7*24*time.Hour) {
-			if _, err := q.RandomProjectWithBackup(ctx); err == nil {
-				// Alternate between primary and copy targets (V3 §2.5).
-				// The first test (no last operation) reads a copy if any.
-				next := RestoreTestParams{FromCopy: !restoreTestParams(last).FromCopy}
-				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next}); err != nil {
+			// Alternate between a point-in-time recovery and a logical
+			// backup, and the logical turns between primary and copy
+			// targets (V3 §2.5). The first test (no last operation) reads a
+			// copy if any.
+			var prev *RestoreTestParams
+			if err == nil {
+				p := restoreTestParams(last)
+				prev = &p
+			}
+			next := nextRestoreTest(prev)
+			_, logicalErr := q.RandomProjectWithBackup(ctx)
+			pitrErr := pgx.ErrNoRows
+			if s.Dedicated != nil {
+				_, pitrErr = q.RandomProjectWithBaseBackup(ctx)
+			}
+			if next.PITR && pitrErr != nil {
+				next = nextRestoreTest(&next)
+			} else if !next.PITR && logicalErr != nil && pitrErr == nil {
+				next = RestoreTestParams{PITR: true, FromCopy: next.FromCopy}
+			}
+			if logicalErr == nil || pitrErr == nil {
+				if _, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: KindRestoreTest, Params: next, Background: true}); err != nil {
 					return err
 				}
 			}

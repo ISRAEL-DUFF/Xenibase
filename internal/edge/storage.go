@@ -279,27 +279,32 @@ func (e *Edge) buckets(c *call, req Request, rest string) {
 			return
 		}
 		if old.Public && !b.Public {
-			e.bucketPrivate(c.p, id)
+			e.storageEvent(c.p, edgeapi.StorageEvent{Event: edgeapi.EventBucketPrivate, Bucket: id})
 		}
 		c.json(http.StatusOK, b)
 	case id != "" && sub == "" && c.r.Method == http.MethodDelete:
-		tag, err := pool.Exec(ctx, `DELETE FROM xb_storage.buckets WHERE id = $1`, id)
+		var public bool
+		err := pool.QueryRow(ctx, `DELETE FROM xb_storage.buckets WHERE id = $1 RETURNING public`, id).Scan(&public)
 		var pe *pgconn.PgError
 		if errors.As(err, &pe) && pe.Code == "23503" {
 			c.fail(http.StatusConflict, "bucket_not_empty", "the bucket still has objects: empty it first")
+			return
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			errNoBucket.send(c)
 			return
 		}
 		if err != nil {
 			e.dbError(c, err)
 			return
 		}
-		if tag.RowsAffected() == 0 {
-			errNoBucket.send(c)
-			return
+		if public {
+			e.storageEvent(c.p, edgeapi.StorageEvent{Event: edgeapi.EventBucketDeleted, Bucket: id})
 		}
 		c.json(http.StatusOK, map[string]string{"message": "deleted"})
 	case id != "" && sub == "empty" && c.r.Method == http.MethodPost:
-		if _, err := e.bucket(ctx, c.p, id); err != nil {
+		b, err := e.bucket(ctx, c.p, id)
+		if err != nil {
 			e.storageError(c, err)
 			return
 		}
@@ -317,23 +322,43 @@ func (e *Edge) buckets(c *call, req Request, rest string) {
 			}
 		}
 		e.collectSoon(c.p)
+		if b.Public && n > 0 {
+			e.storageEvent(c.p, edgeapi.StorageEvent{Event: edgeapi.EventBucketEmptied, Bucket: id})
+		}
 		c.json(http.StatusOK, map[string]any{"message": "emptied", "deleted": n})
 	default:
 		c.fail(http.StatusNotFound, "no_such_endpoint", "no such endpoint")
 	}
 }
 
-// bucketPrivate tells xenibase-server a public bucket went private, so its
-// files leave the CDN's cache (V4 §5.4).
-func (e *Edge) bucketPrivate(p *project, bucket string) {
-	ref := p.cfg.Ref
+// storageEvent tells xenibase-server, in the background, that files left
+// a public bucket's URLs, so they leave the CDN's cache (V4 §5.4); the
+// server keeps the purge until the CDN takes it.
+func (e *Edge) storageEvent(p *project, ev edgeapi.StorageEvent) {
+	ev.Ref = p.cfg.Ref
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := e.client.StorageEvent(ctx, edgeapi.StorageEvent{Ref: ref, Event: edgeapi.EventBucketPrivate, Bucket: bucket}); err != nil {
-			e.cfg.Log.Warn("storage event", "project", ref, "bucket", bucket, "err", err)
+		var err error
+		for i := range 3 {
+			if i > 0 {
+				time.Sleep(time.Duration(i) * 2 * time.Second)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err = e.client.StorageEvent(ctx, ev)
+			cancel()
+			if err == nil {
+				return
+			}
 		}
+		e.cfg.Log.Warn("storage event", "project", ev.Ref, "event", ev.Event, "bucket", ev.Bucket, "err", err)
 	}()
+}
+
+// publicGone sends paths of bucket b, gone from its public URLs, to have
+// them purged; nothing for a private bucket.
+func (e *Edge) publicGone(p *project, b *Bucket, paths ...string) {
+	if b != nil && b.Public && len(paths) > 0 {
+		e.storageEvent(p, edgeapi.StorageEvent{Event: edgeapi.EventObjectsChanged, Bucket: b.ID, Paths: paths})
+	}
 }
 
 // storageError answers err from a storage operation.

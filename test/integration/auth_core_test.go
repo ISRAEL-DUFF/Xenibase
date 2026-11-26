@@ -533,6 +533,11 @@ func TestAuthCore(t *testing.T) {
 	}
 	host, portS, _ := net.SplitHostPort(e.SMTP.Addr)
 	port, _ := strconv.Atoi(portS)
+	// The test's SMTP server is on loopback, which the outbound rules
+	// refuse unless the platform admin allows the host.
+	if code := e.Do("PUT", "/api/v1/admin/orgs/"+p.OrgID.String()+"/outbound", gen.OutboundAllowlist{Hosts: []string{host}}, nil); code != http.StatusOK {
+		t.Fatalf("allow-list: %d", code)
+	}
 	tls := gen.AuthSMTPTls("none")
 	if code := e.Do("PATCH", base+"/auth/config", gen.AuthConfigUpdate{Smtp: &gen.AuthSMTP{Host: host, Port: &port, From: "Auth App <auth@app.example.com>",
 		Tls: &tls}, Templates: &map[string]gen.AuthEmailTemplate{"magic_link": {Subject: "Your Auth App code", Body: "Hi! Your code: {{.Code}}\n{{.Link}}\n"}}},

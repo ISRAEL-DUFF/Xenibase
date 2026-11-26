@@ -4,18 +4,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -182,18 +186,113 @@ func NormalizePhone(s string) string {
 // WhatsAppPlans are the plans WhatsApp support is for (V3 §7.1).
 func WhatsAppPlan(plan string) bool { return plan == "pro" || plan == "team" }
 
-// InboundWhatsApp threads a customer's WhatsApp message into the open
-// ticket with that number, or opens one for the number's organisation. A
-// number no Pro or Team organisation registered gets a reply saying how
-// to reach support instead.
-func (s *Service) InboundWhatsApp(ctx context.Context, in Inbound) (*store.Ticket, error) {
+// Errors registering a WhatsApp number.
+var (
+	ErrPhoneTaken      = errors.New("that number is registered to another organisation")
+	ErrPhoneRegistered = errors.New("that number is registered already")
+)
+
+// PhoneCodeTTL is how long a WhatsApp number's confirmation code works.
+const PhoneCodeTTL = 7 * 24 * time.Hour
+
+// PhoneCode is how a confirmation code is written for people to send:
+// "XB-12345678".
+func PhoneCode(code string) string { return "XB-" + code }
+
+// RegisterPhone adds phone (E.164) to orgID's WhatsApp numbers, pending
+// until someone sends its code from that number to the support number
+// (InboundWhatsApp). Registering a pending number again gives a new code.
+// Other organisations' pending registrations of the number don't stop it;
+// another organisation's verified one does.
+func (s *Service) RegisterPhone(ctx context.Context, orgID uuid.UUID, addedBy *uuid.UUID, phone string) (store.OrgSupportPhone, error) {
 	q := store.New(s.db)
-	if t, err := q.OpenTicketFrom(ctx, store.OpenTicketFromParams{Requester: in.From, Channel: ChannelWhatsApp}); err == nil {
-		_, err := s.CustomerReply(ctx, t, in.From, nil, in.Body, in.ID)
-		return &t, err
+	if org, err := q.OrgByPhone(ctx, phone); err == nil {
+		if org == orgID {
+			return store.OrgSupportPhone{}, ErrPhoneRegistered
+		}
+		return store.OrgSupportPhone{}, ErrPhoneTaken
 	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return store.OrgSupportPhone{}, err
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(100_000_000))
+	if err != nil {
+		return store.OrgSupportPhone{}, err
+	}
+	code := fmt.Sprintf("%08d", n.Int64())
+	exp := s.cfg.Now().Add(PhoneCodeTTL)
+	p, err := q.AddOrgSupportPhone(ctx, store.AddOrgSupportPhoneParams{Phone: phone, OrgID: orgID, AddedBy: addedBy, Code: &code, CodeExpiresAt: &exp})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, ErrPhoneRegistered // verified meanwhile
+	}
+	return p, err
+}
+
+var phoneCodeMessage = regexp.MustCompile(`^(?:XB)?([0-9]{8})$`)
+
+// confirmPhone verifies a pending registration of in.From whose code is the
+// whole of in.Body, and tells the sender. It reports whether the message
+// was a code for a pending registration.
+func (s *Service) confirmPhone(ctx context.Context, in Inbound) (bool, error) {
+	norm := strings.ToUpper(strings.Map(func(r rune) rune {
+		if r == ' ' || r == '-' || r == '.' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(in.Body)))
+	m := phoneCodeMessage.FindStringSubmatch(norm)
+	if m == nil {
+		return false, nil
+	}
+	now := s.cfg.Now()
+	q := store.New(s.db)
+	pending, err := q.PendingSupportPhonesByCode(ctx, store.PendingSupportPhonesByCodeParams{Phone: in.From, Code: &m[1], Now: &now})
+	if err != nil || len(pending) != 1 {
+		return false, err
+	}
+	p := pending[0]
+	reply := ""
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		qt := store.New(tx)
+		if _, err := qt.VerifySupportPhone(ctx, store.VerifySupportPhoneParams{OrgID: p.OrgID, Phone: p.Phone, Now: &now}); err != nil {
+			return err
+		}
+		return qt.DropPendingSupportPhones(ctx, store.DropPendingSupportPhonesParams{Phone: p.Phone, OrgID: p.OrgID})
+	})
+	switch {
+	case isUniqueViolation(err):
+		reply = "This number is already registered to another organisation's Xenibase support, so it wasn't added. An owner or admin of that organisation can remove it (Organisation → Support)."
+	case err != nil:
+		return true, err
+	default:
+		name := p.OrgID.String()
+		if o, err := q.GetOrg(ctx, p.OrgID); err == nil {
+			name = o.Name
+		}
+		reply = "Confirmed: messages from this number now open Xenibase support tickets for " + name + ", which its owners and admins can read."
+	}
+	if s.whatsapp != nil {
+		if _, err := s.whatsapp.SendText(ctx, in.From, reply); err != nil {
+			s.log.Warn("support whatsapp", "err", err)
+		}
+	}
+	return true, nil
+}
+
+func isUniqueViolation(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Code == "23505"
+}
+
+// InboundWhatsApp confirms a pending number whose code the message is, or
+// threads a customer's WhatsApp message into the open ticket with that
+// number, or opens one for the organisation that verified the number. A
+// number no Pro or Team organisation verified gets a reply saying how to
+// reach support instead.
+func (s *Service) InboundWhatsApp(ctx context.Context, in Inbound) (*store.Ticket, error) {
+	if ok, err := s.confirmPhone(ctx, in); ok || err != nil {
 		return nil, err
 	}
+	q := store.New(s.db)
 	org, err := q.OrgByPhone(ctx, in.From)
 	plan := "free"
 	if err == nil {
@@ -205,7 +304,7 @@ func (s *Service) InboundWhatsApp(ctx context.Context, in Inbound) (*store.Ticke
 	}
 	if err != nil || !WhatsAppPlan(plan) {
 		if s.whatsapp != nil {
-			msg := "Xenibase support on WhatsApp is for Pro and Team organisations that registered this number (Organisation → Support)."
+			msg := "Xenibase support on WhatsApp is for Pro and Team organisations that registered and confirmed this number (Organisation → Support)."
 			if s.cfg.Address != "" {
 				msg += " Email " + s.cfg.Address + ", or open a ticket from the dashboard."
 			}
@@ -214,6 +313,12 @@ func (s *Service) InboundWhatsApp(ctx context.Context, in Inbound) (*store.Ticke
 			}
 		}
 		return nil, nil
+	}
+	if t, err := q.OpenTicketFrom(ctx, store.OpenTicketFromParams{OrgID: &org, Requester: in.From, Channel: ChannelWhatsApp}); err == nil {
+		_, err := s.CustomerReply(ctx, t, in.From, nil, in.Body, in.ID)
+		return &t, err
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
 	}
 	subject := firstLine(in.Body)
 	if len(subject) > 80 {

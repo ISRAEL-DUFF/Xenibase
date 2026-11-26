@@ -1,7 +1,12 @@
 package typegen
 
 import (
+	"go/ast"
 	"go/format"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -92,5 +97,100 @@ func TestDart(t *testing.T) {
 	}
 	if _, err := Generate(testCatalog(), "cobol", Options{}); err == nil {
 		t.Fatal("an unknown language")
+	}
+}
+
+// evil is the 37-byte column name from the atlas (Part D, typed
+// definitions): pasted into Go as it was, it closed the struct and declared
+// func init() { panic("ran") }.
+const evil = "x\tint\n}\nfunc\tinit()\t{\tpanic(\"ran\")\n//"
+
+// hostile is a catalog whose table and column names are source code.
+func hostile(column, price string) *datacat.Catalog {
+	t := &datacat.Table{Schema: "public", Name: evil, Kind: datacat.KindTable, ByName: map[string]*datacat.Column{}}
+	for _, c := range []*datacat.Column{
+		{Name: "id", TypName: "int8", Category: 'N'},
+		{Name: column, TypName: "text", Category: 'S', Nullable: true},
+		{Name: price, TypName: "int4", Category: 'N', Nullable: true},
+		{Name: "a b", TypName: "text", Category: 'S', Nullable: true},
+		{Name: "a_b", TypName: "text", Category: 'S', Nullable: true},
+		{Name: "class", TypName: "text", Category: 'S', Nullable: true},
+	} {
+		t.Columns = append(t.Columns, c)
+		t.ByName[c.Name] = c
+	}
+	list := &datacat.Table{Schema: "public", Name: "list", Kind: datacat.KindTable, ByName: map[string]*datacat.Column{}}
+	return &datacat.Catalog{Schemas: []string{"public"}, ByName: map[string]*datacat.Table{"public." + evil: t, "public.list": list},
+		Ordered: []*datacat.Table{t, list}, Functions: map[string][]*datacat.Function{}}
+}
+
+func TestNamesAreNotCode(t *testing.T) {
+	if len(evil) != 37 {
+		t.Fatalf("the name is %d bytes", len(evil))
+	}
+	// Go: the table's name is only a string and a comment; a column
+	// encoding/json can't name is refused, with the name quoted.
+	if _, err := Generate(hostile(evil, "price$usd"), Go, Options{}); err == nil || !strings.Contains(err.Error(), strconv.Quote(evil)) ||
+		!strings.Contains(err.Error(), "can't be a Go JSON field") {
+		t.Fatalf("a column Go can't tag: %v", err)
+	}
+	out, err := Generate(hostile("plain", "price$usd"), Go, Options{Package: "db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "types.go", out, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("doesn't parse: %v\n%s", err, out)
+	}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok {
+			t.Fatalf("declares func %s:\n%s", fd.Name.Name, out)
+		}
+	}
+	if _, err := (&types.Config{}).Check("db", fset, []*ast.File{f}, nil); err != nil {
+		t.Fatalf("doesn't type-check: %v\n%s", err, out)
+	}
+	for _, want := range []string{"type XIntFuncInitPanicRan struct", "AB *string `json:\"a b\"`", "AB2 *string `json:\"a_b\"`",
+		"PriceUsd *int32 `json:\"price$usd\"`", "const XIntFuncInitPanicRanTable = " + strconv.Quote(evil), "type List struct"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Go lacks %q:\n%s", want, out)
+		}
+	}
+	if _, err := Generate(hostile("plain", "price$usd"), Go, Options{Package: "db\nfunc"}); err == nil {
+		t.Error("a package name that isn't one")
+	}
+
+	// TypeScript and Dart: the names only in string literals, and the file
+	// has the shape a plain name gives it.
+	for _, lang := range []string{TS, Dart} {
+		out, err := Generate(hostile(evil, "price$usd'"), lang, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain, err := Generate(hostile("plain", "price$usd'"), lang, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, evil) || strings.Contains(out, "\tinit") {
+			t.Errorf("%s has the name as it is:\n%s", lang, out)
+		}
+		if n, m := strings.Count(out, "\n"), strings.Count(plain, "\n"); n != m {
+			t.Errorf("%s: %d lines with the name, %d without:\n%s", lang, n, m, out)
+		}
+	}
+	out, _ = Generate(hostile(evil, "price$usd'"), Dart, Options{})
+	for _, want := range []string{`json['price\$usd\'']`, `'x\tint\n}\nfunc\tinit()\t{\tpanic("ran")\n//'`, "final String? class_;",
+		"final String? aB;", "final String? aB2;", "class List2 {", `/// A row of "public.x\tint\n}\nfunc\tinit()\t{\tpanic(\"ran\")\n//".`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Dart lacks %q:\n%s", want, out)
+		}
+	}
+	out, _ = Generate(hostile(evil, "price$usd'"), TS, Options{})
+	for _, want := range []string{`"x\tint\n}\nfunc\tinit()\t{\tpanic(\"ran\")\n//": {`, `"price$usd'"?: number | null;`,
+		"export type XIntFuncInitPanicRan = "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("TS lacks %q:\n%s", want, out)
+		}
 	}
 }

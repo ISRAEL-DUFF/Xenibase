@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -280,9 +281,13 @@ func (s *Service) failRestore(ctx context.Context, op store.Operation, log *jobs
 }
 
 // RestoreTestParams: FromCopy tests a backup's cross-region copy instead
-// of the primary; the weekly test alternates (V3 §2.5).
+// of the primary (V3 §2.5); PITR recovers a dedicated project's archive
+// instead. The weekly test alternates between a point-in-time recovery
+// and a logical backup, whose turns alternate between primary and copy
+// (FromCopy on a PITR turn is the logical turn before it).
 type RestoreTestParams struct {
 	FromCopy bool `json:"from_copy,omitempty"`
+	PITR     bool `json:"pitr,omitempty"`
 }
 
 func restoreTestParams(op store.Operation) RestoreTestParams {
@@ -291,18 +296,50 @@ func restoreTestParams(op store.Operation) RestoreTestParams {
 	return p
 }
 
+// nextRestoreTest is the turn after last (nil: none yet, which reads a
+// copy if any).
+func nextRestoreTest(last *RestoreTestParams) RestoreTestParams {
+	switch {
+	case last == nil:
+		return RestoreTestParams{FromCopy: true}
+	case last.PITR:
+		return RestoreTestParams{FromCopy: !last.FromCopy}
+	default:
+		return RestoreTestParams{PITR: true, FromCopy: last.FromCopy}
+	}
+}
+
 // runRestoreTest restores the latest backup of a random project into a
 // scratch database, counts every table, and drops it (spec §6.5). On the
 // copy turn it reads a backup's cross-region copy; with none copied yet it
-// tests the primary.
+// tests the primary. On the point-in-time turn, or for a dedicated project
+// named, it recovers a dedicated project's archive into a scratch instance
+// instead (runPITRTest); with none to recover it tests a logical backup.
 func (s *Service) runRestoreTest(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
 	q := store.New(s.db)
-	fromCopy := restoreTestParams(op).FromCopy
+	params := restoreTestParams(op)
+	fromCopy := params.FromCopy
 	var p store.Project
 	var err error
 	if op.ProjectID != nil {
-		p, err = s.projects.ProjectFor(ctx, op)
+		if p, err = s.projects.ProjectFor(ctx, op); err == nil && p.Tier == provision.TierDedicated && s.Dedicated != nil && !fromCopy {
+			if _, err := q.BaseBackupBefore(ctx, store.BaseBackupBeforeParams{ProjectID: &p.ID, Before: ptr(time.Now())}); err == nil {
+				return s.runPITRTest(ctx, op, p, log)
+			}
+		}
 	} else {
+		if params.PITR && s.Dedicated != nil {
+			src, err := q.RandomProjectWithBaseBackup(ctx)
+			if err == nil {
+				return s.runPITRTest(ctx, op, src, log)
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err := log.Info(ctx, "pick", "no dedicated project has a base backup yet; testing a logical backup"); err != nil {
+				return err
+			}
+		}
 		if fromCopy {
 			p, err = q.RandomProjectWithCopiedBackup(ctx)
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -343,6 +380,40 @@ func (s *Service) runRestoreTest(ctx context.Context, op store.Operation, log *j
 	return s.verifyRestore(ctx, p, b, log)
 }
 
+// runPITRTest recovers dedicated project p's base backup and WAL to now
+// into a scratch instance on its node, reads every table of its database
+// there, and removes the instance. No project is created and nothing is
+// archived from it.
+func (s *Service) runPITRTest(ctx context.Context, op store.Operation, p store.Project, log *jobs.StepLogger) error {
+	if op.Attempts > 1 {
+		// The instance an attempt that crashed may have left.
+		s.Dedicated.DestroyScratch(ctx, op.ID)
+	}
+	if err := log.Info(ctx, "pick", "testing a point-in-time recovery of %s to now", p.Name); err != nil {
+		return err
+	}
+	return s.Dedicated.ScratchPITR(ctx, p, op.ID, func(ctx context.Context, conn *pgx.Conn) error {
+		counts, err := tableCounts(ctx, conn, nil)
+		if err != nil {
+			return jobs.Permanent(fmt.Errorf("count rows: %w", err))
+		}
+		var total int64
+		for _, c := range counts {
+			total += c.Rows
+		}
+		return log.Info(ctx, "verify", "restore test passed: %s recovered from its archive, %d table(s), %d row(s) readable", p.Name, len(counts), total)
+	}, log)
+}
+
+// failRestoreTest removes a point-in-time turn's scratch instance that a
+// crash left behind; one the test made itself is already gone.
+func (s *Service) failRestoreTest(ctx context.Context, op store.Operation, _ *jobs.StepLogger, _ error) error {
+	if s.Dedicated != nil && (restoreTestParams(op).PITR || op.ProjectID != nil) {
+		s.Dedicated.DestroyScratch(ctx, op.ID)
+	}
+	return nil
+}
+
 // verifyRestore restores b into a scratch database on p's instance, counts
 // every table, and drops it.
 func (s *Service) verifyRestore(ctx context.Context, p store.Project, b store.Backup, log *jobs.StepLogger) error {
@@ -375,7 +446,7 @@ func (s *Service) verifyRestore(ctx context.Context, p store.Project, b store.Ba
 		return err
 	}
 	defer conn.Close(context.Background())
-	counts, err := tableCounts(ctx, conn)
+	counts, err := tableCounts(ctx, conn, nil)
 	if err != nil {
 		return jobs.Permanent(fmt.Errorf("count rows: %w", err))
 	}
@@ -387,7 +458,8 @@ func (s *Service) verifyRestore(ctx context.Context, p store.Project, b store.Ba
 }
 
 // Archive takes p's archive backup (V3 §4.3) and verifies it by restoring
-// it into a scratch database. The database must accept connections.
+// it into a scratch database (VerifyArchive). The database must accept
+// connections. The backup it returns has VerifiedAt set.
 func (s *Service) Archive(ctx context.Context, p store.Project, opID *uuid.UUID, log *jobs.StepLogger) (store.Backup, error) {
 	if _, err := s.PlacementFor(ctx, p); err != nil {
 		return store.Backup{}, jobs.Permanent(fmt.Errorf("no backup storage to archive to: %w", err))
@@ -396,11 +468,33 @@ func (s *Service) Archive(ctx context.Context, p store.Project, opID *uuid.UUID,
 	if err != nil {
 		return b, err
 	}
-	if err := s.verifyRestore(ctx, p, b, log); err != nil {
-		_ = s.deleteObject(context.WithoutCancel(ctx), b)
+	return s.VerifyArchive(ctx, p, b, log)
+}
+
+// VerifyArchive restores archive backup b of p into a scratch database
+// and reads it back, then records on the backup that it was verified: an
+// archive drops the database only after that (V3 §4.3). A backup that
+// fails is deleted, so a retry takes a new one; should the delete fail
+// too, the backup stays unverified and the retry verifies it again. A
+// backup verified already is returned as it is.
+func (s *Service) VerifyArchive(ctx context.Context, p store.Project, b store.Backup, log *jobs.StepLogger) (store.Backup, error) {
+	if b.VerifiedAt != nil {
+		return b, nil
+	}
+	if err := s.verify(ctx, p, b, log); err != nil {
+		if derr := s.deleteObject(context.WithoutCancel(ctx), b); derr != nil {
+			_ = log.Warn(context.WithoutCancel(ctx), "verify", "delete the unverified archive backup: %v; a retry verifies it again", derr)
+		}
 		return store.Backup{}, fmt.Errorf("verify the archive backup: %w", err)
 	}
-	return b, nil
+	v, err := store.New(s.db).MarkBackupVerified(ctx, b.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.Backup{}, fmt.Errorf("the archive backup %s is no longer there to mark verified", b.ID)
+	}
+	if err != nil {
+		return store.Backup{}, fmt.Errorf("record the archive backup's verification: %w", err)
+	}
+	return v, nil
 }
 
 // RestoreArchive creates p's database again and restores archive backup
@@ -450,8 +544,8 @@ type (
 	SequenceValue = pgverify.SequenceValue
 )
 
-func tableCounts(ctx context.Context, conn *pgx.Conn) ([]TableCount, error) {
-	return pgverify.TableCounts(ctx, conn)
+func tableCounts(ctx context.Context, conn *pgx.Conn, schemas []string) ([]TableCount, error) {
+	return pgverify.TableCounts(ctx, conn, schemas)
 }
 
 func sequenceValues(ctx context.Context, conn *pgx.Conn, schemas []string) ([]SequenceValue, error) {

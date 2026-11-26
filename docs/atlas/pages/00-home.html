@@ -1,0 +1,50 @@
+<!--atlas
+{
+  "id": "home",
+  "title": "Start here",
+  "summary": "What the atlas is, the system on one page, and where to go next.",
+  "verified": "b45797127b806235ef770f1c3981a8f5eea1cc38",
+  "sources": ["cmd/server/main.go", "cmd/edge/main.go", "cmd/agent/main.go", "internal/pooler/manager.go", "internal/provision/service.go"]
+}
+-->
+<div class="home-head">
+  <p class="eyebrow">Engineering atlas</p>
+  <h1>How Xenibase is built, <span>checked against its code.</span></h1>
+  <p class="lede">Xenibase runs Postgres for other people: hundreds of small databases on a shared cluster, dedicated instances with continuous backup and failover, and backend services (a data API, auth, file storage, realtime) in front of them. Every project keeps the same connection string for its whole life. This atlas explains how that is built, one feature and one component at a time. It is written for the engineers who maintain it.</p>
+  <div class="home-meta"><span><x-stat name="go-lines-nontest"/> lines of Go outside tests</span><span><x-stat name="packages"/> packages under <code>internal/</code></span><span><x-stat name="binaries"/> commands in <code>cmd/</code></span><span><x-stat name="migrations"/> migrations</span></div>
+</div>
+
+<h2>The system on one page</h2>
+<p>Clients reach a project in two ways: as Postgres, through the edge poolers, or over HTTPS, through <code>xenibase-edge</code>. Both are driven by <code>xenibase-server</code>, which keeps everything it knows in its own metadata database and does long work as queued operations. The databases themselves live on nodes, each with an agent. Select a box to read about it.</p>
+<x-include name="architecture-map.html"/>
+
+<h2>Four ideas the rest depends on</h2>
+<div class="cols">
+  <div class="col">
+    <h3>The pooler is the address</h3>
+    <p>A project's connection string names the pooler and an opaque database name, never a server. <code>xenibase-server</code> renders PgBouncer's routes and SCRAM verifiers from the metadata database (<x-ref path="internal/pooler/manager.go" symbol="func (m *Manager) Sync("><code>Manager.Sync</code></x-ref>), so a project can move, be promoted or fail over and its URL still works.</p>
+    <p><x-page id="connections">Connections</x-page></p>
+  </div>
+  <div class="col">
+    <h3>Long work is an operation</h3>
+    <p>Creating, deleting, restoring, moving and upgrading are rows in <code>operations</code>. Workers claim them with <code>FOR UPDATE SKIP LOCKED</code>, write a step log the dashboard streams, retry with backoff, and run a compensating rollback when they give up.</p>
+    <p><x-page id="life-of-a-project">Follow one project</x-page></p>
+  </div>
+  <div class="col">
+    <h3>Postgres enforces the tenancy</h3>
+    <p>On the shared cluster each project is a database owned by its own role. <code>CONNECT</code> is revoked from <code>PUBLIC</code>, so a role can open only its own database, whatever the pooler routes it to. The control plane checks every API request against the organisation that owns the resource (<x-ref path="internal/authz/authz.go" symbol="func Can("><code>authz.Can</code></x-ref>).</p>
+    <p><x-page id="security">Security and tenant isolation</x-page></p>
+  </div>
+  <div class="col">
+    <h3>Passwords are never kept</h3>
+    <p>A project's password is generated, shown once and forgotten. The metadata database holds only its SCRAM verifier, which is what PgBouncer authenticates with. The plaintext exists, sealed with the master key, only while the create operation needs it for its smoke test.</p>
+    <p><x-page id="life-of-a-project--t1">The create request</x-page></p>
+  </div>
+</div>
+
+<h2>The atlas, part by part</h2>
+<p>Read Part A first. After that, each part stands on its own. Pages marked <em>Planned</em> list what they will cover and the code they will be checked against.</p>
+<x-parts/>
+
+<h2>How far to trust a page</h2>
+<p>Each page states the commit it was checked against. When the code it describes changes after that commit, the page says so in amber at the top, lists the files that changed, and its dot in the contents turns amber. Code excerpts and line links are not pasted in. The build reads them from the repository each time it runs, so they always show the code as it is. Amber boxes headed <em>Spec and code differ</em> mark places where the code has moved away from the V1 to V4.1 specifications at the repository root; <code>docs/decisions.md</code> records most of those choices. Red boxes headed <em>Risk</em> are defects or weak points found while checking the page. <x-page id="about">How the atlas is maintained</x-page> explains the rest.</p>

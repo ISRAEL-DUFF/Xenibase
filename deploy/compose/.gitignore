@@ -1,2 +1,4 @@
 .env
 caddy.d/*.caddy
+# Another app's global Caddy options when co-hosting (docs/cohosting.md).
+caddy.d/*.global

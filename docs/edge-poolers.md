@@ -23,14 +23,17 @@ xenibase-server, as in V2. Nothing changes until you add them.
   accept connections and the host serves the newest generation. A host that
   missed a push is **stale** and can't take the floating IP. The arbiter
   pushes again until it catches up.
-- When keepalived makes a host MASTER, the agent asks Hetzner's API to
-  route the floating IP to that server. This takes about 3–4 seconds after
-  the active host dies.
-- xenibase-server's **arbiter** checks both hosts every 3 seconds. If the
-  floating IP points at an unhealthy host for two checks in a row while the
-  other host is healthy, the arbiter moves it. It leaves a healthy holder
-  alone, so it never fights keepalived. Every move is a pooler event,
-  shown in Admin → Nodes.
+- When keepalived makes a host MASTER, the agent reports it, and
+  xenibase-server's **arbiter**, which checks both hosts every 3 seconds,
+  asks Hetzner's API to route the floating IP to that server. This takes
+  about 3–7 seconds after the active host dies. The pooler hosts hold no
+  Hetzner token. (An agent started with `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`
+  and a token also assigns it itself, which keeps failover working while
+  xenibase-server is down.)
+- If the floating IP points at an unhealthy host for two checks in a row
+  while the other host is healthy, the arbiter moves it even without
+  keepalived. With two MASTERs it leaves a healthy holder alone. Every move
+  is a pooler event, shown in Admin → Nodes.
 - A configuration change fails only when **every** pooler host refuses it.
   When just one host misses it, that host is marked stale and catches up.
   Commands like `PAUSE` or `KILL` go to the hosts that are reachable.
@@ -44,8 +47,8 @@ xenibase-server, as in V2. Nothing changes until you add them.
   interface of **both** servers. This is Hetzner's "persistent" setup: add
   the address to the interface in netplan. The API decides which server
   receives its traffic.
-- A Hetzner Cloud API token with read and write access. Both the pooler
-  hosts and xenibase-server use it to assign the floating IP.
+- A Hetzner Cloud API token with read and write access, for xenibase-server,
+  which assigns the floating IP. Keep it off the pooler hosts.
 - The two images, built in a Xenibase checkout:
 
   ```sh
@@ -72,9 +75,25 @@ xenibase-server, as in V2. Nothing changes until you add them.
    XENIBASE_EDGE_INTERFACE=enp7s0      # the private network's interface
    XENIBASE_EDGE_VRRP_PASSWORD=...     # the same on both, at most 8 characters
    XENIBASE_EDGE_PRIORITY=110          # 110 on one host, 100 on the other
-   XENIBASE_AGENT_FLOATING_IP_ID=...   # the floating IP's ID
-   XENIBASE_AGENT_HETZNER_TOKEN=...
    ```
+
+   To have the PgBouncers check the backends' certificates, add
+   `XENIBASE_POOLER_SERVER_TLS_SSLMODE=verify-full` and
+   `XENIBASE_POOLER_SERVER_TLS_CA_FILE=/path/in/the/container/ca.pem` (mount
+   the file), or `require` to insist on TLS without checking. The default,
+   `prefer`, uses TLS when a backend offers it and plain text otherwise:
+   Xenibase's instances and the waker don't serve TLS yet, so `require` and
+   above are only for backends you have given certificates, and the waker
+   (paused Free projects) then can't be reached. `disable` and `allow` are
+   refused.
+
+   The hosts hold no Hetzner token: xenibase-server moves the floating IP
+   to the host keepalived makes MASTER (step 4). A Hetzner token can't be
+   narrowed to one IP, so on these internet-facing hosts it would open the
+   whole Hetzner project. If failover must also work while xenibase-server
+   is down, you can let the agents assign it themselves, at that cost:
+   add `XENIBASE_AGENT_ASSIGN_FLOATING_IP=true`,
+   `XENIBASE_AGENT_FLOATING_IP_ID=...` and `XENIBASE_AGENT_HETZNER_TOKEN=...`.
 
    Leave `XENIBASE_EDGE_VIP` unset on Hetzner. The floating IP is already on
    both interfaces; keepalived only decides which host claims it.
@@ -107,8 +126,12 @@ xenibase-server, as in V2. Nothing changes until you add them.
    XENIBASE_HETZNER_TOKEN_FILE=/run/secrets/hetzner-token   # or XENIBASE_HETZNER_TOKEN
    ```
 
-   Then restart it. Without these, keepalived alone moves the address and
-   the arbiter only reports.
+   Then restart it. Its arbiter checks the hosts every 3 seconds and moves
+   the floating IP to keepalived's MASTER, or away from a host that can't
+   serve. Without these, nothing moves the floating IP (unless the agents
+   do, above) and the arbiter only reports. While xenibase-server is down
+   the floating IP stays where it is: a pooler host that fails then is not
+   replaced until it is back.
 
 5. **Point clients at the floating IP.** Change the database host's DNS
    record (Settings → General) to the floating IP. Check

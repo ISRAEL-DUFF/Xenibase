@@ -52,7 +52,13 @@ type Config struct {
 	// for realtime's LISTEN connections.
 	SessionAddr string
 	// PoolerSSLMode is the sslmode to the pooler (default "require").
+	// verify-full checks the pooler's certificate and hostname: against the
+	// system's roots, or PoolerRootCert.
 	PoolerSSLMode string
+	// PoolerRootCert is a PEM file of the CA that signed the poolers'
+	// certificate (sslrootcert), for verify-ca or verify-full with a
+	// private or self-signed certificate.
+	PoolerRootCert string
 	// TrustedProxies may set X-Forwarded-For.
 	TrustedProxies []netip.Prefix
 	// PollWait, ResyncEvery and ReportEvery time the feed and reports.
@@ -76,6 +82,9 @@ type Config struct {
 	GarbageGrace time.Duration
 	// CacheBytes bounds the anonymous-read cache (default 64 MB).
 	CacheBytes int
+	// CatalogEvery is how often a project's catalog fingerprint is checked
+	// (default 2 s).
+	CatalogEvery time.Duration
 	// RenderWorker is the command a render worker runs as (V4.1 §12.4),
 	// e.g. {"/usr/local/bin/xenibase-edge", "render-worker"}; empty renders
 	// in the edge's own process.
@@ -163,9 +172,12 @@ func (p *project) exposed() []string {
 }
 
 // publicTable reports whether t may be read without row-level security.
-func (p *project) publicTable(t *Table) bool {
+func (p *project) publicTable(t *Table) bool { return p.publicName(t.Schema + "." + t.Name) }
+
+// publicName is publicTable for a relation's "schema.name".
+func (p *project) publicName(qualified string) bool {
 	for _, n := range p.cfg.PublicTables {
-		if n == t.Schema+"."+t.Name || (t.Schema == "public" && n == t.Name) {
+		if n == qualified || "public."+n == qualified {
 			return true
 		}
 	}
@@ -340,6 +352,11 @@ func (e *Edge) poll(ctx context.Context) error {
 // apply updates the cache. A project's pool is kept unless how it connects
 // changed.
 func (e *Edge) apply(ps []edgeapi.Project) {
+	refs := make([]string, 0, len(ps))
+	defer func() {
+		// Realtime's open connections follow the change (rthub.go).
+		go e.rtProjectsChanged(refs)
+	}()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, pc := range ps {
@@ -347,6 +364,7 @@ func (e *Edge) apply(ps []edgeapi.Project) {
 		if old != nil && old.cfg.Version > pc.Version {
 			continue // an older copy (from a resync racing a poll)
 		}
+		refs = append(refs, pc.Ref)
 		if pc.State == edgeapi.StateDisabled {
 			if old != nil {
 				delete(e.byRef, pc.Ref)
@@ -384,6 +402,18 @@ func (e *Edge) apply(ps []edgeapi.Project) {
 		}
 		e.byRef[pc.Ref] = np
 	}
+}
+
+// poolerURL is the connection string to a pooler, with the edge's TLS
+// settings.
+func (e *Edge) poolerURL(user, password, host string, port int, database, app string) string {
+	q := url.Values{"sslmode": {e.cfg.PoolerSSLMode}, "application_name": {app}}
+	if e.cfg.PoolerRootCert != "" {
+		q.Set("sslrootcert", e.cfg.PoolerRootCert)
+	}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(user, password),
+		Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/" + database, RawQuery: q.Encode()}
+	return u.String()
 }
 
 func sameConn(a, b edgeapi.Project) bool {
@@ -462,10 +492,7 @@ func (e *Edge) loginPool(ctx context.Context, p *project, login string, replica 
 	if host == "" || port == 0 {
 		return nil, errors.New("no pooler address for the project's region")
 	}
-	u := url.URL{Scheme: "postgres", User: url.UserPassword(user, password),
-		Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/" + database,
-		RawQuery: url.Values{"sslmode": {e.cfg.PoolerSSLMode}, "application_name": {"xenibase-edge"}}.Encode()}
-	cfg, err := pgxpool.ParseConfig(u.String())
+	cfg, err := pgxpool.ParseConfig(e.poolerURL(user, password, host, port, database, "xenibase-edge"))
 	if err != nil {
 		return nil, err
 	}

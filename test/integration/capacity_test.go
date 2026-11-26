@@ -254,6 +254,17 @@ func TestCapacityProvisionsAndJoins(t *testing.T) {
 	if _, err := e.DB.Exec(ctx, `UPDATE nodes SET empty_since = now() - interval '25 hours' WHERE id = $1`, node.Id); err != nil {
 		t.Fatal(err)
 	}
+	// The first sweep takes it out of placement; the server goes once the
+	// grace period has passed with nothing placed there.
+	if err := e.Capacity.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ = store.New(e.DB).GetNode(ctx, node.Id); n.Lifecycle != "retiring" || len(e.Hetzner.Live()) != 1 {
+		t.Fatalf("after a day empty the node is %s with %d server(s), want retiring with its server", n.Lifecycle, len(e.Hetzner.Live()))
+	}
+	if _, err := e.DB.Exec(ctx, `UPDATE nodes SET retiring_at = now() - interval '1 hour' WHERE id = $1`, node.Id); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.Capacity.Step(ctx); err != nil {
 		t.Fatal(err)
 	}

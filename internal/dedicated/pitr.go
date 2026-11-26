@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/provision"
@@ -64,13 +66,58 @@ func (s *Service) PlanPITR(ctx context.Context, src store.Project, target *time.
 	if err := s.flushWAL(ctx, inst); err != nil {
 		return nil, fmt.Errorf("%w: archive the latest WAL first: %w", provision.ErrConflict, err)
 	}
+	from, err := s.backupInstance(ctx, b, inst)
+	if err != nil {
+		return nil, err
+	}
+	// source_instance is the instance that took the base backup: before a
+	// major upgrade (or a move), not the project's instance now. Its major
+	// is the restored data's, and its superuser is the one in that data.
 	pitr := map[string]any{
-		"source_project": src.ID, "source_instance": inst.ID, "backup_id": b.ID, "backup_name": b.ObjectKey,
+		"source_project": src.ID, "source_instance": from.ID, "backup_id": b.ID, "backup_name": b.ObjectKey,
 	}
 	if target != nil {
 		pitr["target_time"] = target.UTC().Format(time.RFC3339Nano)
 	}
 	return pitr, nil
+}
+
+// backupInstance is the instance that took base backup b. Archives live
+// under "instances/<id>/…" (provision.Create, Upgrade, a storage switch),
+// so the prefix names it, whether it still runs or was kept, stopped,
+// after a cutover; current is the fallback for a backup without one.
+func (s *Service) backupInstance(ctx context.Context, b store.Backup, current store.Instance) (store.Instance, error) {
+	if b.WalgPrefix == nil {
+		return current, nil
+	}
+	rest, ok := strings.CutPrefix(*b.WalgPrefix, "instances/")
+	if !ok {
+		return current, nil
+	}
+	idText, _, _ := strings.Cut(rest, "/")
+	id, err := uuid.Parse(idText)
+	if err != nil || id == current.ID {
+		return current, nil
+	}
+	inst, err := store.New(s.db).GetInstance(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return current, nil
+	}
+	return inst, err
+}
+
+// SourceMajor is the Postgres major a recovery planned by PlanPITR starts:
+// that of the instance that took its base backup.
+func (s *Service) SourceMajor(ctx context.Context, plan map[string]any) (int, error) {
+	id, ok := plan["source_instance"].(uuid.UUID)
+	if !ok {
+		return 0, errors.New("the recovery plan names no source instance")
+	}
+	inst, err := store.New(s.db).GetInstance(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	return int(inst.PgVersion), nil
 }
 
 // flushWAL switches to a new WAL segment and waits until the old one is

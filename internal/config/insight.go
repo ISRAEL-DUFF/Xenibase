@@ -46,6 +46,18 @@ type Insight struct {
 	// (XENIBASE_INSIGHTS_PLANS, default "pro,team"; "all" for every plan, for
 	// installations without billing). Dedicated projects always do.
 	InsightsPlans []string
+	// WebhookListenMax caps the LISTEN connections the webhook deliverer
+	// holds to one instance (XENIBASE_WEBHOOK_LISTEN_MAX, default 50; 0
+	// for none, so every project is polled). They are direct connections,
+	// outside the poolers, counted against the instance's max_connections.
+	WebhookListenMax int
+	// WebhookIdleAfter is how long a project's outbox has nothing to send
+	// before its LISTEN connection is released (XENIBASE_WEBHOOK_IDLE_AFTER,
+	// default 10m).
+	WebhookIdleAfter time.Duration
+	// WebhookIdlePoll is how often the outbox of a project without a LISTEN
+	// connection is read (XENIBASE_WEBHOOK_IDLE_POLL, default 30s).
+	WebhookIdlePoll time.Duration
 }
 
 func loadInsight(getenv func(string) string, cfg *Config) []error {
@@ -119,6 +131,28 @@ func loadInsight(getenv func(string) string, cfg *Config) []error {
 				in.InsightsPlans = append(in.InsightsPlans, pl)
 			}
 		}
+	}
+	in.WebhookListenMax, in.WebhookIdleAfter, in.WebhookIdlePoll = 50, 10*time.Minute, 30*time.Second
+	if v := getenv("XENIBASE_WEBHOOK_LISTEN_MAX"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 10_000 {
+			errs = append(errs, fmt.Errorf("XENIBASE_WEBHOOK_LISTEN_MAX: must be 0 to 10000, got %q", v))
+		}
+		in.WebhookListenMax = n
+	}
+	if v := getenv("XENIBASE_WEBHOOK_IDLE_AFTER"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 10*time.Second || d > 24*time.Hour {
+			errs = append(errs, fmt.Errorf("XENIBASE_WEBHOOK_IDLE_AFTER: must be a duration from 10s to 24h, got %q", v))
+		}
+		in.WebhookIdleAfter = d
+	}
+	if v := getenv("XENIBASE_WEBHOOK_IDLE_POLL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Second || d > 10*time.Minute {
+			errs = append(errs, fmt.Errorf("XENIBASE_WEBHOOK_IDLE_POLL: must be a duration from 1s to 10m, got %q", v))
+		}
+		in.WebhookIdlePoll = d
 	}
 	if t := in.MetricsToken; t != "" && len(t) < 24 {
 		errs = append(errs, errors.New("XENIBASE_METRICS_TOKEN: must be at least 24 characters"))

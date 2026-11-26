@@ -1078,7 +1078,11 @@ export interface paths {
         delete: operations["deleteProjectReplica"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Change a read replica's standby settings
+         * @description Sets hot_standby_feedback and how long replay waits for a conflicting query (max_standby_streaming_delay and max_standby_archive_delay) on this replica only. Applied at once with a configuration reload, no restart; if the replica can't be reached the settings are stored and applied when it is (settings_error says why).
+         */
+        patch: operations["updateProjectReplica"];
         trace?: never;
     };
     "/api/v1/projects/{id}/replicas/{replica_id}/detach": {
@@ -1302,6 +1306,55 @@ export interface paths {
         put?: never;
         /** Issue a one-time agent registration token (24 hours) */
         post: operations["createNodeRegistrationToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agent-client-certs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The client certificates xenibase-servers issued themselves for agents
+         * @description Each xenibase-server issues itself a client certificate for its
+         *     agents, a day long and renewed at half-life, and records its
+         *     serial. The live ones (unexpired, unrevoked) are the allow list
+         *     every agent is given; an agent that has a list accepts no other.
+         *     Listed: live certificates, and those expired or revoked in the
+         *     last week.
+         */
+        get: operations["listAgentClientCerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/agent-client-certs/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke a server's agent client certificate, by serial or every live one of a server
+         * @description Removes the certificates from the allow list and pushes the new
+         *     list to every agent at once, so a copied certificate stops working
+         *     (agents that do not answer get it at their next health check). A
+         *     server whose own certificate is revoked issues and registers a new
+         *     one and keeps its agents.
+         */
+        post: operations["revokeAgentClientCerts"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2017,7 +2070,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Change your password; ends your other sessions */
+        /** Change your password; ends your other sessions and, unless revoke_tokens is false, revokes your API tokens */
         post: operations["changePassword"];
         delete?: never;
         options?: never;
@@ -3439,6 +3492,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Withdraw a signing key at once, so its tokens stop verifying; revoking the active key signs with a new one */
+        post: operations["revokeSigningKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/auth/users": {
         parameters: {
             query?: never;
@@ -3770,8 +3840,31 @@ export interface paths {
         /** Billing contacts, who receive invoices and payment email */
         get: operations["listBillingContacts"];
         put?: never;
-        /** Add a billing contact */
+        /**
+         * Add a billing contact
+         * @description Unless the address is a member's verified address, a confirmation link is emailed to it (again on a repeat request, at most every ten minutes); until it is confirmed it gets billing email but its support email isn't routed to the organisation.
+         */
         post: operations["addBillingContact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/billing/contacts/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm a billing contact from the emailed link (public)
+         * @description An address an organisation adds as a billing contact gets invoices at once, but support routes its email to the organisation only once it is verified: it is a member's verified address, or its owner confirms it here with the link's token.
+         */
+        post: operations["confirmBillingContact"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5025,7 +5118,10 @@ export interface paths {
         /** WhatsApp numbers registered for support (Pro and Team) */
         get: operations["listSupportPhones"];
         put?: never;
-        /** Register a WhatsApp number (E.164) for the organisation's support */
+        /**
+         * Register a WhatsApp number (E.164) for the organisation's support
+         * @description The number is pending until its code is sent from it to the support WhatsApp number; only then do its messages open tickets for the organisation. Registering a pending number again gives a new code. 409 when the organisation or another one has the number verified.
+         */
         post: operations["addSupportPhone"];
         delete?: never;
         options?: never;
@@ -5064,6 +5160,12 @@ export interface paths {
          * @description Authenticated with XENIBASE_SUPPORT_INBOUND_SECRET, as the basic-auth
          *     password (https://inbound:SECRET@…) or an X-Xenibase-Inbound-Secret header. Takes this API's own fields or Postmark's
          *     inbound JSON (From, FromName, Subject, TextBody, MessageID, Headers).
+         *     The sender is trusted only on the provider's verdicts: DMARC pass, or
+         *     DKIM and SPF passes aligned with From's domain, read from the
+         *     Authentication-Results, Received-SPF and X-Spam-Tests headers, or this
+         *     API's `authentication_results` (the provider's Authentication-Results
+         *     value, a string or an array). Other mail opens a ticket with no
+         *     organisation, flagged unverified_sender, that never joins a thread.
          */
         post: operations["supportInboundEmail"];
         delete?: never;
@@ -5419,6 +5521,78 @@ export interface paths {
          * @description Queues one operation that runs the per-project etcd moves in turn (each pauses its own project for a few seconds); never two at once in the region.
          */
         post: operations["moveAllToRegionEtcd"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/manage-roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Role management on a dedicated project, and the owner's logins the poolers accept */
+        get: operations["getProjectManageRoles"];
+        /**
+         * Turn role management on or off (organisation owners; step-up)
+         * @description On gives a dedicated project's owner role CREATEROLE. On Postgres 16
+         *     and later that lets it create roles and manage only those it created;
+         *     it can't give anyone SUPERUSER, REPLICATION or BYPASSRLS. Logins the
+         *     owner creates, named <database>_<name>, connect through the poolers
+         *     within about 30 seconds (or at once after a sync), with the project's
+         *     connection limit. Off removes CREATEROLE; roles already created stay.
+         */
+        put: operations["setProjectManageRoles"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/manage-roles/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sync the owner's logins to the poolers now
+         * @description Reads the roles the owner administers, caps its logins' connection limits, and reloads the poolers if the set of logins changed. The sweep does the same every 30 seconds.
+         */
+        post: operations["syncProjectManageRoles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's IP allowlist */
+        get: operations["getProjectNetwork"];
+        /**
+         * Replace the project's IP allowlist (project admins)
+         * @description With networks listed, the poolers accept the project's logins (the
+         *     owner, members' and its own) only from those addresses; an empty list
+         *     allows any address. Xenibase's own logins for the project (backend
+         *     services, the SLA probe) aren't limited. Takes effect within seconds
+         *     on every pooler of the project's region; existing connections stay
+         *     until they close.
+         */
+        put: operations["setProjectNetwork"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -6258,6 +6432,10 @@ export interface components {
             region?: string;
             /** @description Data, backups and branches stay in the project's region's country (V3 §6.3). */
             data_residency?: boolean;
+            /** @description A dedicated project's owner role has CREATEROLE (role management). */
+            manage_roles?: boolean;
+            /** @description The project's IP allowlist; empty allows any address. */
+            allowed_cidrs?: string[];
             /** @description After a region move, the old region still routing the old hostname. */
             forward_region?: string | null;
             /** Format: date-time */
@@ -6355,6 +6533,8 @@ export interface components {
             residency: boolean;
             /** @description The platform's home region, where projects go by default. */
             home: boolean;
+            /** @description Present on a hidden region the caller may use - the caller's organisations with early access, the only ones that can create projects there until it opens. */
+            early_access_org_ids?: string[];
         };
         RegionList: {
             items: components["schemas"]["Region"][];
@@ -6365,6 +6545,10 @@ export interface components {
             country: string;
             /** @description The hostname in the region's connection strings; empty is the platform's database host. */
             pooler_host: string;
+            /** @description The region's own API domain - its projects' backend services are at https://<ref>.<api_domain>, served by the region's edge. Empty is the platform's (XENIBASE_API_DOMAIN). */
+            api_domain: string;
+            /** @description Organisations that may create projects while the region is hidden. */
+            early_access_org_ids: string[];
             /** @description manual or hetzner. */
             provider: string;
             /** @description The provider's location for new servers (e.g. nbg1); empty for manual. */
@@ -6379,6 +6563,11 @@ export interface components {
              * @description Where backups on platform targets are copied (V3 §2.5).
              */
             copy_target_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Where the region's projects' files are (V4 §5.1), with credentials that can't reach its backups. Null keeps files in the backup target, which every edge then holds credentials for (the files_share_backups alert fires).
+             */
+            files_target_id?: string | null;
             /** @description The region's pooler floating IP at the provider. */
             floating_ip_id?: string | null;
             residency: boolean;
@@ -6418,6 +6607,10 @@ export interface components {
             name: string;
             country?: string;
             pooler_host?: string;
+            /** @description The region's own API domain; empty (the default) is the platform's. Changing it changes the API URL of the region's projects. */
+            api_domain?: string;
+            /** @description Replaces the organisations that may create projects while the region is hidden; left out, the list is kept. */
+            early_access_org_ids?: string[];
             /** @description manual (the default) or hetzner. */
             provider?: string;
             location?: string;
@@ -6425,10 +6618,45 @@ export interface components {
             storage_target_id?: string | null;
             /** Format: uuid */
             copy_target_id?: string | null;
+            /**
+             * Format: uuid
+             * @description A platform target for the region's files, other than any region's backup or copy target and the default; null keeps files in the backup target. Changing it doesn't move files already stored (docs/regions.md).
+             */
+            files_target_id?: string | null;
             floating_ip_id?: string | null;
             residency?: boolean;
-            /** @description Hidden regions take no new projects. */
+            /** @description Hidden regions take new projects only from their early-access organisations. */
             hidden?: boolean;
+        };
+        ManageRolesRequest: {
+            enabled: boolean;
+        };
+        ManageRoles: {
+            /** @description The owner role has CREATEROLE. */
+            enabled: boolean;
+            /** @description The owner's logins the poolers accept. */
+            logins: {
+                name: string;
+                /** Format: date-time */
+                synced_at: string;
+            }[];
+            /** @description After a sync, the owner's logins that aren't synced, and why (for example not named <database>_<name>, or no SCRAM password). */
+            skipped?: {
+                name: string;
+                reason: string;
+            }[];
+        };
+        ProjectNetworkRequest: {
+            /** @description Networks in CIDR form (102.89.10.4/32, 10.0.0.0/16, 2001:db8::/32); a bare address means just that address. Empty allows any address. */
+            allowed_cidrs: string[];
+        };
+        ProjectNetwork: {
+            /** @description The networks, normalised; empty allows any address. */
+            allowed_cidrs: string[];
+            /** @description The address this request came from, as Xenibase sees it (your database client's address may differ). */
+            your_ip?: string;
+            /** @description Whether your_ip is in the allowlist (always true when the list is empty). */
+            your_ip_allowed?: boolean;
         };
         ProjectResidencyRequest: {
             enabled: boolean;
@@ -6918,8 +7146,11 @@ export interface components {
             region?: string;
             /** @description manual (registered by hand) or the cloud provider that created it. */
             provider?: string;
-            /** @enum {string} */
-            lifecycle?: "active" | "provisioning" | "draining";
+            /**
+             * @description retiring is an empty node out of placement whose server is about to be deleted.
+             * @enum {string}
+             */
+            lifecycle?: "active" | "provisioning" | "draining" | "retiring";
             server_type?: string | null;
             /** Format: int64 */
             monthly_cost_minor?: number | null;
@@ -6976,6 +7207,30 @@ export interface components {
             expires_at: string;
             /** @description A ready-to-run registration command for the node. */
             command: string;
+        };
+        AgentClientCert: {
+            /** @description The certificate's serial, lower-case hex. */
+            serial: string;
+            /** @description The xenibase-server it was issued to (its host name). */
+            server: string;
+            /** Format: date-time */
+            issued_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            revoked_at?: string;
+            /** @description The certificate the answering server is using. */
+            current: boolean;
+        };
+        /** @description Exactly one of serial and server. */
+        AgentClientCertRevoke: {
+            serial?: string;
+            server?: string;
+        };
+        AgentClientCertRevoked: {
+            revoked: components["schemas"]["AgentClientCert"][];
+            /** @description Agents the new list did not reach now; each gets it at its next health check. */
+            not_pushed: string[];
         };
         AgentRegisterRequest: {
             token: string;
@@ -7092,6 +7347,17 @@ export interface components {
             node_id?: string;
             /** @description The region it goes in (default the project's). */
             region?: string;
+            /** @description See ReplicaSettings (default false). */
+            hot_standby_feedback?: boolean;
+            /** @description See ReplicaSettings (default 30). */
+            max_standby_delay_seconds?: number;
+        };
+        /** @description A read replica's standby settings. Omitted fields keep their value. */
+        ReplicaSettings: {
+            /** @description The replica tells the primary which rows its running queries still read, so the primary's vacuum keeps them and long queries on the replica aren't cancelled for it. The cost is on the primary: dead rows stay longer, so a long query on the replica can bloat tables. */
+            hot_standby_feedback?: boolean;
+            /** @description How long replay waits for a query that conflicts with it before cancelling the query (max_standby_streaming_delay and max_standby_archive_delay). Longer lets long queries finish but lets the replica fall further behind; one behind by more than the rotation threshold leaves the read route until it catches up. */
+            max_standby_delay_seconds?: number;
         };
         ReplicaDetachRequest: {
             /** @description The new project's name. */
@@ -7120,6 +7386,15 @@ export interface components {
             error?: string;
             /** Format: date-time */
             rotation_changed_at?: string;
+            hot_standby_feedback: boolean;
+            max_standby_delay_seconds: number;
+            /**
+             * Format: date-time
+             * @description When the replica last confirmed its settings.
+             */
+            settings_applied_at?: string;
+            /** @description Why the settings couldn't be applied yet (retried). */
+            settings_error?: string;
             /** Format: date-time */
             created_at: string;
         };
@@ -7452,8 +7727,10 @@ export interface components {
                 [key: string]: boolean;
             };
             captcha_secret_set?: boolean;
-            /** @description Signs webhook hooks (Xenibase-Signature); set once a hook URL is. */
+            /** @description Signs webhook hooks (Xenibase-Signature); set once a hook URL is. Shown only to project admins (project.services). */
             hook_secret?: string;
+            /** @description Whether the project has a hook secret (for those who aren't shown it). */
+            hook_secret_set?: boolean;
             /** @description The role Postgres hooks run as; grant it what they read. */
             hook_role?: string;
             phone?: {
@@ -8025,6 +8302,10 @@ export interface components {
             cpus?: number | null;
             memory_mb?: number | null;
             volume_gb?: number | null;
+            /** @description Dedicated only. Postgres's max_connections, which grows with the instance's memory (50 per GB, 100 to 500). */
+            max_connections?: number;
+            /** @description Dedicated only. The highest connection limit the project can have on this instance: max_connections less what Xenibase keeps for its own connections (backups, replication, probes, backend services). */
+            connection_limit_max?: number;
         };
         /** @description Dedicated only. Any time in [from, to] can be restored. */
         PitrWindow: {
@@ -9290,6 +9571,8 @@ export interface components {
             projects: components["schemas"]["OAuthGrantProject"][];
         };
         OAuthAuthorizeInfo: {
+            /** @description The request as the server validated it, sealed for this user; the approval sends it back, and its scopes are the most the user may grant. Valid for 30 minutes. */
+            consent: string;
             client_id: string;
             client_name: string;
             redirect_uri: string;
@@ -9302,13 +9585,15 @@ export interface components {
             organisations: components["schemas"]["OAuthGrantOrg"][];
         };
         OAuthDecision: {
+            /** @description The `consent` the consent page was given; required to approve. */
+            consent?: string;
             client_id: string;
             redirect_uri: string;
             state?: string;
             code_challenge: string;
             code_challenge_method: string;
             approve: boolean;
-            /** @description Within what the app asked for; the request's scopes by default. */
+            /** @description Within what the app asked for (the scopes sealed in `consent`, checked by the server); the request's scopes by default. */
             scopes?: components["schemas"]["TokenScope"][];
             /** Format: uuid */
             org_id?: string;
@@ -9426,6 +9711,11 @@ export interface components {
             current_password: string;
             /** Format: password */
             new_password: string;
+            /**
+             * @description Also revoke every API token you have (the CLI's, CI's and connected apps'). On unless set to false.
+             * @default true
+             */
+            revoke_tokens: boolean;
         };
         Terms: {
             version: number;
@@ -9865,6 +10155,8 @@ export interface components {
              * @description The plan's response target; null is best effort.
              */
             respond_by?: string | null;
+            /** @description An email whose sender the provider didn't authenticate (no DMARC pass, nor aligned DKIM and SPF passes): the From address may be forged, so the ticket has no organisation. */
+            unverified_sender: boolean;
         };
         TicketList: {
             items: components["schemas"]["Ticket"][];
@@ -9960,6 +10252,12 @@ export interface components {
             phone: string;
             /** Format: date-time */
             created_at: string;
+            /** @description The code was sent from the number; only then do its messages open tickets. */
+            verified: boolean;
+            /** @description While pending, what to send from the number to the support WhatsApp number, e.g. XB-12345678. */
+            code?: string | null;
+            /** Format: date-time */
+            code_expires_at?: string | null;
         };
         RevenueMonth: {
             /** @example 2026-10 */
@@ -10252,6 +10550,8 @@ export interface components {
             name?: string | null;
             /** @description Gets the status page's incident emails while the organisation is on a paid plan (default true). */
             status_emails?: boolean;
+            /** @description A member's verified address, or confirmed from the emailed link. Only a verified contact's email to support opens tickets for the organisation; billing email goes to every contact. */
+            readonly verified?: boolean;
         };
         LegalDocument: {
             /** Format: uuid */
@@ -11207,8 +11507,11 @@ export interface components {
             table: string;
         };
         ReapedSession: {
-            /** @enum {string} */
-            kind: "statement" | "idle_in_transaction";
+            /**
+             * @description statement, a statement cancelled; statement_terminated, a statement that kept running after its cancel, ended with its session; idle_in_transaction, a session idle in a transaction, ended.
+             * @enum {string}
+             */
+            kind: "statement" | "statement_terminated" | "idle_in_transaction";
             role: string;
             duration_s: number;
             query?: string | null;
@@ -12933,6 +13236,34 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
+    updateProjectReplica: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+                replica_id: components["parameters"]["ReplicaID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicaSettings"];
+            };
+        };
+        responses: {
+            /** @description The replica with its new settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadReplica"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
     detachProjectReplica: {
         parameters: {
             query?: never;
@@ -13260,6 +13591,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RegistrationToken"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    listAgentClientCerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The certificates, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["AgentClientCert"][];
+                    };
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    revokeAgentClientCerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentClientCertRevoke"];
+            };
+        };
+        responses: {
+            /** @description Revoked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentClientCertRevoked"];
                 };
             };
             default: components["responses"]["Error"];
@@ -17025,6 +17404,30 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
+    revokeSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SigningKeyList"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
     listAuthUsers: {
         parameters: {
             query?: {
@@ -17692,6 +18095,34 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BillingContact"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    confirmBillingContact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenRequest"];
+            };
+        };
+        responses: {
+            /** @description Confirmed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        email: string;
+                        org_name: string;
+                    };
                 };
             };
             default: components["responses"]["Error"];
@@ -20421,7 +20852,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Active regions. */
+            /** @description Active regions, and hidden ones the caller's organisations have early access to. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -20595,6 +21026,129 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Operation"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getProjectManageRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The setting and the synced logins. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManageRoles"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    setProjectManageRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManageRolesRequest"];
+            };
+        };
+        responses: {
+            /** @description Changed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManageRoles"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    syncProjectManageRoles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Synced. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManageRoles"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getProjectNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The allowlist, and the caller's own address. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectNetwork"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    setProjectNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectNetworkRequest"];
+            };
+        };
+        responses: {
+            /** @description Saved and applied. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectNetwork"];
                 };
             };
             default: components["responses"]["Error"];

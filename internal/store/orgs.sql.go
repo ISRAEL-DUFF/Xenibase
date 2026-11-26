@@ -13,6 +13,53 @@ import (
 	"github.com/google/uuid"
 )
 
+const countInviterInvitationsSince = `-- name: CountInviterInvitationsSince :one
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE invited_by = $1 AND kind = 'org' AND created_at >= $2::timestamptz
+`
+
+type CountInviterInvitationsSinceParams struct {
+	InvitedBy uuid.UUID
+	Since     time.Time
+}
+
+type CountInviterInvitationsSinceRow struct {
+	Sent   int32
+	Oldest time.Time
+}
+
+// tenant: system - one inviter's organisation invitations in every organisation, for the daily cap.
+func (q *Queries) CountInviterInvitationsSince(ctx context.Context, arg CountInviterInvitationsSinceParams) (CountInviterInvitationsSinceRow, error) {
+	row := q.db.QueryRow(ctx, countInviterInvitationsSince, arg.InvitedBy, arg.Since)
+	var i CountInviterInvitationsSinceRow
+	err := row.Scan(&i.Sent, &i.Oldest)
+	return i, err
+}
+
+const countOrgInvitationsSince = `-- name: CountOrgInvitationsSince :one
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE org_id = $1 AND created_at >= $2::timestamptz
+`
+
+type CountOrgInvitationsSinceParams struct {
+	OrgID *uuid.UUID
+	Since time.Time
+}
+
+type CountOrgInvitationsSinceRow struct {
+	Sent   int32
+	Oldest time.Time
+}
+
+// Invitations an organisation sent since a time, and the oldest of them
+// (the daily cap).
+func (q *Queries) CountOrgInvitationsSince(ctx context.Context, arg CountOrgInvitationsSinceParams) (CountOrgInvitationsSinceRow, error) {
+	row := q.db.QueryRow(ctx, countOrgInvitationsSince, arg.OrgID, arg.Since)
+	var i CountOrgInvitationsSinceRow
+	err := row.Scan(&i.Sent, &i.Oldest)
+	return i, err
+}
+
 const countOrgOwners = `-- name: CountOrgOwners :one
 SELECT count(*) FROM org_members WHERE org_id = $1 AND role = 'owner'
 `
@@ -263,7 +310,7 @@ func (q *Queries) GetOrgMember(ctx context.Context, arg GetOrgMemberParams) (Org
 }
 
 const getOrgProject = `-- name: GetOrgProject :one
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects WHERE id = $1 AND org_id = $2
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE id = $1 AND org_id = $2
 `
 
 type GetOrgProjectParams struct {
@@ -319,6 +366,9 @@ func (q *Queries) GetOrgProject(ctx context.Context, arg GetOrgProjectParams) (P
 		&i.ForwardRegion,
 		&i.ForwardUntil,
 		&i.IntegratorRoles,
+		&i.ManageRoles,
+		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
@@ -524,7 +574,7 @@ INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, $3)
 ON CONFLICT (org_id, user_id) DO UPDATE SET role = CASE
   WHEN org_members.role = 'owner' OR EXCLUDED.role = 'owner' THEN 'owner'
   WHEN org_members.role = 'admin' OR EXCLUDED.role = 'admin' THEN 'admin'
-  ELSE 'member' END
+  ELSE org_members.role END
 `
 
 type InsertOrgMemberParams struct {
@@ -533,7 +583,9 @@ type InsertOrgMemberParams struct {
 	Role   string
 }
 
-// Adds a member; an existing member keeps the higher of the two roles.
+// Adds a member; an existing member keeps their role unless the new one is
+// higher (owner, then admin). Billing and member are not ranked: a billing
+// member stays billing, and a member doesn't become one.
 func (q *Queries) InsertOrgMember(ctx context.Context, arg InsertOrgMemberParams) error {
 	_, err := q.db.Exec(ctx, insertOrgMember, arg.OrgID, arg.UserID, arg.Role)
 	return err
@@ -604,7 +656,7 @@ func (q *Queries) ListInvitationsForEmail(ctx context.Context, email string) ([]
 }
 
 const listOrgBackups = `-- name: ListOrgBackups :many
-SELECT b.id, b.project_id, b.kind, b.object_key, b.size_bytes, b.checksum, b.started_at, b.finished_at, b.status, b.expires_at, b.storage_target_id, b.operation_id, b.key_wrapped, b.error, b.deleted_at, b.encryption_key_id, b.walg_prefix, b.copy_of, b.copy_target_id, b.copy_status, b.copied_at, b.copy_error, p.name AS project_name, (p.deleted_at IS NOT NULL)::bool AS project_deleted,
+SELECT b.id, b.project_id, b.kind, b.object_key, b.size_bytes, b.checksum, b.started_at, b.finished_at, b.status, b.expires_at, b.storage_target_id, b.operation_id, b.key_wrapped, b.error, b.deleted_at, b.encryption_key_id, b.walg_prefix, b.copy_of, b.copy_target_id, b.copy_status, b.copied_at, b.copy_error, b.verified_at, p.name AS project_name, (p.deleted_at IS NOT NULL)::bool AS project_deleted,
        t.name AS target_name, t.org_id AS target_org_id, k.fingerprint AS key_fingerprint
 FROM backups b JOIN projects p ON p.id = b.project_id
 LEFT JOIN storage_targets t ON t.id = b.storage_target_id
@@ -649,6 +701,7 @@ type ListOrgBackupsRow struct {
 	CopyStatus      *string
 	CopiedAt        *time.Time
 	CopyError       *string
+	VerifiedAt      *time.Time
 	ProjectName     string
 	ProjectDeleted  bool
 	TargetName      *string
@@ -697,6 +750,7 @@ func (q *Queries) ListOrgBackups(ctx context.Context, arg ListOrgBackupsParams) 
 			&i.CopyStatus,
 			&i.CopiedAt,
 			&i.CopyError,
+			&i.VerifiedAt,
 			&i.ProjectName,
 			&i.ProjectDeleted,
 			&i.TargetName,
@@ -823,7 +877,7 @@ func (q *Queries) ListOrgMembers(ctx context.Context, orgID uuid.UUID) ([]ListOr
 }
 
 const listOrgOperations = `-- name: ListOrgOperations :many
-SELECT o.id, o.kind, o.project_id, o.params, o.status, o.attempts, o.run_after, o.locked_by, o.locked_at, o.log, o.error, o.created_by, o.created_at, o.finished_at FROM operations o JOIN projects p ON p.id = o.project_id
+SELECT o.id, o.kind, o.project_id, o.params, o.status, o.attempts, o.run_after, o.locked_by, o.locked_at, o.log, o.error, o.created_by, o.created_at, o.finished_at, o.exclusive FROM operations o JOIN projects p ON p.id = o.project_id
 WHERE p.org_id = $1
   AND ($2::text IS NULL OR o.status = $2)
   AND ($3::text IS NULL OR o.kind = $3)
@@ -875,6 +929,7 @@ func (q *Queries) ListOrgOperations(ctx context.Context, arg ListOrgOperationsPa
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}
@@ -926,7 +981,7 @@ func (q *Queries) ListOrgProjectMemberships(ctx context.Context, orgID uuid.UUID
 }
 
 const listOrgProjects = `-- name: ListOrgProjects :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles FROM projects p
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p
 WHERE p.org_id = $1 AND p.deleted_at IS NULL
   AND ($2::text IS NULL OR p.status = $2)
   AND ($3::bool OR EXISTS (
@@ -1006,6 +1061,9 @@ func (q *Queries) ListOrgProjects(ctx context.Context, arg ListOrgProjectsParams
 			&i.ForwardRegion,
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -1078,7 +1136,7 @@ func (q *Queries) ListPlatformInvitations(ctx context.Context) ([]ListPlatformIn
 }
 
 const listPlatformOperations = `-- name: ListPlatformOperations :many
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations
 WHERE project_id IS NULL
   AND ($1::text IS NULL OR status = $1)
   AND ($2::text IS NULL OR kind = $2)
@@ -1117,6 +1175,7 @@ func (q *Queries) ListPlatformOperations(ctx context.Context, arg ListPlatformOp
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.FinishedAt,
+			&i.Exclusive,
 		); err != nil {
 			return nil, err
 		}
@@ -1283,6 +1342,7 @@ type ListUserOrgsRow struct {
 	ProjectCount       int32
 }
 
+// tenant: system - scoped by the user's own memberships (m.user_id).
 // The organisations a user belongs to, personal first.
 func (q *Queries) ListUserOrgs(ctx context.Context, userID uuid.UUID) ([]ListUserOrgsRow, error) {
 	rows, err := q.db.Query(ctx, listUserOrgs, userID)
@@ -1350,36 +1410,6 @@ func (q *Queries) MarkInvitationAccepted(ctx context.Context, arg MarkInvitation
 		return 0, err
 	}
 	return result.RowsAffected(), nil
-}
-
-const moveProjectDBUsers = `-- name: MoveProjectDBUsers :exec
-UPDATE project_db_users SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectDBUsersParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectDBUsers(ctx context.Context, arg MoveProjectDBUsersParams) error {
-	_, err := q.db.Exec(ctx, moveProjectDBUsers, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
-}
-
-const moveProjectMembers = `-- name: MoveProjectMembers :exec
-UPDATE project_members SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectMembersParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectMembers(ctx context.Context, arg MoveProjectMembersParams) error {
-	_, err := q.db.Exec(ctx, moveProjectMembers, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
 }
 
 const orgSlugTaken = `-- name: OrgSlugTaken :one
@@ -1579,9 +1609,26 @@ type SetProjectOrgParams struct {
 	OrgID    uuid.UUID
 }
 
-// Moves a project to another organisation (project transfer).
+// Moves a project to another organisation (project transfer); the child
+// tables that carry org_id follow by their keys (ON UPDATE CASCADE).
 func (q *Queries) SetProjectOrg(ctx context.Context, arg SetProjectOrgParams) error {
 	_, err := q.db.Exec(ctx, setProjectOrg, arg.NewOrgID, arg.ID, arg.OrgID)
+	return err
+}
+
+const unverifyLeavingMemberContact = `-- name: UnverifyLeavingMemberContact :exec
+UPDATE billing_contacts c SET verified_at = NULL FROM users u
+WHERE c.org_id = $1 AND u.id = $2 AND c.email = u.email
+`
+
+type UnverifyLeavingMemberContactParams struct {
+	OrgID  uuid.UUID
+	UserID uuid.UUID
+}
+
+// A billing contact verified because it was a member's address routes support tickets only while they are a member.
+func (q *Queries) UnverifyLeavingMemberContact(ctx context.Context, arg UnverifyLeavingMemberContactParams) error {
+	_, err := q.db.Exec(ctx, unverifyLeavingMemberContact, arg.OrgID, arg.UserID)
 	return err
 }
 

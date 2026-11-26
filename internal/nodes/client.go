@@ -13,7 +13,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
 	"github.com/israel-duff/xenibase/internal/agentca"
@@ -26,6 +29,7 @@ type Agent struct {
 	Node store.Node
 	base string
 	http *http.Client
+	svc  *Service
 }
 
 // ErrNoAgent means the node has no registered agent.
@@ -49,11 +53,29 @@ func (s *Service) dial(n store.Node) (*Agent, error) {
 		host = *n.AgentHost
 	}
 	pin := *n.AgentCertFp
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{s.clientCert},
-		RootCAs:      s.ca.Pool(),
-		ServerName:   host,
-		MinVersion:   tls.VersionTLS13,
+	addr := net.JoinHostPort(host, strconv.Itoa(int(n.AgentPort)))
+	return &Agent{
+		Node: n,
+		svc:  s,
+		base: "https://" + addr,
+		http: s.agents.client(n.ID, addr+" "+pin, func() *http.Client {
+			return &http.Client{Transport: &http.Transport{
+				TLSClientConfig: s.agentTLS(n, host, pin), ResponseHeaderTimeout: 0, IdleConnTimeout: time.Minute,
+			}}
+		}),
+	}, nil
+}
+
+// agentTLS is the TLS configuration for one node's agent: the agent CA, and
+// the node's pinned certificate. The server's client certificate is read at
+// each handshake, not when the configuration is built, so the cached
+// transports present a renewed one.
+func (s *Service) agentTLS(n store.Node, host, pin string) *tls.Config {
+	return &tls.Config{
+		GetClientCertificate: s.certs.getClientCertificate,
+		RootCAs:              s.ca.Pool(),
+		ServerName:           host,
+		MinVersion:           tls.VersionTLS13,
 		VerifyPeerCertificate: func(raw [][]byte, chains [][]*x509.Certificate) error {
 			if len(raw) == 0 || agentca.Fingerprint(raw[0]) != pin {
 				return errors.New("agent certificate does not match the pinned fingerprint")
@@ -64,47 +86,133 @@ func (s *Service) dial(n store.Node) (*Agent, error) {
 			return nil
 		},
 	}
-	return &Agent{
-		Node: n,
-		base: "https://" + net.JoinHostPort(host, strconv.Itoa(int(n.AgentPort))),
-		http: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg, ResponseHeaderTimeout: 0, IdleConnTimeout: time.Minute}},
-	}, nil
 }
 
+// agentClients keeps one HTTP client per node, so calls reuse connections
+// instead of a TLS handshake each. A client is replaced, and its idle
+// connections closed, when the node's address or pinned fingerprint
+// changes (re-registration).
+type agentClients struct {
+	mu sync.Mutex
+	m  map[uuid.UUID]agentClient
+}
+
+type agentClient struct {
+	key  string // address and pinned fingerprint
+	http *http.Client
+}
+
+func (c *agentClients) client(node uuid.UUID, key string, build func() *http.Client) *http.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old, ok := c.m[node]; ok {
+		if old.key == key {
+			return old.http
+		}
+		old.http.CloseIdleConnections()
+	}
+	if c.m == nil {
+		c.m = map[uuid.UUID]agentClient{}
+	}
+	h := build()
+	c.m[node] = agentClient{key: key, http: h}
+	return h
+}
+
+// closeIdle closes every agent client's idle connections, so the next
+// call to each agent handshakes again (with a renewed client certificate).
+func (c *agentClients) closeIdle() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, ac := range c.m {
+		ac.http.CloseIdleConnections()
+	}
+}
+
+// do makes one call to the agent. The agent's allow list is brought up to
+// date first (ensureAllowed), and a call the agent refuses because this
+// server's certificate is not on its list is retried once, after pushing
+// the list again on a fresh connection.
 func (a *Agent) do(ctx context.Context, method, path string, in, out any) error {
-	var body io.Reader
+	var body []byte
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
+		body = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, a.base+path, body)
+	if a.svc != nil {
+		if err := a.svc.ensureAllowed(ctx, a); err != nil {
+			a.svc.log.Debug("allow list not pushed", "node", a.Node.Name, "err", err)
+		}
+	}
+	status, raw, err := a.send(ctx, method, path, body)
+	if err == nil && status == http.StatusForbidden && a.svc != nil && isRefusedSerial(raw) {
+		a.svc.forget(a.Node.ID)
+		a.http.CloseIdleConnections()
+		if perr := a.svc.refreshAllow(ctx); perr == nil {
+			a.svc.checkOwnSerial() // revoked: the push below presents a new one
+			if perr = a.svc.ensureAllowed(ctx, a); perr == nil {
+				status, raw, err = a.send(ctx, method, path, body)
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := a.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("agent %s: %w", a.Node.Name, err)
-	}
-	defer res.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	if res.StatusCode == http.StatusNoContent {
+	if status == http.StatusNoContent {
 		return nil
 	}
-	if res.StatusCode != http.StatusOK {
-		var e agentapi.Error
-		if json.Unmarshal(raw, &e) == nil && e.Error != "" {
-			return fmt.Errorf("agent %s: %s", a.Node.Name, e.Error)
-		}
-		return fmt.Errorf("agent %s: %s", a.Node.Name, res.Status)
+	if status != http.StatusOK {
+		return fmt.Errorf("agent %s: %s", a.Node.Name, agentError(raw, status))
 	}
 	if out == nil {
 		return nil
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// roundTrip sends in as JSON and returns the status and body.
+func (a *Agent) roundTrip(ctx context.Context, method, path string, in any) (int, []byte, error) {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return 0, nil, err
+	}
+	return a.send(ctx, method, path, b)
+}
+
+func (a *Agent) send(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, a.base+path, r)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.http.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("agent %s: %w", a.Node.Name, err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	return res.StatusCode, raw, nil
+}
+
+// agentError is the message in an agent's error answer.
+func agentError(raw []byte, status int) string {
+	var e agentapi.Error
+	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	return fmt.Sprintf("%d %s", status, http.StatusText(status))
+}
+
+func isRefusedSerial(raw []byte) bool {
+	var e agentapi.Error
+	return json.Unmarshal(raw, &e) == nil && e.Error == agentapi.ErrClientSerialNotAllowed
 }
 
 // Health calls GET /v1/health.

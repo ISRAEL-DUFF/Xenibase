@@ -1,6 +1,8 @@
 -- name: InsertAPIToken :one
-INSERT INTO api_tokens (user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, created_via, oauth_client_id)
-VALUES (@user_id, @org_id, @name, @token_hash, @prefix, @scopes::text[], sqlc.narg(project_ids)::uuid[], @expires_at, @created_via, sqlc.narg(oauth_client_id))
+-- parent_id is the token that created this one: revoking it revokes this
+-- one too (a trigger, migration 00088).
+INSERT INTO api_tokens (user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, created_via, oauth_client_id, parent_id)
+VALUES (@user_id, @org_id, @name, @token_hash, @prefix, @scopes::text[], sqlc.narg(project_ids)::uuid[], @expires_at, @created_via, sqlc.narg(oauth_client_id), sqlc.narg(parent_id))
 RETURNING *;
 
 -- name: GetTokenForAuth :one
@@ -84,6 +86,7 @@ SELECT * FROM device_auth_requests WHERE user_code = @user_code;
 SELECT * FROM device_auth_requests WHERE device_code_hash = @device_code_hash;
 
 -- name: ApproveDeviceRequest :execrows
+-- tenant: system - a device login has no organisation until it is approved.
 UPDATE device_auth_requests SET approved_by = @approved_by, org_id = @org_id, token_id = @token_id, sealed_token = @sealed_token
 WHERE device_code_hash = @device_code_hash AND approved_by IS NULL AND denied_at IS NULL AND expires_at > now();
 

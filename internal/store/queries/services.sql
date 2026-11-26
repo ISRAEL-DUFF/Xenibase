@@ -160,10 +160,10 @@ SELECT p.id, p.org_id, o.plan_id FROM projects p JOIN organizations o ON o.id = 
 WHERE p.id = ANY(@project_ids::uuid[]);
 
 -- name: StorageProjects :many
--- tenant: system - the storage sweep: running projects with backend services' storage.
+-- tenant: system - the storage sweep: running projects with backend services' storage, on or turned off (which keeps the files).
 SELECT sqlc.embed(p), s.ref, s.storage_quota_bytes, s.upload_max_bytes, s.storage_egress_blocked, s.transforms_blocked
 FROM project_services s JOIN projects p ON p.id = s.project_id
-WHERE s.enabled AND s.schema_version >= 4 AND p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle = 'active'
+WHERE s.schema_version >= 4 AND p.deleted_at IS NULL AND p.status = 'active' AND p.lifecycle = 'active'
 ORDER BY p.org_id, p.id;
 
 -- name: UpsertProjectStorage :exec
@@ -193,10 +193,10 @@ SELECT * FROM project_storage WHERE project_id = @project_id;
 
 -- name: SetStorageReconciled :exec
 -- tenant: system - the nightly storage reconciler's findings.
-INSERT INTO project_storage (project_id, missing_objects, missing_sample, orphans_removed, reconciled_at)
-VALUES (@project_id, @missing_objects, @missing_sample, @orphans_removed, now())
+INSERT INTO project_storage (project_id, missing_objects, missing_sample, orphans_removed, transform_bytes, reconciled_at)
+VALUES (@project_id, @missing_objects, @missing_sample, @orphans_removed, @transform_bytes, now())
 ON CONFLICT (project_id) DO UPDATE SET missing_objects = EXCLUDED.missing_objects, missing_sample = EXCLUDED.missing_sample,
-  orphans_removed = project_storage.orphans_removed + EXCLUDED.orphans_removed, reconciled_at = now();
+  orphans_removed = project_storage.orphans_removed + EXCLUDED.orphans_removed, transform_bytes = EXCLUDED.transform_bytes, reconciled_at = now();
 
 -- name: ScheduleStorageCleanups :execrows
 -- tenant: system - the storage sweep: deleted projects' files go after the final backups' retention (V2 §10.10).

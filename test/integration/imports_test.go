@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -78,6 +79,20 @@ func sourceURL(t *testing.T, name string) string {
 	return u
 }
 
+// allowSource has the platform admin allow-list src's host for the owner's
+// organisation: the test sources are on a private Docker network, which
+// imports otherwise refuse.
+func allowSource(t *testing.T, e *testenv.Env, src string) {
+	t.Helper()
+	u, err := url.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := e.Do("PUT", "/api/v1/admin/orgs/"+e.OrgID.String()+"/outbound", gen.OutboundAllowlist{Hosts: []string{u.Hostname()}}, nil); code != http.StatusOK {
+		t.Fatalf("allow %s: %d", u.Hostname(), code)
+	}
+}
+
 // TestImportSupabase imports a Supabase-shaped project and checks the app
 // keeps working against Xenibase (the M3 done-when, against the
 // supabase/postgres image rather than a hosted project).
@@ -85,6 +100,7 @@ func TestImportSupabase(t *testing.T) {
 	src := sourceURL(t, "XENIBASE_TEST_SRC_SUPABASE_URL")
 	seed(t, src, supabaseFixture)
 	e := testenv.Start(t, testenv.Options{})
+	allowSource(t, e, src)
 	e.StartAgent()
 	ctx := context.Background()
 
@@ -212,6 +228,11 @@ func TestImportPostgres15(t *testing.T) {
 	e.StartAgent()
 	ctx := context.Background()
 
+	// Not allow-listed, the private source is refused.
+	if code := e.Do("POST", "/api/v1/imports/preflight", gen.ImportSource{SourceUrl: src}, nil); code != http.StatusBadRequest {
+		t.Fatalf("a private source before the platform admin allowed it: %d", code)
+	}
+	allowSource(t, e, src)
 	var pf gen.ImportPreflight
 	if code := e.Do("POST", "/api/v1/imports/preflight", gen.ImportSource{SourceUrl: src}, &pf); code != http.StatusOK {
 		t.Fatalf("preflight: %d", code)
@@ -252,6 +273,20 @@ func TestImportPostgres15(t *testing.T) {
 	}
 	if code := e.Do("POST", "/api/v1/imports/preflight", gen.ImportSource{SourceUrl: strings.Replace(src, "pg15-source", "wrong", 1)}, nil); code != http.StatusBadRequest {
 		t.Fatalf("bad password: %d", code)
+	}
+	// Xenibase's own clusters are refused, even allow-listed: they trust the
+	// server's and agents' addresses, so importing a neighbour's database
+	// with its password would bypass that project's IP allowlist.
+	direct := e.DirectURL(c.Connection.SessionUrl, "")
+	allowSource(t, e, direct)
+	for _, u := range []string{direct, "postgres://u:p@169.254.169.254:5432/postgres", "postgres://u:p@[::1]:5432/postgres"} {
+		var res struct{ Error struct{ Message string } }
+		if code := e.Do("POST", "/api/v1/imports/preflight", gen.ImportSource{SourceUrl: u}, &res); code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", testenv.RedactURL(u), code)
+		}
+		if code := e.Do("POST", "/api/v1/imports", gen.ImportRequest{SourceUrl: u, Name: "Neighbour", Schemas: []string{"public"}}, nil); code != http.StatusBadRequest {
+			t.Fatalf("import %s: %d", testenv.RedactURL(u), code)
+		}
 	}
 }
 

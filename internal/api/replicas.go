@@ -6,6 +6,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/api/gen"
 	"github.com/israel-duff/xenibase/internal/dedicated"
 	"github.com/israel-duff/xenibase/internal/pooler"
+	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
 )
 
@@ -36,13 +37,7 @@ func (s *Server) ListProjectReplicas(w http.ResponseWriter, r *http.Request, id 
 		out.ReadUrl = &u
 	}
 	for _, rr := range rows {
-		region := rr.NodeRegion
-		if rr.RegionID != nil {
-			region = *rr.RegionID
-		}
-		out.Replicas = append(out.Replicas, gen.ReadReplica{Id: rr.ID, NodeId: rr.NodeID, NodeName: rr.NodeName, Region: region, Size: rr.Size,
-			Status: gen.ReadReplicaStatus(rr.Status), InRotation: rr.InRotation, LagBytes: rr.LagBytes, LagMs: rr.LagMs, Error: rr.Error,
-			RotationChangedAt: rr.RotationChangedAt, CreatedAt: rr.CreatedAt})
+		out.Replicas = append(out.Replicas, replicaOut(rr))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -72,6 +67,18 @@ func (s *Server) CreateProjectReplica(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 	p := dedicated.ReplicaParams{ProjectID: id, NodeID: req.NodeId, CreatedBy: userID(r.Context())}
+	if req.HotStandbyFeedback != nil || req.MaxStandbyDelaySeconds != nil {
+		rs := dedicated.DefaultReplicaSettings
+		if req.HotStandbyFeedback != nil {
+			rs.HotStandbyFeedback = *req.HotStandbyFeedback
+		}
+		if req.MaxStandbyDelaySeconds != nil {
+			rs.MaxStandbyDelay = *req.MaxStandbyDelaySeconds
+		}
+		p.Settings = &rs
+		a.set("hot_standby_feedback", rs.HotStandbyFeedback)
+		a.set("max_standby_delay_seconds", rs.MaxStandbyDelay)
+	}
 	if req.Region != nil {
 		p.Region = *req.Region
 		a.set("region", p.Region)
@@ -131,4 +138,71 @@ func (s *Server) DetachProjectReplica(w http.ResponseWriter, r *http.Request, id
 	}
 	a.set("new_project", c.Project.ID.String())
 	s.writeCredentials(w, c.Project, c.Operation, c.Password)
+}
+
+// UpdateProjectReplica implements PATCH /api/v1/projects/{id}/replicas/{replica_id}:
+// the replica's standby settings, applied with a reload.
+func (s *Server) UpdateProjectReplica(w http.ResponseWriter, r *http.Request, id gen.ProjectID, replicaID gen.ReplicaID) {
+	ds := s.dedicatedSvc(w)
+	if ds == nil {
+		return
+	}
+	var req gen.ReplicaSettings
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ctx := r.Context()
+	q := store.New(s.db)
+	cur, err := q.GetReadReplica(ctx, replicaID)
+	if err != nil || cur.ProjectID != id || cur.DeletedAt != nil {
+		s.provisionError(w, "read replica settings", provision.ErrNotFound)
+		return
+	}
+	rs := dedicated.ReplicaSettings{HotStandbyFeedback: cur.HotStandbyFeedback, MaxStandbyDelay: int(cur.MaxStandbyDelayS)}
+	if req.HotStandbyFeedback != nil {
+		rs.HotStandbyFeedback = *req.HotStandbyFeedback
+	}
+	if req.MaxStandbyDelaySeconds != nil {
+		rs.MaxStandbyDelay = *req.MaxStandbyDelaySeconds
+	}
+	a := auditFrom(ctx)
+	a.target("project", id.String())
+	a.projectID = id
+	a.set("replica", replicaID.String())
+	a.set("before", map[string]any{"hot_standby_feedback": cur.HotStandbyFeedback, "max_standby_delay_seconds": cur.MaxStandbyDelayS})
+	a.set("hot_standby_feedback", rs.HotStandbyFeedback)
+	a.set("max_standby_delay_seconds", rs.MaxStandbyDelay)
+	if _, err := ds.UpdateReplicaSettings(ctx, id, replicaID, rs); err != nil {
+		s.provisionError(w, "read replica settings", err)
+		return
+	}
+	p, err := q.GetProject(ctx, id)
+	if err != nil {
+		s.internalError(w, "read replica settings", err)
+		return
+	}
+	rows, err := q.ListProjectReplicas(ctx, p.ID)
+	if err != nil {
+		s.internalError(w, "read replica settings", err)
+		return
+	}
+	for _, rr := range rows {
+		if rr.ID == replicaID {
+			writeJSON(w, http.StatusOK, replicaOut(rr))
+			return
+		}
+	}
+	s.provisionError(w, "read replica settings", provision.ErrNotFound)
+}
+
+func replicaOut(rr store.ListProjectReplicasRow) gen.ReadReplica {
+	region := rr.NodeRegion
+	if rr.RegionID != nil {
+		region = *rr.RegionID
+	}
+	return gen.ReadReplica{Id: rr.ID, NodeId: rr.NodeID, NodeName: rr.NodeName, Region: region, Size: rr.Size,
+		Status: gen.ReadReplicaStatus(rr.Status), InRotation: rr.InRotation, LagBytes: rr.LagBytes, LagMs: rr.LagMs, Error: rr.Error,
+		RotationChangedAt: rr.RotationChangedAt, CreatedAt: rr.CreatedAt,
+		HotStandbyFeedback: rr.HotStandbyFeedback, MaxStandbyDelaySeconds: int(rr.MaxStandbyDelayS),
+		SettingsAppliedAt: rr.SettingsAppliedAt, SettingsError: rr.SettingsError}
 }

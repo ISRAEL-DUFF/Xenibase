@@ -2,19 +2,24 @@ package edge
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/files"
 )
 
 // Signed URLs (V4 §5.4): a token over the project, bucket, path and expiry,
-// HMAC'd with the project's storage secret, so the edge checks it without a
-// policy query; the policies were checked when it was made.
+// HMAC'd with the project's storage secret, so the edge checks a download's
+// without a policy query (the policies were checked when it was made). An
+// upload's names a row holding its signer's role and claims: the upload is
+// written as them, and spends the row.
 
 const (
 	defaultSignTTL = time.Hour
@@ -150,7 +155,9 @@ func (e *Edge) signedDownload(c *call, bucket, path string) {
 		return
 	}
 	t, ok := files.Verify(sc.SigningSecret, c.r.URL.Query().Get("token"), files.TokenGet, c.p.cfg.Ref, bucket, path, time.Now())
-	if !ok {
+	// A token with a transform is for that render only (/render/sign/):
+	// a signed thumbnail must not open the original.
+	if !ok || t.Transform != nil {
 		c.fail(http.StatusBadRequest, "invalid_signature", "the URL's token is invalid or has expired")
 		return
 	}
@@ -173,7 +180,8 @@ func (e *Edge) signedDownload(c *call, bucket, path string) {
 }
 
 // signUpload makes a signed upload URL for a path the caller's policies let
-// it write; whoever has the URL may upload there once until it expires.
+// it write; whoever has the URL may upload there once, as the caller, until
+// it expires (2 hours at most).
 func (e *Edge) signUpload(c *call, req Request, bucket, path string) {
 	var in signInput
 	if !authBody(c, &in) {
@@ -195,13 +203,40 @@ func (e *Edge) signUpload(c *call, req Request, bucket, path string) {
 		e.storageError(c, err)
 		return
 	}
-	exp := time.Now().Add(in.ttl(uploadSignTTL)).Unix()
-	tok := files.Sign(sc.SigningSecret, files.Token{Kind: files.TokenPut, Ref: c.p.cfg.Ref, Bucket: bucket, Path: path, Exp: exp, Upsert: upsert, Owner: c.userID})
+	pool, err := e.dbPool(ctx, c.p)
+	if err != nil {
+		e.dbError(c, err)
+		return
+	}
+	// The upload is written as the signer: their role and claims wait in
+	// the token's row, which using the token removes.
+	id, exp := uuid.New(), time.Now().Add(min(in.ttl(uploadSignTTL), uploadSignTTL)).Unix()
+	claims, err := json.Marshal(req.Claims)
+	if err != nil {
+		e.dbError(c, err)
+		return
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM xb_storage.upload_tokens WHERE ctid = ANY (ARRAY(SELECT ctid FROM xb_storage.upload_tokens
+		WHERE expires_at < now() LIMIT 20))`); err != nil {
+		e.dbError(c, err)
+		return
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO xb_storage.upload_tokens (id, bucket, path, role, claims, expires_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		id, bucket, path, req.Role, string(claims), time.Unix(exp, 0)); err != nil {
+		e.dbError(c, err)
+		return
+	}
+	tok := files.Sign(sc.SigningSecret, files.Token{Kind: files.TokenPut, Ref: c.p.cfg.Ref, Bucket: bucket, Path: path, Exp: exp,
+		Upsert: upsert, Owner: c.userID, ID: &id})
 	c.json(http.StatusOK, map[string]any{"url": baseURL(c) + objectURL("upload/sign", bucket, path) + "?token=" + tok,
 		"token": tok, "path": path, "expires_at": time.Unix(exp, 0).UTC()})
 }
 
-// signedUpload takes an upload to a signed upload URL.
+// errTokenSpent is a signed upload URL that has been used, or has expired
+// since it was checked.
+var errTokenSpent = refuse(http.StatusBadRequest, "invalid_signature", "the URL's token has been used already or has expired")
+
+// signedUpload takes an upload to a signed upload URL, as its signer.
 func (e *Edge) signedUpload(c *call, bucket, path string) {
 	sc, _, ok := e.store(c)
 	if !ok {
@@ -212,9 +247,32 @@ func (e *Edge) signedUpload(c *call, bucket, path string) {
 		tok = strings.TrimPrefix(c.r.Header.Get("Authorization"), "Bearer ")
 	}
 	t, ok := files.Verify(sc.SigningSecret, tok, files.TokenPut, c.p.cfg.Ref, bucket, path, time.Now())
-	if !ok {
+	// A token without a row (made by an older edge) can't be spent.
+	if !ok || t.ID == nil {
 		c.fail(http.StatusBadRequest, "invalid_signature", "the URL's token is invalid or has expired")
 		return
 	}
-	e.putObject(c, nil, bucket, path, t.Upsert, t.Owner)
+	ctx, cancel := context.WithTimeout(c.r.Context(), 10*time.Second)
+	defer cancel()
+	pool, err := e.dbPool(ctx, c.p)
+	if err != nil {
+		e.dbError(c, err)
+		return
+	}
+	req := Request{Timeout: time.Duration(c.p.cfg.Settings.StatementTimeoutMs) * time.Millisecond}
+	var claims []byte
+	err = pool.QueryRow(ctx, `SELECT role, claims FROM xb_storage.upload_tokens WHERE id = $1 AND bucket = $2 AND path = $3 AND expires_at > now()`,
+		*t.ID, bucket, path).Scan(&req.Role, &claims)
+	if errors.Is(err, pgx.ErrNoRows) {
+		errTokenSpent.send(c)
+		return
+	}
+	if err == nil {
+		err = json.Unmarshal(claims, &req.Claims)
+	}
+	if err != nil {
+		e.dbError(c, err)
+		return
+	}
+	e.putObject(c, req, bucket, path, t.Upsert, t.Owner, t.ID)
 }

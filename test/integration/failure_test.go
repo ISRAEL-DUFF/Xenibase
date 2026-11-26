@@ -431,7 +431,7 @@ func dropSmallLeftovers(u string) {
 	for _, d := range dbs {
 		_, _ = c.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{d}.Sanitize()+" WITH (FORCE)")
 	}
-	rows, _ = c.Query(ctx, `SELECT rolname FROM pg_roles WHERE rolname LIKE '%\_owner' OR rolname LIKE '%\_console'`)
+	rows, _ = c.Query(ctx, `SELECT rolname FROM pg_roles WHERE rolname LIKE '%\_owner' OR rolname LIKE '%\_console' OR rolname LIKE '%\_console\_ro'`)
 	roles, _ := pgx.CollectRows(rows, pgx.RowTo[string])
 	for _, r := range roles {
 		_, _ = c.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{r}.Sanitize())

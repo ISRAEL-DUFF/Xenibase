@@ -13,6 +13,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AgentClientCert struct {
+	Serial     string
+	ServerName string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+	RevokedBy  *uuid.UUID
+}
+
+type AgentClientCertState struct {
+	ID         bool
+	Generation int64
+}
+
 type Alert struct {
 	ID                 uuid.UUID
 	Kind               string
@@ -32,6 +46,24 @@ type Alert struct {
 	DeliveryAttempts   int32
 	DeliveryError      *string
 	DeliveryLock       *time.Time
+	ClearCount         int32
+	ClearedSince       *time.Time
+}
+
+type AlertDelivery struct {
+	AlertID  uuid.UUID
+	Event    string
+	Channel  string
+	SentAt   *time.Time
+	Attempts int32
+	Error    *string
+	NextAt   *time.Time
+}
+
+type AlertGrace struct {
+	Key    string
+	Since  time.Time
+	SeenAt time.Time
 }
 
 type ApiRequestLog struct {
@@ -68,6 +100,7 @@ type ApiToken struct {
 	ExpiryNotifiedAt *time.Time
 	CreatedAt        time.Time
 	OauthClientID    *uuid.UUID
+	ParentID         *uuid.UUID
 }
 
 type AuditLog struct {
@@ -175,6 +208,7 @@ type Backup struct {
 	CopyStatus      *string
 	CopiedAt        *time.Time
 	CopyError       *string
+	VerifiedAt      *time.Time
 }
 
 type BackupKey struct {
@@ -225,11 +259,15 @@ type BillingAccount struct {
 }
 
 type BillingContact struct {
-	OrgID        uuid.UUID
-	Email        string
-	Name         *string
-	CreatedAt    time.Time
-	StatusEmails bool
+	OrgID           uuid.UUID
+	Email           string
+	Name            *string
+	CreatedAt       time.Time
+	StatusEmails    bool
+	VerifiedAt      *time.Time
+	VerifyTokenHash []byte
+	VerifyExpiresAt *time.Time
+	VerifySentAt    *time.Time
 }
 
 type BillingPlanChange struct {
@@ -283,6 +321,16 @@ type CapacityProposal struct {
 	DecidedAt        *time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+type CdnPurge struct {
+	ID        int64
+	ProjectID uuid.UUID
+	Prefixes  []string
+	Attempts  int32
+	LastError *string
+	NextAt    time.Time
+	CreatedAt time.Time
 }
 
 type CostAllocation struct {
@@ -356,6 +404,17 @@ type EdgeCpuSample struct {
 	Region     string
 	At         time.Time
 	CpuPercent float32
+}
+
+type EdgeCredential struct {
+	ID         uuid.UUID
+	Name       string
+	Region     string
+	SecretEnc  []byte
+	CreatedBy  *uuid.UUID
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	RevokedAt  *time.Time
 }
 
 type EdgeReport struct {
@@ -452,38 +511,40 @@ type IncidentUpdate struct {
 }
 
 type Instance struct {
-	ID                 uuid.UUID
-	NodeID             uuid.UUID
-	Kind               string
-	PgVersion          int32
-	Port               int32
-	ContainerID        *string
-	CpuLimit           pgtype.Numeric
-	MemLimitMb         *int32
-	VolumeGb           *int32
-	Status             string
-	CreatedAt          time.Time
-	AdminHost          *string
-	AdminPort          *int32
-	Host               *string
-	AdminSecret        []byte
-	Profile            *string
-	WalgPrefix         *string
-	Error              *string
-	DeletedAt          *time.Time
-	OrgID              *uuid.UUID
-	WalgTargetID       *uuid.UUID
-	WalgKeyID          *uuid.UUID
-	PgRelease          *string
-	PgReleaseAvailable *string
-	ReleaseCheckedAt   *time.Time
-	HaEnabled          bool
-	SyncReplication    bool
-	Patroni            bool
-	LeaderMember       *uuid.UUID
-	PatroniSecret      []byte
-	EtcdRegion         *string
-	PitrDays           int32
+	ID                  uuid.UUID
+	NodeID              uuid.UUID
+	Kind                string
+	PgVersion           int32
+	Port                int32
+	ContainerID         *string
+	CpuLimit            pgtype.Numeric
+	MemLimitMb          *int32
+	VolumeGb            *int32
+	Status              string
+	CreatedAt           time.Time
+	AdminHost           *string
+	AdminPort           *int32
+	Host                *string
+	AdminSecret         []byte
+	Profile             *string
+	WalgPrefix          *string
+	Error               *string
+	DeletedAt           *time.Time
+	OrgID               *uuid.UUID
+	WalgTargetID        *uuid.UUID
+	WalgKeyID           *uuid.UUID
+	PgRelease           *string
+	PgReleaseAvailable  *string
+	ReleaseCheckedAt    *time.Time
+	HaEnabled           bool
+	SyncReplication     bool
+	Patroni             bool
+	LeaderMember        *uuid.UUID
+	PatroniSecret       []byte
+	EtcdRegion          *string
+	PitrDays            int32
+	MaxConnections      int32
+	SwitchoverStartedAt *time.Time
 }
 
 type InstanceMember struct {
@@ -616,6 +677,13 @@ type LegalDocument struct {
 	PublishedAt time.Time
 }
 
+type LoginAddressFailure struct {
+	Email        string
+	FailedLogins int32
+	LockedUntil  *time.Time
+	UpdatedAt    time.Time
+}
+
 type MessageSend struct {
 	ID        int64
 	ProjectID uuid.UUID
@@ -708,6 +776,8 @@ type Node struct {
 	Keep                  bool
 	FailureDomain         *string
 	PlacementGroup        *string
+	RetiringAt            *time.Time
+	RetiringFrom          *string
 }
 
 type OauthClient struct {
@@ -753,6 +823,7 @@ type Operation struct {
 	CreatedBy  *uuid.UUID
 	CreatedAt  time.Time
 	FinishedAt *time.Time
+	Exclusive  bool
 }
 
 type OrgMember struct {
@@ -763,10 +834,13 @@ type OrgMember struct {
 }
 
 type OrgSupportPhone struct {
-	Phone     string
-	OrgID     uuid.UUID
-	AddedBy   *uuid.UUID
-	CreatedAt time.Time
+	Phone         string
+	OrgID         uuid.UUID
+	AddedBy       *uuid.UUID
+	CreatedAt     time.Time
+	VerifiedAt    *time.Time
+	Code          *string
+	CodeExpiresAt *time.Time
 }
 
 type Organization struct {
@@ -842,6 +916,8 @@ type PaymentEvent struct {
 	ProcessedAt     *time.Time
 	Outcome         *string
 	Error           *string
+	Attempts        int32
+	ClaimedAt       time.Time
 }
 
 type PaymentIntent struct {
@@ -908,6 +984,12 @@ type PoolerGeneration struct {
 	UpdatedAt  time.Time
 }
 
+type PoolerReading struct {
+	Source    string
+	Pools     json.RawMessage
+	SampledAt time.Time
+}
+
 type PrepaidDeduction struct {
 	OrgID       uuid.UUID
 	Month       pgtype.Date
@@ -971,6 +1053,9 @@ type Project struct {
 	ForwardRegion       *string
 	ForwardUntil        *time.Time
 	IntegratorRoles     []string
+	ManageRoles         bool
+	AllowedCidrs        []string
+	BranchCopyFiles     bool
 }
 
 type ProjectApiKey struct {
@@ -1028,6 +1113,13 @@ type ProjectMember struct {
 	CreatedAt time.Time
 }
 
+type ProjectOwnedLogin struct {
+	ProjectID     uuid.UUID
+	RoleName      string
+	ScramVerifier string
+	SyncedAt      time.Time
+}
+
 type ProjectService struct {
 	ProjectID               uuid.UUID
 	Ref                     string
@@ -1067,6 +1159,7 @@ type ProjectStorage struct {
 	MissingSample  []string
 	OrphansRemoved int64
 	ReconciledAt   *time.Time
+	TransformBytes int64
 }
 
 type QuerySnapshot struct {
@@ -1114,22 +1207,26 @@ type QuotaPlan struct {
 }
 
 type ReadReplica struct {
-	ID                uuid.UUID
-	ProjectID         uuid.UUID
-	InstanceMemberID  *uuid.UUID
-	NodeID            uuid.UUID
-	RegionID          *string
-	Size              string
-	Status            string
-	InRotation        bool
-	LagBytes          *int64
-	LagMs             *int64
-	Error             *string
-	DetachedProjectID *uuid.UUID
-	RotationChangedAt *time.Time
-	UpdatedAt         time.Time
-	CreatedAt         time.Time
-	DeletedAt         *time.Time
+	ID                 uuid.UUID
+	ProjectID          uuid.UUID
+	InstanceMemberID   *uuid.UUID
+	NodeID             uuid.UUID
+	RegionID           *string
+	Size               string
+	Status             string
+	InRotation         bool
+	LagBytes           *int64
+	LagMs              *int64
+	Error              *string
+	DetachedProjectID  *uuid.UUID
+	RotationChangedAt  *time.Time
+	UpdatedAt          time.Time
+	CreatedAt          time.Time
+	DeletedAt          *time.Time
+	HotStandbyFeedback bool
+	MaxStandbyDelayS   int32
+	SettingsAppliedAt  *time.Time
+	SettingsError      *string
 }
 
 type ReapedSession struct {
@@ -1141,6 +1238,8 @@ type ReapedSession struct {
 	DurationS int32
 	Query     *string
 	CreatedAt time.Time
+	Pid       *int32
+	StartedAt *time.Time
 }
 
 type RebalanceMove struct {
@@ -1184,6 +1283,14 @@ type Region struct {
 	Residency       bool
 	Status          string
 	CreatedAt       time.Time
+	ApiDomain       string
+	FilesTargetID   *uuid.UUID
+}
+
+type RegionEarlyAccess struct {
+	RegionID  string
+	OrgID     uuid.UUID
+	CreatedAt time.Time
 }
 
 type RetiredDatabase struct {
@@ -1274,6 +1381,11 @@ type StorageCleanup struct {
 	CreatedAt time.Time
 }
 
+type StorageReconciler struct {
+	ID        bool
+	LastRunAt time.Time
+}
+
 type StorageTarget struct {
 	ID             uuid.UUID
 	Name           string
@@ -1309,22 +1421,23 @@ type TermsVersion struct {
 }
 
 type Ticket struct {
-	ID              uuid.UUID
-	Number          int64
-	OrgID           *uuid.UUID
-	Requester       string
-	RequesterName   *string
-	RequesterUserID *uuid.UUID
-	Channel         string
-	Subject         string
-	Status          string
-	Priority        string
-	Plan            *string
-	Assignee        *uuid.UUID
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	FirstResponseAt *time.Time
-	RespondBy       *time.Time
+	ID               uuid.UUID
+	Number           int64
+	OrgID            *uuid.UUID
+	Requester        string
+	RequesterName    *string
+	RequesterUserID  *uuid.UUID
+	Channel          string
+	Subject          string
+	Status           string
+	Priority         string
+	Plan             *string
+	Assignee         *uuid.UUID
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	FirstResponseAt  *time.Time
+	RespondBy        *time.Time
+	UnverifiedSender bool
 }
 
 type TicketMessage struct {
@@ -1350,22 +1463,23 @@ type UsageRecord struct {
 }
 
 type User struct {
-	ID              uuid.UUID
-	Email           string
-	PasswordHash    string
-	TotpSecret      []byte
-	PlatformRole    string
-	CreatedAt       time.Time
-	DisabledAt      *time.Time
-	FailedLogins    int32
-	LockedUntil     *time.Time
-	TotpLastStep    int64
-	Name            *string
-	EmailVerifiedAt *time.Time
-	ApprovedAt      *time.Time
-	RecoveryCodes   []byte
-	LastActiveAt    *time.Time
-	SignupIp        *netip.Addr
+	ID                uuid.UUID
+	Email             string
+	PasswordHash      string
+	TotpSecret        []byte
+	PlatformRole      string
+	CreatedAt         time.Time
+	DisabledAt        *time.Time
+	FailedLogins      int32
+	LockedUntil       *time.Time
+	TotpLastStep      int64
+	Name              *string
+	EmailVerifiedAt   *time.Time
+	ApprovedAt        *time.Time
+	RecoveryCodes     []byte
+	LastActiveAt      *time.Time
+	SignupIp          *netip.Addr
+	LockoutNotifiedAt *time.Time
 }
 
 type VirtualAccount struct {

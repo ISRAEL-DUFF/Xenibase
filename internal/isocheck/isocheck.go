@@ -1,9 +1,9 @@
 // Package isocheck verifies the shared tier's tenant isolation checklist
 // (spec §7.1) against a live cluster: its configuration, every project on
 // it, and two throwaway tenants that try to reach each other. CI runs it
-// against the test cluster; xenibase-server runs it weekly on every shared
-// cluster as the isolation_check operation, and a failed run raises an
-// alert.
+// against the test cluster; xenibase-server runs it every 24 hours (Every)
+// on every shared cluster as the isolation_check operation, and a failed
+// run raises an alert.
 package isocheck
 
 import (
@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/israel-duff/xenibase/internal/logical"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
 )
@@ -146,13 +147,37 @@ func maskBits(m netip.Addr) int {
 // Tenant is a project database and its roles as the audit sees them.
 type Tenant struct {
 	DB, Role string
+	// Others are further roles of the project's that may hold its
+	// database's grants: a V1 owner role in its grace period.
+	Others []string
 	// LoginsOff: the project's organisation is suspended or its storage is
 	// hard-locked, so none of its logins may log in (V2 §10.4, §10.8).
 	LoginsOff bool
 }
 
-// Roles audits project roles (with their console and member logins): no dangerous
-// attributes and no membership in predefined or privileged roles.
+// own reports whether role may hold grants on t's database: the owner,
+// the console and read-only roles, a member's login, a backend-service
+// login, the SLA probe's login, one of Others, or the login of a move in
+// flight (Xenibase's own).
+func (t Tenant) own(role string) bool {
+	if role == t.Role || role == provision.ConsoleRole(t.DB) || role == provision.ConsoleReadOnlyRole(t.DB) ||
+		role == provision.ReadOnlyRole(t.DB) || role == store.ProbeRole(t.DB) ||
+		strings.HasPrefix(role, t.DB+"_u_") || strings.HasPrefix(role, logical.Prefix) {
+		return true
+	}
+	for _, r := range append(store.ServiceRoles(t.DB), t.Others...) {
+		if role == r {
+			return true
+		}
+	}
+	return false
+}
+
+// Roles audits project roles (with their console, member and
+// backend-service logins): no dangerous attributes, limits on every login,
+// logins off while the project is suspended or hard-locked, no membership
+// in predefined or privileged roles, and CONNECT and TEMPORARY on the
+// project's database held by its own roles alone.
 func Roles(ctx context.Context, admin *pgx.Conn, tenants []Tenant) ([]Finding, error) {
 	var out []Finding
 	for _, t := range tenants {
@@ -188,7 +213,40 @@ func Roles(ctx context.Context, admin *pgx.Conn, tenants []Tenant) ([]Finding, e
 		for _, role := range extra {
 			logins[role] = role != provision.ReadOnlyRole(t.DB)
 		}
-		for _, role := range append([]string{t.Role, provision.ConsoleRole(t.DB)}, extra...) {
+		// The backend services' logins (V4 §2.3), which tenant SQL runs as
+		// on the shared tier: each a member of nothing, so a RESET ROLE or
+		// SET ROLE in tenant code leads nowhere.
+		services := store.ServiceRoles(t.DB)
+		for _, role := range services {
+			logins[role] = true
+			rows, err := admin.Query(ctx, `SELECT g.rolname FROM pg_auth_members m
+				JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member
+				WHERE u.rolname = $1 ORDER BY 1`, role)
+			if err != nil {
+				return nil, err
+			}
+			groups, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				return nil, err
+			}
+			if len(groups) > 0 {
+				out = append(out, Finding{"service logins", fmt.Sprintf("%s is granted %s; the backend services' logins hold no roles", role, strings.Join(groups, ", "))})
+			}
+		}
+		// The read-only console login may become the read-only role and
+		// nothing else: membership of the owner would let a read-only
+		// session switch to it and read past RLS.
+		var roOwner bool
+		if err := admin.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles c, pg_roles o
+			WHERE c.rolname = $1 AND o.rolname = $2 AND pg_has_role(c.oid, o.oid, 'MEMBER'))`,
+			provision.ConsoleReadOnlyRole(t.DB), t.Role).Scan(&roOwner); err != nil {
+			return nil, err
+		}
+		if roOwner {
+			out = append(out, Finding{"console logins", fmt.Sprintf("%s can become the owner %s", provision.ConsoleReadOnlyRole(t.DB), t.Role)})
+		}
+		roles := append([]string{t.Role, provision.ConsoleRole(t.DB), provision.ConsoleReadOnlyRole(t.DB)}, extra...)
+		for _, role := range append(roles, services...) {
 			var exists, super, createdb, createrole, repl, bypass, canLogin bool
 			var connLimit int
 			err := admin.QueryRow(ctx, `SELECT true, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolcanlogin, rolconnlimit
@@ -204,6 +262,8 @@ func Roles(ctx context.Context, admin *pgx.Conn, tenants []Tenant) ([]Finding, e
 				return nil, err
 			}
 			var bad []string
+			// The service role bypasses row-level security by design.
+			bypass = bypass && role != store.ServiceRole(t.DB)
 			for name, on := range map[string]bool{"SUPERUSER": super, "CREATEDB": createdb, "CREATEROLE": createrole, "REPLICATION": repl, "BYPASSRLS": bypass} {
 				if on {
 					bad = append(bad, name)
@@ -246,14 +306,48 @@ func Roles(ctx context.Context, admin *pgx.Conn, tenants []Tenant) ([]Finding, e
 				out = append(out, Finding{"role memberships", fmt.Sprintf("%s is a member of %s", role, strings.Join(member, ", "))})
 			}
 		}
-		var connect, temp bool
-		if err := admin.QueryRow(ctx, `SELECT has_database_privilege('public', $1, 'CONNECT'), has_database_privilege('public', $1, 'TEMPORARY')`, t.DB).
-			Scan(&connect, &temp); err != nil {
+		fs, err := databaseGrants(ctx, admin, t)
+		if err != nil {
 			return nil, err
 		}
-		if connect || temp {
-			out = append(out, Finding{"database grants", fmt.Sprintf("PUBLIC has CONNECT=%v TEMPORARY=%v on %s", connect, temp, t.DB)})
+		out = append(out, fs...)
+	}
+	return out, nil
+}
+
+// databaseGrants checks every grantee of CONNECT and TEMPORARY on t's
+// database (a NULL ACL is the default, which grants PUBLIC both): each
+// must be one of t's roles, the database's owner or a superuser.
+func databaseGrants(ctx context.Context, admin *pgx.Conn, t Tenant) ([]Finding, error) {
+	rows, err := admin.Query(ctx, `SELECT coalesce(r.rolname, 'PUBLIC'), a.privilege_type
+		FROM pg_database d
+		CROSS JOIN LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
+		LEFT JOIN pg_roles r ON r.oid = a.grantee
+		WHERE d.datname = $1 AND a.privilege_type IN ('CONNECT', 'TEMPORARY')
+		  AND a.grantee <> d.datdba AND NOT coalesce(r.rolsuper, false)
+		ORDER BY 1, 2`, t.DB)
+	if err != nil {
+		return nil, err
+	}
+	type grant struct{ Grantee, Privilege string }
+	grants, err := pgx.CollectRows(rows, pgx.RowToStructByPos[grant])
+	if err != nil {
+		return nil, err
+	}
+	foreign := map[string][]string{}
+	var names []string
+	for _, g := range grants {
+		if g.Grantee != "PUBLIC" && t.own(g.Grantee) {
+			continue
 		}
+		if foreign[g.Grantee] == nil {
+			names = append(names, g.Grantee)
+		}
+		foreign[g.Grantee] = append(foreign[g.Grantee], g.Privilege)
+	}
+	var out []Finding
+	for _, n := range names {
+		out = append(out, Finding{"database grants", fmt.Sprintf("%s has %s on %s, which is not its project's", n, strings.Join(foreign[n], " and "), t.DB)})
 	}
 	return out, nil
 }
@@ -271,7 +365,22 @@ func Database(ctx context.Context, conn *pgx.Conn) ([]Finding, error) {
 	if create {
 		out = append(out, Finding{"schema public", "PUBLIC may CREATE in " + db})
 	}
-	rows, err := conn.Query(ctx, `SELECT extname FROM pg_extension WHERE extname = ANY($1)
+	// Other sessions' and databases' activity (V2 §10.2).
+	rows, err := conn.Query(ctx, `SELECT v FROM unnest($1::text[]) v
+		WHERE has_table_privilege('public', v, 'SELECT')
+		UNION ALL SELECT f FROM (`+provision.ActivityFunctions+`) fns(f)
+		WHERE has_function_privilege('public', 'pg_catalog.' || f, 'EXECUTE')`, provision.ActivityViews)
+	if err != nil {
+		return nil, err
+	}
+	readable, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	if len(readable) > 0 {
+		out = append(out, Finding{"activity privacy", fmt.Sprintf("PUBLIC may read other sessions' or databases' activity in %s: %s", db, strings.Join(readable, ", "))})
+	}
+	rows, err = conn.Query(ctx, `SELECT extname FROM pg_extension WHERE extname = ANY($1)
 		UNION SELECT lanname FROM pg_language WHERE NOT lanpltrusted AND lanname NOT IN ('internal', 'c')`, EscapeProne)
 	if err != nil {
 		return nil, err
@@ -283,7 +392,56 @@ func Database(ctx context.Context, conn *pgx.Conn) ([]Finding, error) {
 	if len(found) > 0 {
 		out = append(out, Finding{"escape-prone extensions", fmt.Sprintf("%s has %s installed", db, strings.Join(found, ", "))})
 	}
-	return out, nil
+	fs, err := securityDefiners(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, fs...), nil
+}
+
+// securityDefiners is V2 §10.4's "no SECURITY DEFINER functions owned by
+// anything other than tenant roles": a function that runs as a role the
+// tenant is not (a superuser, another project's role) is a way into that
+// role. Tenant roles are the database's owner and the roles named after
+// the database. Xenibase's own functions in the xb_* schemas and xenibase
+// (the backend services', the webhook trigger's) are allowed if their
+// search_path is pinned; functions an extension installed are the
+// extension's.
+func securityDefiners(ctx context.Context, conn *pgx.Conn) ([]Finding, error) {
+	rows, err := conn.Query(ctx, `SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+		r.rolname, n.nspname LIKE 'xb\_%' OR n.nspname = 'xenibase',
+		EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search\_path=%')
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		JOIN pg_roles r ON r.oid = p.proowner
+		JOIN pg_database d ON d.datname = current_database()
+		WHERE p.prosecdef AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_proc'::regclass AND e.objid = p.oid AND e.deptype = 'e')
+		  AND (r.rolsuper OR NOT (r.oid = d.datdba OR starts_with(r.rolname, d.datname || '_')))
+		ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	type fn struct {
+		Name, Owner      string
+		Platform, Pinned bool
+	}
+	fns, err := pgx.CollectRows(rows, pgx.RowToStructByPos[fn])
+	if err != nil {
+		return nil, err
+	}
+	var bad []string
+	for _, f := range fns {
+		if f.Platform && f.Pinned {
+			continue
+		}
+		bad = append(bad, f.Name+" (owner "+f.Owner+")")
+	}
+	if len(bad) == 0 {
+		return nil, nil
+	}
+	return []Finding{{"security definer", fmt.Sprintf("%s has SECURITY DEFINER functions owned by roles other than its tenant's: %s",
+		conn.Config().Database, strings.Join(bad, ", "))}}, nil
 }
 
 // connectAs opens a connection as a tenant at the instance's address.
@@ -337,6 +495,7 @@ func Probes(ctx context.Context, ps *provision.Service, a, b store.Project, aPas
 		{"grant itself B's role", "GRANT " + pgx.Identifier{b.OwnerRole}.Sanitize() + " TO " + pgx.Identifier{a.OwnerRole}.Sanitize()},
 		{"change B's role", "ALTER ROLE " + pgx.Identifier{b.OwnerRole}.Sanitize() + " PASSWORD 'x'"},
 		{"drop B's database", "DROP DATABASE " + pgx.Identifier{b.DbName}.Sanitize()},
+		{"grant itself CONNECT on B's database", "GRANT CONNECT, TEMPORARY ON DATABASE " + pgx.Identifier{b.DbName}.Sanitize() + " TO " + pgx.Identifier{a.OwnerRole}.Sanitize()},
 		{"end B's session", fmt.Sprintf(`SELECT CASE WHEN pg_terminate_backend(%d) THEN 1 ELSE 1/0 END`, bPID)},
 		{"create a role", `CREATE ROLE xenibase_isocheck_escape LOGIN`},
 		{"create a database", `CREATE DATABASE xenibase_isocheck_escape`},
@@ -366,6 +525,26 @@ func Probes(ctx context.Context, ps *provision.Service, a, b store.Project, aPas
 		fail("read other sessions through pg_stat_get_activity")
 	} else if !isRefusal(err) {
 		return nil, err
+	}
+	// Nor B's database's activity, or its backends' database and role.
+	for _, at := range []struct{ what, sql string }{
+		{"read pg_stat_database", `SELECT count(*) FROM pg_stat_database`},
+		{"read pg_stat_database_conflicts", `SELECT count(*) FROM pg_stat_database_conflicts`},
+		{"read other databases' commits", `SELECT pg_stat_get_db_xact_commit(oid) FROM pg_database LIMIT 1`},
+		{"read other backends' databases", `SELECT pg_stat_get_backend_dbid(1)`},
+		{"read other backends' roles", `SELECT pg_stat_get_backend_userid(1)`},
+		// pg_locks names every backend's database and relations.
+		{"read pg_locks", `SELECT count(*) FROM pg_locks`},
+		{"read other backends' locks", `SELECT count(*) FROM pg_lock_status()`},
+		{"read which backends block another", fmt.Sprintf(`SELECT pg_blocking_pids(%d)`, bPID)},
+		{"read pg_prepared_xacts", `SELECT count(*) FROM pg_prepared_xacts`},
+	} {
+		var n any
+		if err := ca.QueryRow(ctx, at.sql).Scan(&n); err == nil {
+			fail(at.what)
+		} else if !isRefusal(err) {
+			return nil, fmt.Errorf("%s: unexpected error: %w", at.what, err)
+		}
 	}
 	// Quota bypass attempts (V2 §10.4).
 	for _, at := range []struct{ what, sql string }{
@@ -494,6 +673,9 @@ func Instance(ctx context.Context, db store.DBTX, ps *provision.Service, inst st
 	var v1Roles []string
 	for i, p := range ps2 {
 		tenants[i] = Tenant{DB: p.DbName, Role: p.OwnerRole, LoginsOff: p.OrgStatus != "active" || p.StorageState == "hard"}
+		if p.LegacyOwnerRole != nil {
+			tenants[i].Others = append(tenants[i].Others, *p.LegacyOwnerRole)
+		}
 		// V1 projects keep their owner role until they switch (V2 §10.2).
 		if p.OwnerRole != provision.OwnerRoleName(p.DbName) {
 			v1Roles = append(v1Roles, p.OwnerRole)

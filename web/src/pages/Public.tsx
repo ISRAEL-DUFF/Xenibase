@@ -159,6 +159,53 @@ export function VerifyEmailPage() {
   );
 }
 
+/** Confirms a billing contact from the emailed link. It asks first, with a
+ * button, so a mail scanner opening the link confirms nothing. */
+export function ConfirmContactPage() {
+  const { token } = useSearch({ from: "/confirm-contact" });
+  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState<{ org?: string; err?: string }>({});
+  // The session query hands out the CSRF token the write needs.
+  const { isSuccess: ready } = useQuery(sessionQuery);
+  const confirm = async () => {
+    if (!token) return;
+    setBusy(true);
+    try {
+      const r = await api.confirmBillingContact(token);
+      setState({ org: r.org_name });
+    } catch (e) {
+      setState({ err: errorMessage(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <AuthShell>
+      {!token && <Alert>This link is missing its token.</Alert>}
+      {state.err && <Alert>{state.err}</Alert>}
+      {token && state.org === undefined && (
+        <div className="flex flex-col gap-3">
+          <h1 className="text-lg font-semibold">Confirm billing contact</h1>
+          <p className="text-sm text-muted">
+            Once you confirm, this address gets the organisation&apos;s billing
+            email, and email you send to Xenibase support opens tickets its
+            owners and admins can read. Confirm only if you work with them.
+          </p>
+          <Button variant="primary" busy={busy} disabled={!ready} onClick={() => void confirm()} data-testid="confirm-contact">
+            Confirm
+          </Button>
+        </div>
+      )}
+      {state.org !== undefined && (
+        <div className="flex flex-col gap-3" data-testid="contact-confirmed">
+          <h1 className="text-lg font-semibold">Confirmed</h1>
+          <p className="text-sm text-muted">You&apos;re a billing contact for {state.org}.</p>
+        </div>
+      )}
+    </AuthShell>
+  );
+}
+
 /** Asks for a reset link, or (with ?token=) sets the new password. */
 export function ResetPasswordPage() {
   const { token } = useSearch({ from: "/reset-password" });

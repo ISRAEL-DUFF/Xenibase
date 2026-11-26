@@ -16,6 +16,7 @@ import {
   Alert,
   Badge,
   Button,
+  Checkbox,
   CopyButton,
   Field,
   Input,
@@ -46,6 +47,70 @@ function lag(r: ReadReplica): string {
   return r.lag_bytes ? `${t} (${formatBytes(r.lag_bytes)})` : t;
 }
 
+type Standby = { feedback: boolean; delay: string };
+
+const defaultStandby: Standby = { feedback: false, delay: "30" };
+
+function standbyOf(r: ReadReplica): Standby {
+  return {
+    feedback: r.hot_standby_feedback,
+    delay: String(r.max_standby_delay_seconds),
+  };
+}
+
+function standbyDelay(s: Standby): number | null {
+  const n = Number(s.delay);
+  return Number.isInteger(n) && n >= 0 && n <= 900 ? n : null;
+}
+
+/** A replica's standby settings: hot_standby_feedback and how long replay
+ * waits for a query that conflicts with it. */
+function StandbyFields({
+  value,
+  onChange,
+}: {
+  value: Standby;
+  onChange: (s: Standby) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <label className="flex items-start gap-2">
+        <Checkbox
+          checked={value.feedback}
+          onCheckedChange={(c) => onChange({ ...value, feedback: c === true })}
+          aria-label="Hot standby feedback"
+          data-testid="replica-feedback"
+          className="mt-0.5"
+        />
+        <span>
+          <span className="font-medium">Hot standby feedback</span>
+          <span className="block text-muted">
+            The primary keeps the rows this replica's queries still read, so
+            long queries here aren't cancelled. Dead rows stay longer on the
+            primary, so a very long query here can bloat its tables.
+          </span>
+        </span>
+      </label>
+      <Field
+        label="Wait for conflicting queries (seconds)"
+        hint="How long replay waits for a query that conflicts with it before cancelling the query: 0 to 900, Postgres's default is 30. Longer lets the replica fall further behind meanwhile."
+      >
+        {(id) => (
+          <Input
+            id={id}
+            type="number"
+            min={0}
+            max={900}
+            value={value.delay}
+            onChange={(e) => onChange({ ...value, delay: e.target.value })}
+            data-testid="replica-delay"
+          />
+        )}
+      </Field>
+    </div>
+  );
+}
+
 /**
  * Read replicas of a dedicated project (V4 §7): streaming copies on other
  * nodes, never promoted, that the pooler's read-only route balances reads
@@ -68,6 +133,9 @@ export function ReplicasCard({ p }: { p: Project }) {
   const [open, setOpen] = useState(false);
   const [nodeId, setNodeId] = useState("");
   const [detaching, setDetaching] = useState<ReadReplica | null>(null);
+  const [standby, setStandby] = useState<Standby>(defaultStandby);
+  const [editing, setEditing] = useState<ReadReplica | null>(null);
+  const [edit, setEdit] = useState<Standby>(defaultStandby);
   const [name, setName] = useState("");
   const [created, setCreated] = useState<ProjectCredentials | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -98,6 +166,25 @@ export function ReplicasCard({ p }: { p: Project }) {
       setDetaching(null);
       setCreated(c);
       await qc.invalidateQueries({ queryKey: ["projects"] });
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveSettings = async () => {
+    const delay = standbyDelay(edit);
+    if (!editing || delay == null) return;
+    setBusy("settings");
+    setErr(null);
+    try {
+      await api.updateReplica(p.id, editing.id, {
+        hot_standby_feedback: edit.feedback,
+        max_standby_delay_seconds: delay,
+      });
+      setEditing(null);
+      await qc.invalidateQueries({ queryKey: ["replicas", p.id] });
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
@@ -164,7 +251,15 @@ export function ReplicasCard({ p }: { p: Project }) {
         )}
         {reps.length > 0 && (
           <Table
-            head={["Node", "Region", "Status", "In rotation", "Behind", ""]}
+            head={[
+              "Node",
+              "Region",
+              "Status",
+              "In rotation",
+              "Behind",
+              "Standby",
+              "",
+            ]}
           >
             {reps.map((r) => (
               <tr key={r.id} data-testid="replica" data-status={r.status}>
@@ -182,8 +277,30 @@ export function ReplicasCard({ p }: { p: Project }) {
                   )}
                 </td>
                 <td className="px-3 py-2">{lag(r)}</td>
+                <td className="px-3 py-2" data-testid="replica-standby">
+                  {r.hot_standby_feedback ? "Feedback on" : "Feedback off"}
+                  <span className="block text-xs text-muted">
+                    waits {r.max_standby_delay_seconds} s
+                  </span>
+                  {r.settings_error && (
+                    <span className="block text-xs text-warn-text">
+                      not applied yet: {r.settings_error}
+                    </span>
+                  )}
+                </td>
                 <td className="px-3 py-2 text-right">
                   <div className="flex justify-end gap-2">
+                    <Button
+                      onClick={() => {
+                        setEdit(standbyOf(r));
+                        setEditing(r);
+                      }}
+                      disabled={
+                        r.status === "deleting" || r.status === "detaching"
+                      }
+                    >
+                      Settings…
+                    </Button>
                     <Button
                       onClick={() => {
                         setName(`${p.name} replica`);
@@ -227,9 +344,14 @@ export function ReplicasCard({ p }: { p: Project }) {
             <Button
               variant="primary"
               busy={busy === "create"}
+              disabled={standbyDelay(standby) == null}
               onClick={() =>
                 run("create", () =>
-                  api.createReplica(p.id, { node_id: nodeId || undefined }),
+                  api.createReplica(p.id, {
+                    node_id: nodeId || undefined,
+                    hot_standby_feedback: standby.feedback,
+                    max_standby_delay_seconds: standbyDelay(standby) ?? 30,
+                  }),
                 )
               }
             >
@@ -262,6 +384,7 @@ export function ReplicasCard({ p }: { p: Project }) {
               </Select>
             )}
           </Field>
+          <StandbyFields value={standby} onChange={setStandby} />
           <ol className="list-decimal pl-5 text-muted">
             <li>
               If the project isn't under Patroni yet, the database restarts once
@@ -289,6 +412,32 @@ export function ReplicasCard({ p }: { p: Project }) {
                 : null
             }
           />
+        </div>
+      </SidePanel>
+      <SidePanel
+        open={!!editing}
+        onOpenChange={(o) => !o && setEditing(null)}
+        title="Replica settings"
+        footer={
+          <>
+            <Button onClick={() => setEditing(null)}>Cancel</Button>
+            <Button
+              variant="primary"
+              busy={busy === "settings"}
+              disabled={standbyDelay(edit) == null}
+              onClick={saveSettings}
+            >
+              Save
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4 text-sm">
+          <p className="text-muted">
+            For the replica on {editing?.node_name} only. Applied at once with a
+            configuration reload: no restart, and connections stay open.
+          </p>
+          <StandbyFields value={edit} onChange={setEdit} />
         </div>
       </SidePanel>
       <SidePanel

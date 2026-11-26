@@ -19,7 +19,7 @@ const maxReapedQuery = 1000
 // Reaped is one session the reaper acted on.
 type Reaped struct {
 	ProjectID uuid.UUID
-	Kind      string // statement | idle_in_transaction
+	Kind      string // statement | statement_terminated | idle_in_transaction
 	Role      string
 	Duration  time.Duration
 }
@@ -27,8 +27,11 @@ type Reaped struct {
 // Reap cancels tenant statements running longer than the hard limit and
 // ends sessions idle in a transaction too long, on every shared cluster
 // (V2 §10.4): statement_timeout is user-settable, so it cannot be the only
-// guard. Dedicated instances are exempt. Durations are measured against
-// the service clock.
+// guard. PL/pgSQL can trap query_canceled, so a statement it already
+// cancelled (the same pid and query_start, from reaped_sessions, so any
+// server's pass counts) that is still running is ended with its session.
+// Dedicated instances are exempt. Durations are measured against the
+// service clock.
 func (s *Service) Reap(ctx context.Context) ([]Reaped, error) {
 	rows, err := store.New(s.db).SharedInstanceProjects(ctx)
 	if err != nil {
@@ -50,7 +53,12 @@ func (s *Service) Reap(ctx context.Context) ([]Reaped, error) {
 		for n := range dbs {
 			names = append(names, n)
 		}
-		got, err := s.reapInstance(ctx, inst, names, now)
+		cancelled := func(db string, pid int32, since time.Time) (bool, error) {
+			p := dbs[db]
+			return store.New(s.db).ReapedStatementCancelled(ctx, store.ReapedStatementCancelledParams{
+				ProjectID: p.id, OrgID: p.org, Pid: &pid, StartedAt: &since})
+		}
+		got, err := s.reapInstance(ctx, inst, names, now, cancelled)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("instance %s: %w", inst, err))
 		}
@@ -64,6 +72,7 @@ func (s *Service) Reap(ctx context.Context) ([]Reaped, error) {
 			}
 			if err := store.New(s.db).InsertReapedSession(ctx, store.InsertReapedSessionParams{
 				ProjectID: p.id, OrgID: p.org, Kind: g.kind, RoleName: g.role, DurationS: int32(g.dur.Seconds()), Query: query,
+				Pid: &g.pid, StartedAt: &g.since,
 			}); err != nil {
 				errs = append(errs, err)
 			}
@@ -76,9 +85,14 @@ func (s *Service) Reap(ctx context.Context) ([]Reaped, error) {
 type reapedRow struct {
 	db, role, kind, query string
 	dur                   time.Duration
+	pid                   int32
+	since                 time.Time
 }
 
-func (s *Service) reapInstance(ctx context.Context, inst uuid.UUID, dbs []string, now time.Time) ([]reapedRow, error) {
+// reapInstance acts on one cluster. cancelled reports whether a statement
+// (database, pid, query_start) was cancelled on an earlier pass.
+func (s *Service) reapInstance(ctx context.Context, inst uuid.UUID, dbs []string, now time.Time,
+	cancelled func(db string, pid int32, since time.Time) (bool, error)) ([]reapedRow, error) {
 	conn, err := s.projects.AdminConn(ctx, inst, "postgres")
 	if err != nil {
 		return nil, err
@@ -97,15 +111,10 @@ func (s *Service) reapInstance(ctx context.Context, inst uuid.UUID, dbs []string
 	if err != nil {
 		return nil, err
 	}
-	type cand struct {
-		pid   int32
-		row   reapedRow
-		since time.Time
-	}
-	cands, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (cand, error) {
-		var c cand
+	cands, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (reapedRow, error) {
+		var c reapedRow
 		var state string
-		err := r.Scan(&c.pid, &c.row.db, &c.row.role, &state, &c.row.query, &c.since, &c.row.kind)
+		err := r.Scan(&c.pid, &c.db, &c.role, &state, &c.query, &c.since, &c.kind)
 		return c, err
 	})
 	if err != nil {
@@ -115,8 +124,19 @@ func (s *Service) reapInstance(ctx context.Context, inst uuid.UUID, dbs []string
 	var errs []error
 	for _, c := range cands {
 		fn := "pg_cancel_backend"
-		if c.row.kind == "idle_in_transaction" {
+		if c.kind == "idle_in_transaction" {
 			fn = "pg_terminate_backend"
+		} else {
+			// Cancelled before and still running the same statement: it
+			// caught the cancel, so end the session.
+			again, err := cancelled(c.db, c.pid, c.since)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if again {
+				fn, c.kind = "pg_terminate_backend", "statement_terminated"
+			}
 		}
 		var ok bool
 		if err := conn.QueryRow(ctx, "SELECT "+fn+"($1)", c.pid).Scan(&ok); err != nil {
@@ -126,11 +146,11 @@ func (s *Service) reapInstance(ctx context.Context, inst uuid.UUID, dbs []string
 		if !ok {
 			continue // already gone
 		}
-		c.row.dur = now.Sub(c.since)
-		if !utf8.ValidString(c.row.query) {
-			c.row.query = ""
+		c.dur = now.Sub(c.since)
+		if !utf8.ValidString(c.query) {
+			c.query = ""
 		}
-		out = append(out, c.row)
+		out = append(out, c)
 	}
 	return out, errors.Join(errs...)
 }

@@ -42,6 +42,7 @@ func toAPITicket(t store.Ticket, orgName *string, messages *int64) gen.Ticket {
 		Requester: t.Requester, RequesterName: t.RequesterName, Channel: gen.TicketChannel(t.Channel), Subject: t.Subject,
 		Status: gen.TicketStatus(t.Status), Priority: gen.TicketPriority(t.Priority), Plan: t.Plan, Assignee: t.Assignee,
 		Messages: messages, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, FirstResponseAt: t.FirstResponseAt, RespondBy: t.RespondBy,
+		UnverifiedSender: t.UnverifiedSender,
 	}
 }
 
@@ -172,13 +173,27 @@ func (s *Server) ListSupportPhones(w http.ResponseWriter, r *http.Request, org g
 	}
 	o := out{Available: s.support != nil && s.support.WhatsAppOn() && support.WhatsAppPlan(plan), Items: []gen.SupportPhone{}}
 	for _, p := range rows {
-		o.Items = append(o.Items, gen.SupportPhone{Phone: p.Phone, CreatedAt: p.CreatedAt})
+		o.Items = append(o.Items, toAPIPhone(p))
 	}
 	writeJSON(w, http.StatusOK, o)
 }
 
-// AddSupportPhone implements POST /api/v1/orgs/{org}/support/phones.
+func toAPIPhone(p store.OrgSupportPhone) gen.SupportPhone {
+	out := gen.SupportPhone{Phone: p.Phone, CreatedAt: p.CreatedAt, Verified: p.VerifiedAt != nil}
+	if p.VerifiedAt == nil && p.Code != nil {
+		code := support.PhoneCode(*p.Code)
+		out.Code, out.CodeExpiresAt = &code, p.CodeExpiresAt
+	}
+	return out
+}
+
+// AddSupportPhone implements POST /api/v1/orgs/{org}/support/phones. The
+// number stays pending until its code is sent from it.
 func (s *Server) AddSupportPhone(w http.ResponseWriter, r *http.Request, org gen.OrgID) {
+	svc := s.supportSvc(w)
+	if svc == nil {
+		return
+	}
 	var req struct {
 		Phone string `json:"phone"`
 	}
@@ -201,16 +216,16 @@ func (s *Server) AddSupportPhone(w http.ResponseWriter, r *http.Request, org gen
 		return
 	}
 	auditFrom(r.Context()).set("phone", phone)
-	p, err := q.AddOrgSupportPhone(r.Context(), store.AddOrgSupportPhoneParams{Phone: phone, OrgID: org, AddedBy: userID(r.Context())})
-	if err != nil {
-		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, "conflict", "that number is registered already")
-			return
-		}
+	p, err := svc.RegisterPhone(r.Context(), org, userID(r.Context()), phone)
+	switch {
+	case errors.Is(err, support.ErrPhoneRegistered), errors.Is(err, support.ErrPhoneTaken):
+		writeError(w, http.StatusConflict, "conflict", err.Error())
+		return
+	case err != nil:
 		s.internalError(w, "phone", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, gen.SupportPhone{Phone: p.Phone, CreatedAt: p.CreatedAt})
+	writeJSON(w, http.StatusCreated, toAPIPhone(p))
 }
 
 // RemoveSupportPhone implements DELETE /api/v1/orgs/{org}/support/phones/{phone}.
@@ -252,7 +267,7 @@ func (s *Server) SupportInboundEmail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	e, err := parseInboundEmail(raw)
+	e, err := parseInboundEmail(raw, svc.AuthservID())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -270,8 +285,11 @@ func (s *Server) SupportInboundEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"ticket": support.Ref(t.Number)})
 }
 
-// parseInboundEmail reads this API's own fields or Postmark's inbound JSON.
-func parseInboundEmail(raw []byte) (support.Email, error) {
+// parseInboundEmail reads this API's own fields or Postmark's inbound JSON,
+// and decides from the provider's verdicts (Authentication-Results,
+// Received-SPF, X-Spam-Tests, or this API's authentication_results)
+// whether the sender is authenticated.
+func parseInboundEmail(raw []byte, authservID string) (support.Email, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return support.Email{}, err
@@ -303,6 +321,15 @@ func parseInboundEmail(raw []byte) (support.Email, error) {
 	var refs []string
 	_ = json.Unmarshal(m["references"], &refs)
 	e.References = refs
+	var ah support.AuthHeaders
+	// authentication_results: the provider's Authentication-Results
+	// value, or several.
+	var one string
+	if json.Unmarshal(m["authentication_results"], &one) == nil && one != "" {
+		ah.AuthenticationResults = []string{one}
+	} else {
+		_ = json.Unmarshal(m["authentication_results"], &ah.AuthenticationResults)
+	}
 	var headers []struct{ Name, Value string }
 	if json.Unmarshal(m["Headers"], &headers) == nil {
 		for _, h := range headers {
@@ -313,9 +340,20 @@ func parseInboundEmail(raw []byte) (support.Email, error) {
 				e.InReplyTo = h.Value
 			case "references":
 				e.References = append(e.References, strings.Fields(h.Value)...)
+			case "authentication-results":
+				// A sender can write this header too: it counts only when
+				// it names the provider (XENIBASE_SUPPORT_AUTHSERV_ID).
+				if authservID != "" {
+					ah.AuthenticationResults = append(ah.AuthenticationResults, h.Value)
+				}
+			case "received-spf":
+				ah.ReceivedSPF = append(ah.ReceivedSPF, h.Value)
+			case "x-spam-tests":
+				ah.SpamTests = append(ah.SpamTests, h.Value)
 			}
 		}
 	}
+	e.Authenticated = support.SenderAuthenticated(e.From, ah, authservID)
 	if e.MessageID != "" && !strings.HasPrefix(e.MessageID, "<") {
 		e.MessageID = "<" + e.MessageID + ">"
 	}
@@ -409,6 +447,7 @@ func (s *Server) AdminListTickets(w http.ResponseWriter, r *http.Request, params
 			ID: t.ID, Number: t.Number, OrgID: t.OrgID, Requester: t.Requester, RequesterName: t.RequesterName, RequesterUserID: t.RequesterUserID,
 			Channel: t.Channel, Subject: t.Subject, Status: t.Status, Priority: t.Priority, Plan: t.Plan, Assignee: t.Assignee,
 			CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, FirstResponseAt: t.FirstResponseAt, RespondBy: t.RespondBy,
+			UnverifiedSender: t.UnverifiedSender,
 		}, t.OrgName, &n))
 	}
 	writeJSON(w, http.StatusOK, o)

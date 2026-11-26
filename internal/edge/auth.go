@@ -32,13 +32,17 @@ import (
 
 const (
 	maxAuthBody = 64 << 10
-	// emailEvery is how often one address may be sent a code.
-	emailEvery = 60 * time.Second
-	maxPassLen = 256
+	// emailEvery is how often one address may be sent a code, and
+	// emailsPerHour and emailsPerDay how many (every kind together).
+	emailEvery    = 60 * time.Second
+	emailsPerHour = 5
+	emailsPerDay  = 20
+	maxPassLen    = 256
 )
 
 // Per-IP limits on auth endpoints, per minute, on top of the project's.
-var authRates = map[string]int{"signup": 10, "signin": 30, "otp": 10, "verify": 30, "token": 120, "recover": 10, "admin": 600}
+var authRates = map[string]int{"signup": 10, "signin": 30, "otp": 10, "verify": 30, "token": 120, "recover": 10, "admin": 600,
+	"mfa": 30, "user": 60}
 
 // authBody reads a JSON body into v (an empty body is {}).
 func authBody(c *call, v any) bool {
@@ -199,17 +203,29 @@ func (e *Edge) auth(c *call, req Request) {
 			e.recover(c)
 		}
 	case path == "signout" && m == http.MethodPost:
-		e.signout(c, req)
+		if e.authLimit(c, "user") {
+			e.signout(c, req)
+		}
 	case path == "user" && m == http.MethodGet:
-		e.getUser(c, req)
+		if e.authLimit(c, "user") {
+			e.getUser(c, req)
+		}
 	case path == "user" && (m == http.MethodPatch || m == http.MethodPut):
-		e.updateUser(c, req)
+		if e.authLimit(c, "user") {
+			e.updateUser(c, req)
+		}
 	case strings.HasPrefix(path, "user/identities/") && m == http.MethodDelete:
-		e.unlinkIdentity(c, req, strings.TrimPrefix(path, "user/identities/"))
+		if e.authLimit(c, "user") {
+			e.unlinkIdentity(c, req, strings.TrimPrefix(path, "user/identities/"))
+		}
 	case path == "user/identities/authorize" && m == http.MethodGet:
-		e.oauthAuthorize(c, &req)
+		if e.authLimit(c, "user") {
+			e.oauthAuthorize(c, &req)
+		}
 	case strings.HasPrefix(path, "factors") || strings.HasPrefix(path, "mfa/"):
-		e.mfa(c, req, path)
+		if e.authLimit(c, "mfa") {
+			e.mfa(c, req, path)
+		}
 	case strings.HasPrefix(path, "admin/"):
 		if req.Role != "service" {
 			c.fail(http.StatusForbidden, "admin_only", "the admin API needs the project's secret key")
@@ -312,14 +328,17 @@ func redirectFor(a edgeapi.AuthConfig, want string) (string, bool) {
 	return "", false
 }
 
+// redirectAllowed reports whether u is somewhere links may go: under the
+// site URL, an exact redirect URL, or (with wildcards on) one matching a
+// redirect pattern. URLs with a user part are refused.
 func redirectAllowed(a edgeapi.AuthConfig, u string) bool {
 	pu, err := url.Parse(u)
-	if err != nil || pu.Host == "" || pu.User != nil {
+	if err != nil || pu.Host == "" || pu.User != nil || pu.Opaque != "" {
 		return false
 	}
 	if a.SiteURL != "" {
 		if site, err := url.Parse(a.SiteURL); err == nil && strings.EqualFold(site.Scheme, pu.Scheme) &&
-			strings.EqualFold(site.Host, pu.Host) && strings.HasPrefix(pu.Path, strings.TrimSuffix(site.Path, "/")) {
+			strings.EqualFold(site.Host, pu.Host) && pathUnder(pu.Path, site.Path) {
 			return true
 		}
 	}
@@ -327,11 +346,93 @@ func redirectAllowed(a edgeapi.AuthConfig, u string) bool {
 		if r == u {
 			return true
 		}
-		if a.AllowWildcardRedirects && strings.Contains(r, "*") && globMatch(r, u) {
+		if a.AllowWildcardRedirects && strings.Contains(r, "*") && patternAllows(r, pu) {
 			return true
 		}
 	}
 	return false
+}
+
+// pathUnder reports whether p is base or below it.
+func pathUnder(p, base string) bool {
+	base = strings.TrimSuffix(base, "/")
+	return base == "" || p == base || strings.HasPrefix(p, base+"/")
+}
+
+// patternAllows matches a redirect pattern against a parsed URL part by
+// part, never as one string: the scheme exactly; the host label by label,
+// "*" matching within one label only, and the port exactly ("*" any
+// port); the path with globMatch. A query or fragment is allowed only
+// when the pattern has a matching one or its path ends in "**".
+func patternAllows(pattern string, u *url.URL) bool {
+	scheme, rest, ok := strings.Cut(pattern, "://")
+	if !ok || !strings.EqualFold(scheme, u.Scheme) {
+		return false
+	}
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	authority, rest := rest[:end], rest[end:]
+	if strings.Contains(authority, "@") {
+		return false
+	}
+	hostPat, portPat := authority, ""
+	if i := strings.LastIndex(authority, ":"); i >= 0 && !strings.HasSuffix(authority, "]") {
+		hostPat, portPat = authority[:i], authority[i+1:]
+	}
+	if portPat != "*" && portPat != u.Port() {
+		return false
+	}
+	if !hostMatch(strings.Trim(hostPat, "[]"), u.Hostname()) {
+		return false
+	}
+	pathPat, query, fragment := rest, "", ""
+	hasQuery, hasFragment := false, false
+	if i := strings.Index(pathPat, "#"); i >= 0 {
+		pathPat, fragment, hasFragment = pathPat[:i], pathPat[i+1:], true
+	}
+	if i := strings.Index(pathPat, "?"); i >= 0 {
+		pathPat, query, hasQuery = pathPat[:i], pathPat[i+1:], true
+	}
+	if pathPat == "" {
+		pathPat = "/"
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if !globMatch(pathPat, path) {
+		return false
+	}
+	trailing := strings.HasSuffix(pathPat, "**")
+	if hasQuery {
+		if !globMatch(query, u.RawQuery) {
+			return false
+		}
+	} else if (u.RawQuery != "" || u.ForceQuery) && !trailing {
+		return false
+	}
+	if hasFragment {
+		return globMatch(fragment, u.EscapedFragment())
+	}
+	return u.Fragment == "" || trailing
+}
+
+// hostMatch matches a host pattern against a host name, ignoring case:
+// the same number of labels, each label of the pattern matching the
+// host's with "*" as any characters within it.
+func hostMatch(pattern, host string) bool {
+	ps, hs := strings.Split(strings.ToLower(pattern), "."), strings.Split(strings.ToLower(host), ".")
+	if len(ps) != len(hs) {
+		return false
+	}
+	for i := range ps {
+		if hs[i] == "" || !globMatch(strings.ReplaceAll(ps[i], "**", "*"), hs[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // globMatch: "**" matches anything, "*" anything but "/".
@@ -521,19 +622,31 @@ func (e *Edge) sendEmail(ctx context.Context, p *project, kind, linkType, to str
 	return err
 }
 
-// tooSoon refuses a code for target if one went out within emailEvery.
+// tooSoon refuses a code of kinds for target if one was asked for within
+// emailEvery, or the address had emailsPerHour or emailsPerDay already,
+// and otherwise records this request (of kinds[0]). Requests count
+// whether or not target has a user, so the answer doesn't tell.
 func tooSoon(ctx context.Context, tx pgx.Tx, target string, kinds []string) (*apiErr, error) {
-	last, err := projauth.LastCodeAt(ctx, tx, target, kinds)
-	if err != nil || last == nil {
+	r, err := projauth.RecentCodeRequests(ctx, tx, target, kinds)
+	if err != nil {
 		return nil, err
 	}
-	if wait := emailEvery - time.Since(*last); wait > 0 {
-		a := refuse(http.StatusTooManyRequests, "over_email_send_rate_limit",
-			fmt.Sprintf("a code was just sent to this address; wait %d seconds", int(wait.Seconds())+1))
-		a.retryAfter = int(wait.Seconds()) + 1
+	wait, msg := time.Duration(0), ""
+	switch {
+	case r.Last != nil && time.Since(*r.Last) < emailEvery:
+		wait = emailEvery - time.Since(*r.Last)
+		msg = fmt.Sprintf("a code was just sent to this address; wait %d seconds", int(wait.Seconds())+1)
+	case r.Hour >= emailsPerHour && r.HourFrom != nil:
+		wait, msg = time.Until(r.HourFrom.Add(time.Hour)), "too many codes were sent to this address this hour; try again later"
+	case r.Day >= emailsPerDay && r.DayFrom != nil:
+		wait, msg = time.Until(r.DayFrom.Add(24*time.Hour)), "too many codes were sent to this address today; try again later"
+	}
+	if msg != "" {
+		a := refuse(http.StatusTooManyRequests, "over_email_send_rate_limit", msg)
+		a.retryAfter = max(int(wait.Seconds())+1, 1)
 		return a, nil
 	}
-	return nil, nil
+	return nil, projauth.RecordCodeRequest(ctx, tx, target, kinds[0])
 }
 
 // ---- Sign-up and sign-in --------------------------------------------------------
@@ -607,11 +720,27 @@ func (e *Edge) signup(c *call) {
 				}
 				return nil // confirmed already: answer as for a new address
 			}
-			// Unconfirmed: send the confirmation again (within the rate).
+			// Unconfirmed: whoever signed up before may not be the address's
+			// owner, so this request's password replaces theirs and their
+			// sessions end. The confirmation goes again (within the rate);
+			// a code sent before keeps no password now.
+			if existing.PhoneConfirmedAt == nil {
+				if _, err := projauth.UpdateUser(ctx, tx, existing.ID, projauth.Update{PasswordHash: &hash}); err != nil {
+					return err
+				}
+				if _, err := projauth.EndSessions(ctx, tx, existing.ID, nil); err != nil {
+					return err
+				}
+			}
 			if soon, err := tooSoon(ctx, tx, email, []string{projauth.CodeSignup}); err != nil || soon != nil {
 				return err
 			}
-			code, err := projauth.NewCode(ctx, tx, existing.ID, projauth.CodeSignup, email, projauth.CodeTTL)
+			var code projauth.Code
+			if existing.PhoneConfirmedAt == nil {
+				code, err = projauth.NewPasswordCode(ctx, tx, existing.ID, projauth.CodeSignup, email, projauth.CodeTTL, hash)
+			} else {
+				code, err = projauth.NewCode(ctx, tx, existing.ID, projauth.CodeSignup, email, projauth.CodeTTL)
+			}
 			if err != nil {
 				return err
 			}
@@ -626,7 +755,10 @@ func (e *Edge) signup(c *call) {
 			return err
 		}
 		if a.EmailConfirm {
-			code, err := projauth.NewCode(ctx, tx, u.ID, projauth.CodeSignup, email, projauth.CodeTTL)
+			if err := projauth.RecordCodeRequest(ctx, tx, email, projauth.CodeSignup); err != nil {
+				return err
+			}
+			code, err := projauth.NewPasswordCode(ctx, tx, u.ID, projauth.CodeSignup, email, projauth.CodeTTL, hash)
 			if err != nil {
 				return err
 			}
@@ -886,8 +1018,15 @@ func (e *Edge) useVerified(ctx context.Context, c *call, tx pgx.Tx, v projauth.V
 	action := projauth.ActConfirmed
 	// A magic link or reset proves the address for the first time: a
 	// password (and sessions) set before by whoever signed up with it
-	// unconfirmed must not come with it (pre-registration takeover).
-	if u.EmailConfirmedAt == nil && (v.Kind == projauth.CodeMagicLink || v.Kind == projauth.CodeRecovery) {
+	// unconfirmed must not come with it (pre-registration takeover). A
+	// sign-up confirmation or an invitation keeps only the password the
+	// request that sent it set: not a squatter's, kept through the owner's
+	// own sign-up or an invitation.
+	drop := v.Kind == projauth.CodeMagicLink || v.Kind == projauth.CodeRecovery
+	if v.Kind == projauth.CodeSignup || v.Kind == projauth.CodeInvite {
+		drop = u.PhoneConfirmedAt == nil && u.HasPassword() && !v.KeepsPassword(u)
+	}
+	if u.EmailConfirmedAt == nil && drop {
 		if u.HasPassword() {
 			none := ""
 			up.PasswordHash = &none
@@ -1206,16 +1345,43 @@ func (e *Edge) signout(c *call, req Request) {
 
 // liveUser is the token's user while its session lasts.
 func (e *Edge) liveUser(ctx context.Context, tx pgx.Tx, uid, sid uuid.UUID, lock bool) (*projauth.User, *apiErr, error) {
-	if _, err := projauth.GetSession(ctx, tx, sid); errors.Is(err, projauth.ErrNotFound) {
-		return nil, refuse(http.StatusUnauthorized, "session_not_found", "the session has ended; sign in again"), nil
+	u, _, fail, err := e.liveSession(ctx, tx, uid, sid, lock)
+	return u, fail, err
+}
+
+// liveSession is liveUser with the session as it is now (its aal may have
+// changed since the token was signed).
+func (e *Edge) liveSession(ctx context.Context, tx pgx.Tx, uid, sid uuid.UUID, lock bool) (*projauth.User, *projauth.Session, *apiErr, error) {
+	s, err := projauth.GetSession(ctx, tx, sid)
+	if errors.Is(err, projauth.ErrNotFound) || (err == nil && s.UserID != uid) {
+		return nil, nil, refuse(http.StatusUnauthorized, "session_not_found", "the session has ended; sign in again"), nil
 	} else if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	u, err := projauth.GetUser(ctx, tx, uid, lock)
 	if errors.Is(err, projauth.ErrNotFound) {
-		return nil, refuse(http.StatusUnauthorized, "user_not_found", "the user no longer exists"), nil
+		return nil, nil, refuse(http.StatusUnauthorized, "user_not_found", "the user no longer exists"), nil
 	}
-	return u, nil, err
+	return u, s, nil, err
+}
+
+// belowMFA reports whether session s is below aal2 while its user has a
+// verified factor: such a session may not change what proves the user
+// (GoTrue's insufficient_aal), or a password alone would be enough to
+// reach aal2.
+func belowMFA(ctx context.Context, tx pgx.Tx, s *projauth.Session, req Request) (bool, error) {
+	if atAAL2(s, req) {
+		return false, nil
+	}
+	return projauth.HasVerifiedFactor(ctx, tx, s.UserID)
+}
+
+// atAAL2 reports whether both the stored session and the request's token
+// are at aal2: the session catches one lowered since the token was issued,
+// and the token one issued before the session was raised.
+func atAAL2(s *projauth.Session, req Request) bool {
+	aal, _ := req.Claims["aal"].(string)
+	return s.AAL == "aal2" && aal == "aal2"
 }
 
 func (e *Edge) getUser(c *call, req Request) {
@@ -1333,9 +1499,19 @@ func (e *Edge) updateUser(c *call, req Request) {
 	var u *projauth.User
 	var fail *apiErr
 	err := e.authTx(c, func(tx pgx.Tx) error {
+		var s *projauth.Session
 		var err error
-		if u, fail, err = e.liveUser(ctx, tx, uid, sid, true); err != nil || fail != nil {
+		if u, s, fail, err = e.liveSession(ctx, tx, uid, sid, true); err != nil || fail != nil {
 			return err
+		}
+		if hash != nil || (newEmail != "" && (u.Email == nil || *u.Email != newEmail)) {
+			if below, err := belowMFA(ctx, tx, s, req); err != nil {
+				return err
+			} else if below {
+				fail = refuse(http.StatusUnauthorized, "insufficient_aal",
+					"an aal2 session (verify a factor) is required to change the email or password of a user with MFA")
+				return nil
+			}
 		}
 		up := projauth.Update{PasswordHash: hash}
 		if in.Data != nil {
@@ -1390,7 +1566,7 @@ func (e *Edge) updateUser(c *call, req Request) {
 				fail = soon
 				return err
 			}
-			return e.newPhoneCode(ctx, c, tx, uid, projauth.CodePhoneChange, channel, newPhone)
+			return e.newPhoneCode(ctx, c, tx, uid, projauth.CodePhoneChange, channel, newPhone, "")
 		}
 		return nil
 	})

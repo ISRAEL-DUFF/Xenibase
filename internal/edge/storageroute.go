@@ -188,9 +188,9 @@ func (e *Edge) storageRoute(c *call, req Request) {
 		case http.MethodGet, http.MethodHead:
 			e.download(c, req, b, p)
 		case http.MethodPost:
-			e.putObject(c, &req, b, p, c.r.Header.Get("X-Upsert") == "true", c.userID)
+			e.putObject(c, req, b, p, c.r.Header.Get("X-Upsert") == "true", c.userID, nil)
 		case http.MethodPut:
-			e.putObject(c, &req, b, p, true, c.userID)
+			e.putObject(c, req, b, p, true, c.userID, nil)
 		case http.MethodDelete:
 			e.remove(c, req, b, []string{p}, true)
 		default:

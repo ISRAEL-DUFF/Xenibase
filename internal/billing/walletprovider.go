@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,32 @@ type RequestState struct {
 	ResourceID string
 	Status     string
 	Terminal   bool
+}
+
+// Succeeded is a request that ended with the money moved: terminal, and in
+// a state that says it completed. Only this is booked as a debit.
+func (r RequestState) Succeeded() bool {
+	if !r.Terminal {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Status)) {
+	case "completed", "succeeded", "successful", "success", "confirmed_success":
+		return true
+	}
+	return false
+}
+
+// Failed is a request that ended without moving money (or whose money went
+// back): terminal, and in a state that says so. It is a failed attempt.
+func (r RequestState) Failed() bool {
+	if !r.Terminal {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Status)) {
+	case "failed", "failure", "confirmed_failure", "declined", "rejected", "cancelled", "canceled", "expired", "reversed":
+		return true
+	}
+	return false
 }
 
 // FXRate is the provider's price of a currency pair.

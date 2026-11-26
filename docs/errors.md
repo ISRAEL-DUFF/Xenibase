@@ -57,6 +57,7 @@ the SQL endpoint (`/projects/{id}/sql`) and table rows
 | `forbidden`, `permission_denied` | 403 | auth | no | The user's role in the organisation or project doesn't allow it. |
 | `csrf` | 403 | auth | no | A browser session's change without `X-CSRF-Token`. Tokens never need it. |
 | `org_suspended` | 403 | auth | no | The organisation is suspended. |
+| `break_glass` | 403 | auth | no | A platform admin's break-glass session can't invite, change roles or transfer ownership. |
 | `plan_required` | 403 | limit | no | The plan doesn't include this. |
 | `console_disabled`, `console_read_only` | 403 | auth | no | The project's SQL console is off, or read-only (send `read_only: true`). |
 | `not_found` | 404 | not found | no | No such project, webhook, …, or not visible to the caller. |
@@ -64,7 +65,7 @@ the SQL endpoint (`/projects/{id}/sql`) and table rows
 | `quota_exceeded` | 409 | limit | no | An organisation quota (webhooks, jobs, projects, …); `quota` says which. |
 | `outbound_disabled` | 409 | conflict | no | The organisation's outbound traffic is off (an admin's decision). |
 | `capacity_pending_approval` | 409 | unavailable | later | Capacity is being added; the message says when to try again. |
-| `rate_limited` | 429 | rate | yes | Too many requests for the token (default 600 a minute) or the organisation's tokens (1,200). `Retry-After` is sent. |
+| `rate_limited` | 429 | rate | yes | Too many requests for the token (default 600 a minute) or the organisation's tokens (1,200), or too many invitations in 24 hours from the organisation (default 100) or the inviter (50). `Retry-After` is sent. |
 | `internal` | 500 | unavailable | once | A fault on Xenibase's side; report it if it repeats. |
 | `project_resuming` | 503 | unavailable | yes | A Free project was paused for inactivity; this request woke it. `Retry-After: 10`. |
 | `project_restoring` | 503 | unavailable | yes | A Free project was archived; this request started restoring it (a minute or two). `Retry-After: 60`. |
@@ -130,6 +131,7 @@ keys.
 | `rate_limited`, `spend_cap_rate_limited` | 429 | rate | yes | The project's per-key or per-address rate, or the reduced rate after the spend cap. `Retry-After: 1`. |
 | `plan_limit_reached` | 429 | limit | no | The month's data API requests are used up; `Retry-After` is the seconds until the month ends. |
 | `project_resuming` | 503 | unavailable | yes | Paused or archived for inactivity, and this request woke it. `Retry-After: 10`; an archived project takes a minute or two to restore, so keep retrying. |
+| `project_paused` | 503 | unavailable | yes | Paused for inactivity, and this request carried none of the project's API keys, so it didn't wake it. Send the key (or connect to the database) to resume it. `Retry-After: 10`. |
 | `database_unavailable` | 503 | unavailable | yes | The database can't be reached for the moment. `Retry-After: 5`. |
 | `retry`, `starting` | 503 | unavailable | yes | The edge is reloading the project's configuration, or starting. `Retry-After: 1` or `2`. |
 | `idempotency_unavailable` | 503 | unavailable | yes | The project's schemas are being upgraded; keys work within minutes. `Retry-After: 60`. |

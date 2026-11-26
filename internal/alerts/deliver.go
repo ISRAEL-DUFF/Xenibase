@@ -78,20 +78,16 @@ func (s *Service) payload(event string, a store.Alert) Payload {
 	return p
 }
 
-// deliver sends one event to every configured channel.
-func (s *Service) deliver(ctx context.Context, c channels, p Payload) error {
-	var errs []error
-	if c.webhookURL != "" {
-		if err := s.sendWebhook(ctx, c, p); err != nil {
-			errs = append(errs, fmt.Errorf("webhook: %w", err))
-		}
+// send sends one event to one configured channel (channelWebhook or
+// channelEmail).
+func (s *Service) send(ctx context.Context, c channels, channel string, p Payload) error {
+	if channel == channelWebhook {
+		return s.sendWebhook(ctx, c, p)
 	}
-	if c.smtp != nil {
-		if err := sendMail(ctx, *c.smtp, p); err != nil {
-			errs = append(errs, fmt.Errorf("email: %w", err))
-		}
+	if c.smtp == nil {
+		return errors.New("email is not configured")
 	}
-	return errors.Join(errs...)
+	return sendMail(ctx, *c.smtp, p)
 }
 
 // Sign returns the X-Xenibase-Signature header for body at t:

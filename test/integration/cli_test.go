@@ -167,6 +167,7 @@ func TestCLIDeviceLogin(t *testing.T) {
 		t.Fatal("the CLI printed no code")
 	}
 	go func() { _, _ = io.Copy(io.Discard, stderr) }()
+	e.Reauth()
 	if c := e.Do("POST", "/api/v1/auth/device/approve", map[string]any{"user_code": code, "org_id": e.OrgID, "scopes": []string{"read", "write"}}, nil); c != http.StatusOK {
 		t.Fatalf("approve: %d", c)
 	}

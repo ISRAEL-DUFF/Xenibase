@@ -53,7 +53,15 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrNoCapacity means no shared instance can take a new project.
 	ErrNoCapacity = errors.New("no shared cluster available")
+
+	// errNodeRetiring: the node picked for a project was taken out of
+	// placement (by the empty-node sweep) before the project was recorded.
+	errNodeRetiring = errors.New("the node is being retired")
 )
+
+// nodeRetiring is the lifecycle of a node the empty-node sweep has taken
+// out of placement (capacity automation).
+const nodeRetiring = "retiring"
 
 // Config holds the connection details handed to clients and those the
 // control plane uses to smoke-test the poolers.
@@ -145,6 +153,13 @@ type Service struct {
 	// false while its storage is hard-locked or its organisation is
 	// suspended (V2 §10.4, §10.8). The tenancy service sets it.
 	LoginGate func(ctx context.Context, p store.Project) (bool, error)
+	// QuotaGate, when set, re-checks an organisation's quotas inside the
+	// transaction that records what they limit (Claim): a new project or
+	// branch, a dedicated instance, a read replica. It locks the
+	// organisation's row first, so creates sent in parallel cannot all
+	// pass checks made before them (V2 §10.3). The tenancy service sets
+	// it.
+	QuotaGate func(ctx context.Context, tx pgx.Tx, c Claim) error
 	// DatabaseRecreated, when set, hears that p's database was dropped and
 	// made again empty (a restore in place, a branch reset, a move's
 	// target): backend services re-apply their schemas once it is filled.
@@ -174,6 +189,8 @@ func (s *Service) Kinds() map[string]jobs.Kind {
 
 		KindApplySettings: {Handler: s.runApplySettings, MaxAttempts: 5},
 		KindDropDBUser:    {Handler: s.runDropDBUser, MaxAttempts: 10},
+		// Backoff doubles from 2 s to 5 min: about 40 minutes of retries.
+		KindDropProjectObjects: {Handler: s.runDropProjectObjects, MaxAttempts: 15},
 	}
 	for k, v := range s.opaqueKinds() {
 		kinds[k] = v
@@ -240,6 +257,9 @@ type CreateParams struct {
 	// Publish. Params are merged into that operation's params.
 	Kind   string
 	Params map[string]any
+	// Secrets, already sealed, join the operation's params.secrets beside
+	// the password handoff, and are removed with it when the operation ends.
+	Secrets map[string]string
 	// Tier is TierShared (default) or TierDedicated. A dedicated project
 	// gets its own instance on NodeID (or the least loaded dedicated node)
 	// with Profile's limits and VolumeGB of disk.
@@ -247,14 +267,26 @@ type CreateParams struct {
 	NodeID   *uuid.UUID
 	Profile  string
 	VolumeGB int
+	// Size, for a dedicated project, gives its instance's CPUs and memory
+	// instead of naming a profile: a restore or detached replica takes its
+	// source's, which after a resize may match no profile. It overrides
+	// Profile.
+	Size *Profile
 	// InstanceID, for a dedicated project, is its instance's id (default:
 	// new): a detached read replica's instance keeps its member's id,
 	// which names its container and volume (V4 §7).
 	InstanceID *uuid.UUID
+	// MinMaxConnections floors a dedicated instance's max_connections: a
+	// restore's or a detached replica's source value (Postgres won't replay
+	// WAL from a server that allowed more connections).
+	MinMaxConnections int
 	// PgVersion is the Postgres major (0: the default, the newest
-	// supported). Preview allows a major in preview (V4.1 §6.1).
+	// supported). Preview allows a major in preview (V4.1 §6.1); Derived,
+	// for a project made from another's data (a restore, a branch, a
+	// detached replica), allows any installed major.
 	PgVersion int
 	Preview   bool
+	Derived   bool
 	// Region is where the project runs (empty: the home region, or NodeID's
 	// region); DataResidency keeps its data in that region's country, which
 	// the region must offer (V3 §6.3). A branch takes its parent's.
@@ -267,6 +299,27 @@ type CreateParams struct {
 	Sensitive bool
 }
 
+// A Claim is what one create takes from its organisation's quotas.
+type Claim struct {
+	OrgID uuid.UUID
+	// Project is one more project (towards the projects quota); Branch
+	// one more branch (towards the branches quota) instead.
+	Project, Branch bool
+	// Instance is one more dedicated instance (or read replica) of this
+	// size and VolumeGB of disk, within the dedicated allowance.
+	Instance *Profile
+	VolumeGB int
+}
+
+// Claim runs QuotaGate in tx, if it is set: before the insert the claim
+// guards, in the same transaction.
+func (s *Service) Claim(ctx context.Context, tx pgx.Tx, c Claim) error {
+	if s.QuotaGate == nil {
+		return nil
+	}
+	return s.QuotaGate(ctx, tx, c)
+}
+
 // BranchSpec describes a new branch.
 type BranchSpec struct {
 	ParentID   uuid.UUID
@@ -274,6 +327,9 @@ type BranchSpec struct {
 	SchemaOnly bool
 	// ExpiresAt is when the hourly sweep deletes it; nil keeps it.
 	ExpiresAt *time.Time
+	// CopyFiles: the parent's stored files are copied in, after every reset
+	// too.
+	CopyFiles bool
 }
 
 // Tiers (spec §4).
@@ -324,9 +380,18 @@ type createParams struct {
 }
 
 type rotateParams struct {
-	Verifier         string    `json:"verifier"`
-	PreviousVerifier string    `json:"previous_verifier"`
-	Secrets          opSecrets `json:"secrets"`
+	Secrets rotateSecrets `json:"secrets"`
+}
+
+// rotateSecrets adds the owner's new and previous SCRAM verifiers to the
+// handoff. They are not the password, but a verifier lets its holder pose
+// as the server and recover the client key from one login, so they go with
+// the rest of secrets when the operation ends, and the API never returns
+// them (they used to stay in params, shown to anyone with project.view).
+type rotateSecrets struct {
+	opSecrets
+	Verifier         string `json:"verifier"`
+	PreviousVerifier string `json:"previous_verifier"`
 }
 
 func passwordAAD(projectID uuid.UUID, purpose string) []byte {
@@ -383,7 +448,10 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		tier = TierShared
 	}
 	use := ForProject
-	if p.Preview {
+	switch {
+	case p.Derived:
+		use = ForDerived
+	case p.Preview:
 		use = ForPreviewProject
 	}
 	if p.PgVersion, err = s.CheckVersion(ctx, p.PgVersion, use); err != nil {
@@ -395,13 +463,16 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 	var profile Profile
 	var inst store.Instance
 	defaults := store.DefaultSharedSettings()
+	pickShared := func() (store.Instance, error) {
+		inst, err := store.New(s.db).PickSharedInstance(ctx, store.PickSharedInstanceParams{OrgID: &p.OrgID, PgVersion: int32(p.PgVersion), Region: p.Region})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return inst, fmt.Errorf("%w (no shared cluster in %s runs Postgres %d)", ErrNoCapacity, p.Region, p.PgVersion)
+		}
+		return inst, err
+	}
 	switch tier {
 	case TierShared:
-		inst, err = store.New(s.db).PickSharedInstance(ctx, store.PickSharedInstanceParams{OrgID: &p.OrgID, PgVersion: int32(p.PgVersion), Region: p.Region})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Created{}, fmt.Errorf("%w (no shared cluster in %s runs Postgres %d)", ErrNoCapacity, p.Region, p.PgVersion)
-		}
-		if err != nil {
+		if inst, err = pickShared(); err != nil {
 			return Created{}, err
 		}
 	case TierDedicated:
@@ -439,11 +510,37 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		for k, v := range p.Params {
 			params[k] = v
 		}
-		params["secrets"] = sec
+		secrets := map[string]any{"password": sec.Password}
+		for k, v := range p.Secrets {
+			secrets[k] = v
+		}
+		params["secrets"] = secrets
 
 		var out Created
 		err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+			// The quotas, counted again under the organisation's lock. A
+			// detached replica's instance (InstanceID) is already in the
+			// allowance.
+			claim := Claim{OrgID: p.OrgID, Project: p.Branch == nil, Branch: p.Branch != nil}
+			if tier == TierDedicated && p.InstanceID == nil {
+				claim.Instance, claim.VolumeGB = &profile, p.VolumeGB
+			}
+			if err := s.Claim(ctx, tx, claim); err != nil {
+				return err
+			}
 			q := store.New(tx)
+			// The node stays as it is until this commits: the empty-node
+			// sweep, which takes it out of placement under its lock, either
+			// counts this project or has taken the node out already.
+			nodeID := inst.NodeID
+			if tier == TierDedicated {
+				nodeID = *p.NodeID
+			}
+			if lc, err := q.LockNodeForPlacement(ctx, nodeID); errors.Is(err, pgx.ErrNoRows) || (err == nil && lc == nodeRetiring) {
+				return errNodeRetiring
+			} else if err != nil {
+				return err
+			}
 			instanceID := inst.ID
 			if tier == TierDedicated {
 				iid := uuid.New()
@@ -453,9 +550,10 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 				prefix := "instances/" + iid.String() + "/wal-g"
 				mem := int32(profile.MemoryMB)
 				vol := int32(p.VolumeGB)
+				maxConns := int32(max(MaxConnectionsFor(profile.MemoryMB), p.MinMaxConnections))
 				ni, err := q.InsertInstance(ctx, store.InsertInstanceParams{
 					ID: iid, NodeID: *p.NodeID, Kind: TierDedicated, PgVersion: int32(p.PgVersion), CpuLimit: numeric(profile.CPUs),
-					MemLimitMb: &mem, VolumeGb: &vol, Profile: &profile.Name, WalgPrefix: &prefix,
+					MemLimitMb: &mem, VolumeGb: &vol, Profile: &profile.Name, WalgPrefix: &prefix, MaxConnections: &maxConns,
 				})
 				if err != nil {
 					return err
@@ -474,6 +572,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 				if err := q.SetProjectBranch(ctx, store.SetProjectBranchParams{
 					ID: proj.ID, ParentProjectID: &p.Branch.ParentID, BranchSource: &p.Branch.Source,
 					BranchSchemaOnly: &p.Branch.SchemaOnly, ExpiresAt: p.Branch.ExpiresAt, SensitiveData: p.Sensitive,
+					BranchCopyFiles: p.Branch.CopyFiles,
 				}); err != nil {
 					return err
 				}
@@ -509,6 +608,15 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (Created, error) {
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && attempt < 5 {
 			continue
 		}
+		if errors.Is(err, errNodeRetiring) {
+			if tier != TierShared || attempt >= 5 {
+				return Created{}, fmt.Errorf("%w: the node chosen for the project is being retired; try again", ErrNoCapacity)
+			}
+			if inst, err = pickShared(); err != nil {
+				return Created{}, err
+			}
+			continue
+		}
 		if err != nil {
 			return Created{}, err
 		}
@@ -542,7 +650,7 @@ func (s *Service) Rotate(ctx context.Context, projectID uuid.UUID, by *uuid.UUID
 	err = s.withIdleProject(ctx, projectID, []string{StatusActive}, func(tx pgx.Tx, p store.Project) error {
 		op, err := jobs.Enqueue(ctx, tx, jobs.EnqueueParams{
 			Kind: KindRotate, ProjectID: &p.ID, CreatedBy: by,
-			Params: rotateParams{Verifier: verifier, PreviousVerifier: p.ScramVerifier, Secrets: sec},
+			Params: rotateParams{Secrets: rotateSecrets{opSecrets: sec, Verifier: verifier, PreviousVerifier: p.ScramVerifier}},
 		})
 		out = Rotated{Project: p, Operation: op, Password: password}
 		return err
@@ -554,13 +662,26 @@ func (s *Service) Rotate(ctx context.Context, projectID uuid.UUID, by *uuid.UUID
 // name, as typed by the operator. skipFinalBackup skips the final backup
 // (spec §6.2 step 2: on by default, can be skipped).
 func (s *Service) Delete(ctx context.Context, projectID uuid.UUID, confirmName string, skipFinalBackup bool, by *uuid.UUID) (store.Operation, error) {
+	return s.DeleteChecked(ctx, projectID, by, func(p store.Project) (bool, error) {
+		if confirmName != p.Name {
+			return false, fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
+		}
+		return skipFinalBackup, nil
+	})
+}
+
+// DeleteChecked is Delete with check run on the locked project first: it
+// refuses the delete, or says whether to skip the final backup, from the
+// row as it is now (the branch expiry sweep's list may be stale).
+func (s *Service) DeleteChecked(ctx context.Context, projectID uuid.UUID, by *uuid.UUID, check func(store.Project) (skipFinalBackup bool, err error)) (store.Operation, error) {
 	var out store.Operation
 	err := s.withIdleProject(ctx, projectID, []string{StatusActive, StatusError}, func(tx pgx.Tx, p store.Project) error {
-		if confirmName != p.Name {
-			return fmt.Errorf("%w: confirm must match the project name exactly", ErrInvalid)
+		skipFinalBackup, err := check(p)
+		if err != nil {
+			return err
 		}
 		// A parent goes only once its branches are deleted or detached (V2 §8.4).
-		if n, err := store.New(tx).CountLiveBranches(ctx, &p.ID); err != nil {
+		if n, err := store.New(tx).CountLiveBranches(ctx, store.CountLiveBranchesParams{ParentProjectID: &p.ID, OrgID: p.OrgID}); err != nil {
 			return err
 		} else if n > 0 {
 			return fmt.Errorf("%w: the project has %d branch(es); delete or detach them first", ErrConflict, n)
@@ -625,6 +746,13 @@ func (s *Service) EnqueueExclusive(ctx context.Context, projectID uuid.UUID, all
 	return out, err
 }
 
+// WithIdleProject runs f in a transaction that holds the live project's
+// row lock, once its status is one of allowed and no operation is pending
+// on it: for a change made in place that must not interleave with one.
+func (s *Service) WithIdleProject(ctx context.Context, id uuid.UUID, allowed []string, f func(pgx.Tx, store.Project) error) error {
+	return s.withIdleProject(ctx, id, allowed, f)
+}
+
 // withIdleProject locks a live project, checks its status and that no other
 // operation is pending on it, and runs f in the same transaction. One
 // operation per project at a time keeps the flows from interleaving.
@@ -652,8 +780,53 @@ func (s *Service) withIdleProject(ctx context.Context, id uuid.UUID, allowed []s
 		if busy {
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
-		return f(tx, p)
+		// A shared cluster's minor upgrade is no one project's operation,
+		// but restarts every project on it.
+		if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil {
+			return err
+		} else if busy {
+			return fmt.Errorf("%w: a Postgres minor upgrade is restarting the project's instance; try again in a few minutes", ErrConflict)
+		}
+		if err := f(tx, p); errors.Is(err, jobs.ErrProjectBusy) {
+			return fmt.Errorf("%w: %w", ErrConflict, err)
+		} else if err != nil {
+			return err
+		}
+		return nil
 	})
+}
+
+// EnqueueIfIdleTx queues an exclusive operation on a project from inside
+// tx, as withIdleProject would: under the project's row lock, only if it
+// is live and active with no operation pending. It reports whether it
+// queued; a busy project is skipped, not an error (the nightly scheduler
+// tries again on its next tick).
+func EnqueueIfIdleTx(ctx context.Context, tx pgx.Tx, ep jobs.EnqueueParams) (bool, error) {
+	if ep.ProjectID == nil {
+		return false, errors.New("EnqueueIfIdleTx needs a project")
+	}
+	q := store.New(tx)
+	p, err := q.GetLiveProjectForUpdate(ctx, *ep.ProjectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if p.Status != StatusActive {
+		return false, nil
+	}
+	// A new statement: it sees what committed while we waited for the lock.
+	if busy, err := q.ProjectHasActiveOperation(ctx, &p.ID); err != nil || busy {
+		return false, err
+	}
+	if busy, err := q.InstanceMinorUpgradeActive(ctx, p.InstanceID); err != nil || busy {
+		return false, err
+	}
+	if _, err := jobs.Enqueue(ctx, tx, ep); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Get returns a live project.
@@ -700,11 +873,23 @@ func (s *Service) resolveRegion(ctx context.Context, p *CreateParams) error {
 		}
 	}
 	r, err := q.GetRegion(ctx, p.Region)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && r.Status != "active" && p.Branch == nil) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: no region %q", ErrInvalid, p.Region)
 	}
 	if err != nil {
 		return err
+	}
+	// A hidden region takes new projects only from its early-access
+	// organisations (a rehearsal, a first customer); a branch follows its
+	// parent wherever it is.
+	if r.Status != "active" && p.Branch == nil {
+		ok, err := q.RegionHasEarlyAccess(ctx, store.RegionHasEarlyAccessParams{RegionID: r.ID, OrgID: p.OrgID})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: no region %q", ErrInvalid, p.Region)
+		}
 	}
 	if p.DataResidency && !r.Residency {
 		return fmt.Errorf("%w: %s doesn't offer data residency", ErrInvalid, r.Name)

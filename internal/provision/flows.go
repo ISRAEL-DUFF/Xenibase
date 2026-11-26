@@ -109,12 +109,29 @@ func (s *Service) Provisioned(ctx context.Context, p store.Project, log *jobs.St
 	}
 }
 
+// OwnerCreateRole is the owner's CREATEROLE attribute: on for a dedicated
+// project with role management on, where Postgres 16+ limits it to the
+// roles the owner creates (the instance is the project's alone).
+func OwnerCreateRole(p store.Project) string {
+	if p.ManageRoles && p.Tier == TierDedicated {
+		return "CREATEROLE"
+	}
+	return "NOCREATEROLE"
+}
+
 func (s *Service) ensureRole(ctx context.Context, p store.Project, set store.ProjectSettings, log *jobs.StepLogger) error {
 	if !crypto.IsSCRAMVerifier(p.ScramVerifier) || strings.Contains(p.ScramVerifier, "'") {
 		return jobs.Permanent(errors.New("project has an invalid SCRAM verifier"))
 	}
 	if set.ConnectionLimit < 1 || set.ConnectionLimit > 10000 {
 		return jobs.Permanent(fmt.Errorf("invalid connection limit %d", set.ConnectionLimit))
+	}
+	// Never more than the instance holds, whatever the settings say (they
+	// are lowered with a resize; this covers a move to a smaller size).
+	if most, ok, err := s.dedicatedLimitMax(ctx, store.New(s.db), p); err != nil {
+		return err
+	} else if ok && set.ConnectionLimit > most {
+		set.ConnectionLimit = most
 	}
 	conn, err := s.connectInstance(ctx, p.InstanceID, "postgres")
 	if err != nil {
@@ -131,8 +148,8 @@ func (s *Service) ensureRole(ctx context.Context, p store.Project, set store.Pro
 	if err != nil {
 		return err
 	}
-	attrs := fmt.Sprintf("%s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT CONNECTION LIMIT %d PASSWORD %s",
-		login, set.ConnectionLimit, literal(p.ScramVerifier))
+	attrs := fmt.Sprintf("%s NOSUPERUSER NOCREATEDB %s NOREPLICATION NOBYPASSRLS INHERIT CONNECTION LIMIT %d PASSWORD %s",
+		login, OwnerCreateRole(p), set.ConnectionLimit, literal(p.ScramVerifier))
 	verb := "CREATE"
 	if exists {
 		verb = "ALTER"
@@ -225,6 +242,11 @@ func (s *Service) syncPooler(ctx context.Context, log *jobs.StepLogger, step, ms
 // A project in a region with its own pooler hosts is tested through one
 // of them.
 func (s *Service) smokeTest(ctx context.Context, p store.Project, password string, log *jobs.StepLogger) error {
+	if len(p.AllowedCidrs) > 0 {
+		// The poolers take the owner only from the project's allowlist, and
+		// xenibase-server isn't on it.
+		return log.Info(ctx, "smoke", "skipped: the poolers take %s only from the project's IP allowlist", p.OwnerRole)
+	}
 	session, pooled := s.cfg.SmokeSessionAddr, s.cfg.SmokePooledAddr
 	if s.pooler != nil {
 		if rs, rp, ok := s.pooler.SmokeAddrs(p.Region); ok {
@@ -282,12 +304,44 @@ func (s *Service) rollbackCreate(ctx context.Context, op store.Operation, log *j
 		return err
 	}
 	err = s.teardown(ctx, p, log)
-	if err != nil && p.Tier == TierDedicated {
+	if err == nil {
+		return nil
+	}
+	if p.Tier == TierDedicated {
 		// The instance record outlives the project; the cleanup loop removes
 		// it once the node answers.
 		_ = log.Warn(ctx, "rollback", "the instance on its node will be removed automatically once the node is reachable")
+		return err
 	}
+	// OnFail runs once, and the project is already gone from every list:
+	// hand the database and roles to an operation that keeps retrying.
+	cleanup, qerr := jobs.Enqueue(ctx, s.db, jobs.EnqueueParams{Kind: KindDropProjectObjects, ProjectID: &p.ID, Background: true,
+		Params: map[string]any{"after": op.ID}})
+	if qerr != nil {
+		return fmt.Errorf("%w (and queueing the cleanup failed: %w)", err, qerr)
+	}
+	_ = log.Warn(ctx, "rollback", "operation %s keeps retrying the drop of %s and its roles", cleanup.ID, p.DbName)
 	return err
+}
+
+// KindDropProjectObjects drops what a failed create's rollback could not:
+// the database and roles of a project that is already deleted.
+const KindDropProjectObjects = "drop_project_objects"
+
+// runDropProjectObjects tears down a deleted shared project's database and
+// roles. It refuses a live project.
+func (s *Service) runDropProjectObjects(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
+	p, err := s.project(ctx, op)
+	if err != nil {
+		return err
+	}
+	if p.DeletedAt == nil {
+		return jobs.Permanent(fmt.Errorf("project %s is not deleted; nothing to drop", p.DbName))
+	}
+	if p.Tier != TierShared {
+		return jobs.Permanent(errors.New("only a shared project's objects are dropped here (the reaper removes dedicated instances)"))
+	}
+	return s.teardown(ctx, p, log)
 }
 
 // teardown removes a project's pooler route and drops its database and role.
@@ -366,6 +420,13 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 		if err := log.Warn(ctx, "backup", "final backup skipped"); err != nil {
 			return err
 		}
+	} else if gone, err := s.databaseGone(ctx, p); err != nil {
+		return err
+	} else if gone {
+		// An earlier attempt took the backup and tore the project down.
+		if err := log.Info(ctx, "backup", "final backup not needed: an earlier attempt already dropped the database"); err != nil {
+			return err
+		}
 	} else if err := s.FinalBackup(ctx, p, log); err != nil {
 		return fmt.Errorf("final backup: %w", err)
 	}
@@ -376,10 +437,52 @@ func (s *Service) runDelete(ctx context.Context, op store.Operation, log *jobs.S
 	if err := s.DropAutomation(ctx, p); err != nil {
 		return err
 	}
-	if err := store.New(s.db).SoftDeleteProject(ctx, store.SoftDeleteProjectParams{ID: p.ID, Status: StatusDeleted}); err != nil {
+	var expiring int64
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		if err := q.SoftDeleteProject(ctx, store.SoftDeleteProjectParams{ID: p.ID, Status: StatusDeleted}); err != nil {
+			return err
+		}
+		// Only the final backup outlives the project (V2 §10.10): its
+		// nightly and archive backups expire with it, and the hourly expiry
+		// deletes them.
+		expiring, err = q.ExpireDeletedProjectBackups(ctx, store.ExpireDeletedProjectBackupsParams{ProjectID: p.ID, ExpiresAt: time.Now().Add(DeletedBackupsKept)})
+		return err
+	})
+	if err != nil {
 		return err
 	}
+	if expiring > 0 {
+		if err := log.Info(ctx, "backup", "%d earlier backup(s) expire with the final backup", expiring); err != nil {
+			return err
+		}
+	}
 	return log.Info(ctx, "done", "project %s deleted", p.DbName)
+}
+
+// DeletedBackupsKept is how long a deleted project's backups on platform
+// storage are kept when it has no final backup to expire with (V2 §10.10).
+const DeletedBackupsKept = 30 * 24 * time.Hour
+
+// databaseGone reports whether p's database no longer exists: a dedicated
+// project's instance is deleted, or a shared project's database is not on
+// its cluster.
+func (s *Service) databaseGone(ctx context.Context, p store.Project) (bool, error) {
+	if p.Tier == TierDedicated {
+		inst, err := store.New(s.db).GetInstance(ctx, p.InstanceID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return true, nil
+		}
+		return err == nil && inst.Status == "deleted", err
+	}
+	conn, err := s.connectInstance(ctx, p.InstanceID, "postgres")
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(context.Background())
+	var exists bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, p.DbName).Scan(&exists)
+	return !exists, err
 }
 
 // failDelete leaves a project whose delete gave up in "error", unrouted,
@@ -409,11 +512,11 @@ func (s *Service) runRotate(ctx context.Context, op store.Operation, log *jobs.S
 	if err := json.Unmarshal(op.Params, &params); err != nil {
 		return jobs.Permanent(fmt.Errorf("invalid params: %w", err))
 	}
-	password, err := s.openPassword(p.ID, KindRotate, params.Secrets)
+	password, err := s.openPassword(p.ID, KindRotate, params.Secrets.opSecrets)
 	if err != nil {
 		return jobs.Permanent(err)
 	}
-	if err := s.setVerifier(ctx, p, params.Verifier); err != nil {
+	if err := s.setVerifier(ctx, p, params.Secrets.Verifier); err != nil {
 		return err
 	}
 	if err := log.Info(ctx, "role", "new SCRAM verifier set on %s", p.OwnerRole); err != nil {
@@ -436,10 +539,10 @@ func (s *Service) rollbackRotate(ctx context.Context, op store.Operation, log *j
 		return err
 	}
 	var params rotateParams
-	if err := json.Unmarshal(op.Params, &params); err != nil || params.PreviousVerifier == "" {
+	if err := json.Unmarshal(op.Params, &params); err != nil || params.Secrets.PreviousVerifier == "" {
 		return errors.New("no previous verifier to restore")
 	}
-	if err := s.setVerifier(ctx, p, params.PreviousVerifier); err != nil {
+	if err := s.setVerifier(ctx, p, params.Secrets.PreviousVerifier); err != nil {
 		return err
 	}
 	return s.syncPooler(ctx, log, "rollback", "previous password restored")

@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -17,6 +19,10 @@ type FreeTier struct {
 	// WakerListen is where the waker listens (XENIBASE_WAKER_LISTEN, default
 	// ":6435"). Only the poolers should reach it.
 	WakerListen string
+	// WakerAllow (XENIBASE_WAKER_ALLOW, comma-separated CIDRs) are further
+	// networks the waker accepts connections from, besides loopback and
+	// the poolers' own addresses.
+	WakerAllow []netip.Prefix
 	// PauseAfter, ArchiveAfter and DeleteAfter are XENIBASE_FREE_PAUSE_AFTER
 	// (168h), XENIBASE_FREE_ARCHIVE_AFTER (2160h, 90 days) and
 	// XENIBASE_FREE_DELETE_AFTER (8760h, a year).
@@ -55,6 +61,17 @@ func loadFreeTier(getenv func(string) string, readFile func(string) ([]byte, err
 		PauseAfter: 7 * 24 * time.Hour, ArchiveAfter: 90 * 24 * time.Hour, DeleteAfter: 365 * 24 * time.Hour}
 	if f.WakerListen == "" {
 		f.WakerListen = ":6435"
+	}
+	for _, c := range strings.Split(getenv("XENIBASE_WAKER_ALLOW"), ",") {
+		if c = strings.TrimSpace(c); c == "" {
+			continue
+		}
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil || pfx.Masked() != pfx {
+			errs = append(errs, fmt.Errorf("XENIBASE_WAKER_ALLOW: %q is not a network such as 10.0.0.0/16", c))
+			continue
+		}
+		f.WakerAllow = append(f.WakerAllow, pfx)
 	}
 	if f.WakerAddr != "" {
 		if h, p := f.WakerHostPort(); h == "" || p < 1 || p > 65535 {

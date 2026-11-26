@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -42,6 +43,8 @@ const (
 
 	// CodeChallengeMethod is the only PKCE method accepted.
 	CodeChallengeMethod = "S256"
+	// ConsentTTL is how long a consent page may wait for the user's answer.
+	ConsentTTL = 30 * time.Minute
 )
 
 // Token endpoint errors (RFC 6749 §5.2).
@@ -257,6 +260,66 @@ func (s *Service) ValidateAuthorize(ctx context.Context, r AuthorizeRequest) (Au
 		}
 	}
 	return Authorization{Client: c, Scopes: scopes}, nil
+}
+
+// consent is an authorize request as ValidateAuthorize accepted it, sealed
+// for the user who saw it: the approval brings it back, so the scopes the app
+// asked for are the server's record, not the page's (decision OAuth #4: the
+// user narrows, never widens).
+type consent struct {
+	UserID        uuid.UUID `json:"user_id"`
+	ClientID      string    `json:"client_id"`
+	RedirectURI   string    `json:"redirect_uri"`
+	CodeChallenge string    `json:"code_challenge"`
+	Scopes        []string  `json:"scopes"`
+	Expires       time.Time `json:"expires"`
+}
+
+// consentAAD binds a consent to its user. The label starts like the sign-in
+// challenges' because a consent is as short-lived: it is kept nowhere, and a
+// master-key rotation (which clears those challenges) just makes an open
+// consent page start again.
+func consentAAD(userID uuid.UUID) []byte {
+	return []byte("auth_challenges.oauth_consent:" + userID.String())
+}
+
+// SealConsent records a validated request for userID's consent page.
+func (s *Service) SealConsent(userID uuid.UUID, r AuthorizeRequest, a Authorization) (string, error) {
+	b, err := json.Marshal(consent{UserID: userID, ClientID: a.Client.ClientID, RedirectURI: r.RedirectURI,
+		CodeChallenge: r.CodeChallenge, Scopes: a.Scopes, Expires: s.cfg.Now().Add(ConsentTTL)})
+	if err != nil {
+		return "", err
+	}
+	sealed, err := s.keyring.Encrypt(b, consentAAD(userID))
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+// OpenConsent checks that sealed is userID's consent for r (the same client,
+// redirect URI and challenge, not expired), and returns the scopes the app
+// asked for.
+func (s *Service) OpenConsent(userID uuid.UUID, sealed string, r AuthorizeRequest) ([]string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(sealed)
+	if err != nil || len(raw) == 0 {
+		return nil, fmt.Errorf("%w: the consent is missing or damaged; go back to the app and start again", ErrInvalid)
+	}
+	b, err := s.keyring.Decrypt(raw, consentAAD(userID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: the consent is missing or damaged; go back to the app and start again", ErrInvalid)
+	}
+	var c consent
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+	switch {
+	case c.UserID != userID || c.ClientID != r.ClientID || c.RedirectURI != r.RedirectURI || c.CodeChallenge != r.CodeChallenge:
+		return nil, fmt.Errorf("%w: the consent is for another request", ErrInvalid)
+	case !s.cfg.Now().Before(c.Expires):
+		return nil, fmt.Errorf("%w: the consent page has expired; go back to the app and start again", ErrInvalid)
+	}
+	return c.Scopes, nil
 }
 
 // CodeParams is a user's consent. The caller has checked that the user

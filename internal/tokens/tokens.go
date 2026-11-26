@@ -200,6 +200,9 @@ type CreateParams struct {
 	// OAuthClientID is the third-party app the token is issued to (Via
 	// oauth), shown with the token as the app's name.
 	OAuthClientID *uuid.UUID
+	// ParentID is the token that created this one (Via api): revoking the
+	// parent revokes it.
+	ParentID *uuid.UUID
 }
 
 // Created is a new token: Secret is shown once.
@@ -248,6 +251,7 @@ func (s *Service) create(ctx context.Context, q *store.Queries, p CreateParams) 
 	row, err := q.InsertAPIToken(ctx, store.InsertAPITokenParams{
 		UserID: p.UserID, OrgID: p.OrgID, Name: name, TokenHash: Hash(secret), Prefix: secret[:displayLen],
 		Scopes: scopes, ProjectIds: p.Projects, ExpiresAt: s.cfg.Now().Add(exp), CreatedVia: via, OauthClientID: p.OAuthClientID,
+		ParentID: p.ParentID,
 	})
 	if err != nil {
 		return Created{}, err
@@ -373,7 +377,7 @@ func (s *Service) notifyCreated(ctx context.Context, q *store.Queries, t store.A
 			mail.P("Hello,"),
 			mail.P("An API token was just created for your Xenibase account."),
 			mail.Facts(
-				mail.Fact{Label: "Name", Value: t.Name},
+				mail.Fact{Label: "Name", Value: mail.Inert(t.Name)},
 				mail.Fact{Label: "Starts with", Value: t.Prefix + "…"},
 				mail.Fact{Label: "Scopes", Value: strings.Join(t.Scopes, ", ")},
 				mail.Fact{Label: "Expires", Value: t.ExpiresAt.UTC().Format("2 January 2006")},
@@ -400,7 +404,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 			Title:     "An API token is about to expire",
 			Blocks: []mail.Block{
 				mail.P("Hello,"),
-				mail.P(fmt.Sprintf("Your API token %q for %s expires on %s. Create a new one before then, so nothing that uses it stops working.", t.Name, t.OrgName, t.ExpiresAt.UTC().Format("2 January 2006 at 15:04 MST"))),
+				mail.P(fmt.Sprintf("Your API token %q for %s expires on %s. Create a new one before then, so nothing that uses it stops working.", mail.Inert(t.Name), mail.Inert(t.OrgName), t.ExpiresAt.UTC().Format("2 January 2006 at 15:04 MST"))),
 				mail.Button("Create a new token", s.link("/account#tokens")),
 			},
 			SignOff: mail.SignOff,

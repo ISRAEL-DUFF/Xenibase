@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/bloom"
 	"github.com/israel-duff/xenibase/internal/tenancy"
 )
 
@@ -94,13 +96,17 @@ func TestPlanLimitsBackendServices(t *testing.T) {
 	}
 	use(tenancy.MetricAuthMAU, 2)
 	adminAuth := authAPI{t: t, ed: sp.ed, ref: sp.ref, key: sp.admin.key}
-	newUser := func(email string) {
+	newUser := func(email string) uuid.UUID {
 		t.Helper()
-		if r := adminAuth.post("/auth/v1/admin/users", fmt.Sprintf(`{"email":%q,"password":"password-123456","email_confirm":true}`, email)); r.Code != 201 {
+		r := adminAuth.post("/auth/v1/admin/users", fmt.Sprintf(`{"email":%q,"password":"password-123456","email_confirm":true}`, email))
+		var u struct {
+			ID uuid.UUID `json:"id"`
+		}
+		if r.Code != 201 || json.Unmarshal([]byte(r.Body), &u) != nil {
 			t.Fatalf("%s: %d %s", email, r.Code, r.Body)
 		}
+		return u.ID
 	}
-	newUser("carol@example.com")
 	override(`{"auth_mau_per_month": 2}`)
 	// Each poll signs in someone new: one let in before the limit reached
 	// the edge became active, and is rightly let in from then on.
@@ -111,7 +117,20 @@ func TestPlanLimitsBackendServices(t *testing.T) {
 		newUser(email)
 		return signIn(email).Code == http.StatusTooManyRequests
 	})
-	if r := signIn("carol@example.com"); r.Code != http.StatusTooManyRequests || !strings.Contains(r.Body, "mau_limit_reached") {
+	// A new user the counted-users filter really leaves out: the filter
+	// lets in a small share of uncounted users by design (mauFilterRate).
+	var counted []byte
+	if err := e.DB.QueryRow(ctx, `SELECT mau_counted FROM project_services WHERE project_id = $1`, sp.pid).Scan(&counted); err != nil {
+		t.Fatal(err)
+	}
+	carol := "carol@example.com"
+	for i := 0; bloom.Has(counted, newUser(carol)); i++ {
+		if i == 20 {
+			t.Fatal("every new user is a false positive of the counted-users filter")
+		}
+		carol = fmt.Sprintf("carol%d@example.com", i)
+	}
+	if r := signIn(carol); r.Code != http.StatusTooManyRequests || !strings.Contains(r.Body, "mau_limit_reached") {
 		t.Fatalf("a new user at the MAU limit: %d %s", r.Code, r.Body)
 	}
 	if r := signIn("alice@example.com"); r.Code != 200 {
@@ -122,7 +141,7 @@ func TestPlanLimitsBackendServices(t *testing.T) {
 	}
 	override(`{}`)
 	waitFor(t, 20*time.Second, "the lifted MAU limit reaching the edge", func() bool {
-		return signIn("carol@example.com").Code == 200
+		return signIn(carol).Code == 200
 	})
 
 	// ---- Ceilings ----------------------------------------------------------------

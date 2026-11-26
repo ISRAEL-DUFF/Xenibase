@@ -164,11 +164,15 @@ func (c *Client) StartMultipart(ctx context.Context, key, contentType string) (s
 }
 
 // PresignPart is a URL a client PUTs part n (1-based) of the upload to,
-// valid for ttl.
-func (c *Client) PresignPart(ctx context.Context, key, uploadID string, n int32, ttl time.Duration) (string, error) {
+// valid for ttl. The part's size is signed in (Content-Length is a signed
+// header), so the store takes exactly size bytes there and no more.
+func (c *Client) PresignPart(ctx context.Context, key, uploadID string, n int32, size int64, ttl time.Duration) (string, error) {
+	if size <= 0 {
+		return "", fmt.Errorf("presign part %d: a part has a size", n)
+	}
 	ps := s3.NewPresignClient(c.s3)
 	req, err := ps.PresignUploadPart(ctx, &s3.UploadPartInput{Bucket: aws.String(c.t.Bucket), Key: aws.String(c.t.Key(key)),
-		UploadId: aws.String(uploadID), PartNumber: aws.Int32(n)}, s3.WithPresignExpires(ttl))
+		UploadId: aws.String(uploadID), PartNumber: aws.Int32(n), ContentLength: aws.Int64(size)}, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", fmt.Errorf("presign part %d: %w", n, err)
 	}

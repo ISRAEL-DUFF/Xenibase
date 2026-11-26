@@ -96,13 +96,13 @@ func (s *Service) DetachReplica(ctx context.Context, d DetachParams) (provision.
 	}
 	cp := provision.CreateParams{
 		OrgID: src.OrgID, CreatorRole: d.CreatorRole, Name: name, CreatedBy: d.CreatedBy, Kind: KindDetachReplica,
-		Tier: provision.TierDedicated, NodeID: &r.NodeID, PgVersion: int(inst.PgVersion), InstanceID: &r.ID,
+		Tier: provision.TierDedicated, NodeID: &r.NodeID, PgVersion: int(inst.PgVersion), Derived: true, InstanceID: &r.ID,
 		Region: node.Region, DataResidency: src.DataResidency && node.Region == src.Region,
 		Params: map[string]any{"detach": detachParams{SourceProject: src.ID, SourceInstance: inst.ID, Replica: r.ID}},
 	}
-	if inst.Profile != nil {
-		cp.Profile = *inst.Profile
-	}
+	// The source's size, a profile's or a resize's.
+	cp.Size = SizeProfile(inst)
+	cp.MinMaxConnections = int(inst.MaxConnections)
 	if inst.VolumeGb != nil {
 		cp.VolumeGB = int(*inst.VolumeGb)
 	}
@@ -233,7 +233,11 @@ func (s *Service) ensureDetached(ctx context.Context, inst store.Instance, p sto
 	}
 	if err == nil {
 		// A promoted former standby still names the source's primary.
-		for _, stmt := range []string{"ALTER SYSTEM RESET primary_conninfo", "ALTER SYSTEM RESET primary_slot_name", "SELECT pg_reload_conf()"} {
+		// So do the replica's standby settings, which would otherwise pass
+		// to the new project's own standbys.
+		for _, stmt := range []string{"ALTER SYSTEM RESET primary_conninfo", "ALTER SYSTEM RESET primary_slot_name",
+			"ALTER SYSTEM RESET hot_standby_feedback", "ALTER SYSTEM RESET max_standby_streaming_delay",
+			"ALTER SYSTEM RESET max_standby_archive_delay", "SELECT pg_reload_conf()"} {
 			if _, err = conn.Exec(ctx, stmt); err != nil {
 				break
 			}

@@ -32,6 +32,7 @@ RETURNING *;
 SELECT EXISTS (SELECT 1 FROM organizations WHERE slug = @slug AND id <> @org_id);
 
 -- name: ListUserOrgs :many
+-- tenant: system - scoped by the user's own memberships (m.user_id).
 -- The organisations a user belongs to, personal first.
 SELECT o.*, m.role AS member_role,
        (SELECT count(*) FROM org_members x WHERE x.org_id = o.id)::int AS member_count,
@@ -50,12 +51,14 @@ WHERE NOT EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = o.id) AND o.statu
 SELECT * FROM org_members WHERE org_id = @org_id AND user_id = @user_id;
 
 -- name: InsertOrgMember :exec
--- Adds a member; an existing member keeps the higher of the two roles.
+-- Adds a member; an existing member keeps their role unless the new one is
+-- higher (owner, then admin). Billing and member are not ranked: a billing
+-- member stays billing, and a member doesn't become one.
 INSERT INTO org_members (org_id, user_id, role) VALUES (@org_id, @user_id, @role)
 ON CONFLICT (org_id, user_id) DO UPDATE SET role = CASE
   WHEN org_members.role = 'owner' OR EXCLUDED.role = 'owner' THEN 'owner'
   WHEN org_members.role = 'admin' OR EXCLUDED.role = 'admin' THEN 'admin'
-  ELSE 'member' END;
+  ELSE org_members.role END;
 
 -- name: SetOrgMemberRole :execrows
 UPDATE org_members SET role = @role WHERE org_id = @org_id AND user_id = @user_id;
@@ -106,7 +109,8 @@ ORDER BY p.created_at DESC, p.id DESC
 LIMIT @max_rows;
 
 -- name: SetProjectOrg :exec
--- Moves a project to another organisation (project transfer).
+-- Moves a project to another organisation (project transfer); the child
+-- tables that carry org_id follow by their keys (ON UPDATE CASCADE).
 UPDATE projects SET org_id = @new_org_id WHERE id = @id AND org_id = @org_id;
 
 -- ---- Project members -------------------------------------------------------
@@ -133,9 +137,6 @@ JOIN users u ON u.id = pm.user_id
 LEFT JOIN org_members m ON m.org_id = pm.org_id AND m.user_id = pm.user_id
 WHERE pm.project_id = @project_id AND pm.org_id = @org_id
 ORDER BY u.email;
-
--- name: MoveProjectMembers :exec
-UPDATE project_members SET org_id = @new_org_id WHERE project_id = @project_id AND org_id = @org_id;
 
 -- ---- Invitations -----------------------------------------------------------
 
@@ -219,9 +220,6 @@ SELECT * FROM project_db_users WHERE project_id = @project_id ORDER BY role_name
 -- name: ListUserDBUsersInOrg :many
 SELECT * FROM project_db_users WHERE org_id = @org_id AND user_id = @user_id;
 
--- name: MoveProjectDBUsers :exec
-UPDATE project_db_users SET org_id = @new_org_id WHERE project_id = @project_id AND org_id = @org_id;
-
 -- name: PoolerDBUsers :many
 -- tenant: system - every personal login the poolers must accept.
 SELECT d.role_name, d.scram_verifier, p.region, p.forward_region, p.forward_until
@@ -266,3 +264,19 @@ LIMIT @max_rows;
 -- name: RenameProjectDBUser :exec
 -- tenant: system - the rename_opaque operation renames a project's own logins.
 UPDATE project_db_users SET role_name = @new_name WHERE project_id = @project_id AND role_name = @old_name;
+
+-- name: CountOrgInvitationsSince :one
+-- Invitations an organisation sent since a time, and the oldest of them
+-- (the daily cap).
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE org_id = @org_id AND created_at >= @since::timestamptz;
+
+-- name: CountInviterInvitationsSince :one
+-- tenant: system - one inviter's organisation invitations in every organisation, for the daily cap.
+SELECT count(*)::int AS sent, COALESCE(min(created_at), now())::timestamptz AS oldest
+FROM invitations WHERE invited_by = @invited_by AND kind = 'org' AND created_at >= @since::timestamptz;
+
+-- name: UnverifyLeavingMemberContact :exec
+-- A billing contact verified because it was a member's address routes support tickets only while they are a member.
+UPDATE billing_contacts c SET verified_at = NULL FROM users u
+WHERE c.org_id = @org_id AND u.id = @user_id AND c.email = u.email;

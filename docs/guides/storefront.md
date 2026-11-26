@@ -305,8 +305,11 @@ Three habits that keep this safe:
   everyone.
 - **Views** must be created `WITH (security_invoker = true)`, or they bypass the
   policies of the tables under them.
-- **Hide columns**, not only rows, when needed:
-  `REVOKE SELECT (phone) ON profiles FROM "<db>_anon";`.
+- **Hide columns**, not only rows, when needed: take the table-level grant
+  away and grant the columns that stay readable,
+  `REVOKE SELECT ON profiles FROM "<db>_anon"; GRANT SELECT (user_id, full_name, created_at) ON profiles TO "<db>_anon";`
+  (a column-level `REVOKE` alone does nothing while the table-level grant
+  stands).
 
 **One migration file for every project.** The role names contain the project's
 database name, which differs per project. Derive them in the migration instead of

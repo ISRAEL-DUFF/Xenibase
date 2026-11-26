@@ -346,7 +346,8 @@ export function AdminCapacityPage() {
                     tone={
                       n.lifecycle === "active"
                         ? "ok"
-                        : n.lifecycle === "draining"
+                        : n.lifecycle === "draining" ||
+                            n.lifecycle === "retiring"
                           ? "warn"
                           : "accent"
                     }

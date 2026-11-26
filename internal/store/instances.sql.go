@@ -28,16 +28,18 @@ func (q *Queries) SetInstancePITRDays(ctx context.Context, arg SetInstancePITRDa
 }
 
 const setInstanceSize = `-- name: SetInstanceSize :exec
-UPDATE instances SET cpu_limit = $1, mem_limit_mb = $2, volume_gb = $3, profile = $4
-WHERE id = $5
+UPDATE instances SET cpu_limit = $1, mem_limit_mb = $2, volume_gb = $3, profile = $4,
+  max_connections = $5
+WHERE id = $6
 `
 
 type SetInstanceSizeParams struct {
-	CpuLimit   pgtype.Numeric
-	MemLimitMb *int32
-	VolumeGb   *int32
-	Profile    *string
-	ID         uuid.UUID
+	CpuLimit       pgtype.Numeric
+	MemLimitMb     *int32
+	VolumeGb       *int32
+	Profile        *string
+	MaxConnections int32
+	ID             uuid.UUID
 }
 
 // tenant: system - a dedicated project's instance the request already authorized.
@@ -47,6 +49,7 @@ func (q *Queries) SetInstanceSize(ctx context.Context, arg SetInstanceSizeParams
 		arg.MemLimitMb,
 		arg.VolumeGb,
 		arg.Profile,
+		arg.MaxConnections,
 		arg.ID,
 	)
 	return err

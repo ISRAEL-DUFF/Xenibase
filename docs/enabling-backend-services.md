@@ -26,6 +26,11 @@ from the web UI's. The edge reads the hostname to know which project a request
 is for, so one project's key can't be used on another, and browsers keep each
 project's cookies and storage apart.
 
+This page sets up the platform's API domain, served here in the home
+region. A region elsewhere (Lagos) can have its own, `<ref>.ng.<api-domain>`,
+served by an edge in that region so its projects' API traffic stays there:
+see [Regions](regions.md#a-regions-api-domain).
+
 ```text
 app ──HTTPS──▶ <ref>.api.example.com
                   │  DNS: *.api.example.com  A  → this server
@@ -254,7 +259,7 @@ How to use the data API, auth, storage and realtime from there is in
 | Where | What |
 | --- | --- |
 | `.env` | Adds, only if missing: `XENIBASE_API_DOMAIN`, a generated `XENIBASE_EDGE_SECRET` (40 random characters; the server and the edge must share it), `DNS_PROVIDER`, `CADDY_IMAGE` (`xenibase-caddy-<provider>:local`), `COMPOSE_PROFILES=services`, and for acme-dns `ACMEDNS_SERVER_URL` (default `https://auth.acme-dns.io`). It never writes your tokens or passwords. |
-| Docker images | Builds `xenibase-caddy-<provider>:local`: Caddy with the chosen DNS plugin (`deploy/compose/caddy-dns/Dockerfile`, built with `xcaddy`). The stock `caddy:2` image stays the default for installs that don't use backend services. |
+| Docker images | Builds `xenibase-caddy-<provider>:local`: Caddy with the chosen DNS plugin (`deploy/compose/caddy-dns/Dockerfile`, built with `xcaddy`). The stock `caddy:2.10.0` image (the same version) stays the default for installs that don't use backend services. |
 | `deploy/compose/caddy.d/api.caddy` | Written by the script, git-ignored. The wildcard site: `*.<api-domain>`, its DNS challenge settings, and `reverse_proxy xenibase-edge:8443` with buffering off (realtime and large downloads stream). The Caddyfile imports `caddy.d/*.caddy`; with no file there, nothing changes. |
 | Containers | `docker compose up -d --build` starts `xenibase-edge` (a compose *profile*, off until `COMPOSE_PROFILES=services` is set) with a 1 GB memory limit, and recreates Caddy with the new image. |
 
@@ -376,6 +381,11 @@ pieces work; if you hit something else, `docker compose logs caddy` and
   and, where the provider allows, to DNS edits only.
 - The edge is reachable only through Caddy; the compose service publishes no
   port. Don't add one.
+- The edge holds the credentials of the region's file storage. Give the
+  region a **files target** of its own (Platform → Regions; see
+  [regions](regions.md#files-target)), or the edge holds the backup
+  target's, which can delete every backup in the region; the
+  `files_share_backups` alert fires until you do.
 - Backend services add a public surface: the data API, auth, storage and
   realtime answer on the internet. Read the
   [security review](security-review.md) and the [penetration test scope](pentest-scope.md)

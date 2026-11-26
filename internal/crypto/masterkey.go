@@ -75,6 +75,9 @@ func newKey(raw []byte) (key, error) {
 type Keyring struct {
 	primary key
 	byID    map[KeyID]key
+	// seed keys Derive when set (SetDeriveSeed): a stored secret of its
+	// own, so derived values outlive a rotation of the master key.
+	seed []byte
 }
 
 // NewKeyring builds a keyring from a primary key and optional previous keys.
@@ -165,11 +168,31 @@ func additionalData(header, aad []byte) []byte {
 	return append(out, aad...)
 }
 
-// Derive returns n bytes (at most 32) deterministically derived from the
-// primary key for label, for values that must be stable and secret, such as
-// a SCRAM salt. They change when the primary key is rotated.
+// SetDeriveSeed makes Derive key on seed instead of the primary key. The
+// server sets it once at startup, before the keyring is shared, from the
+// sealed settings row rotate.DeriveSeed keeps; a rotation re-seals that row
+// like any other secret, so what Derive returns does not change with the
+// master key.
+func (k *Keyring) SetDeriveSeed(seed []byte) error {
+	if len(seed) != KeySize {
+		return fmt.Errorf("crypto: derive seed must be %d bytes, got %d", KeySize, len(seed))
+	}
+	k.seed = append([]byte(nil), seed...)
+	return nil
+}
+
+// Derive returns n bytes (at most 32) deterministically derived for label,
+// for values that must be stable and secret, such as a SCRAM salt or a
+// password that is never stored. They are keyed on the derive seed
+// (SetDeriveSeed), which survives a rotation; a keyring without one (tests,
+// and tools that derive nothing) keys on the primary key, which is what the
+// seed of an install from before the seed existed holds.
 func (k *Keyring) Derive(label string, n int) []byte {
-	h := hmac.New(sha256.New, k.primary.raw)
+	secret := k.seed
+	if secret == nil {
+		secret = k.primary.raw
+	}
+	h := hmac.New(sha256.New, secret)
 	h.Write([]byte("xenibase derive\x00" + label))
 	return h.Sum(nil)[:min(n, sha256.Size)]
 }

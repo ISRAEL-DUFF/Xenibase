@@ -48,6 +48,8 @@ type Service struct {
 	mail     *mail.Service
 	cfg      Config
 	log      *slog.Logger
+	// send replaces mail.Send (tests).
+	send func(ctx context.Context, m mail.Message) error
 }
 
 // New returns a Service. mail may be nil (no notices).
@@ -167,13 +169,17 @@ func (s *Service) Sweep(ctx context.Context) error {
 			continue
 		}
 		left := r.RetiresAt.Sub(now)
-		// The nearest step reached: one reminder however long the server was down.
+		// The nearest step reached: one reminder however long the server
+		// was down. Before the first, the deprecation notice again, for
+		// the organisations whose mail failed (notify skips the rest).
+		step := 0
 		for i := len(Reminders) - 1; i >= 0; i-- {
 			if left <= time.Duration(Reminders[i])*24*time.Hour {
-				s.notify(ctx, store.PgVersion{Major: r.Major, Status: r.Status, DeprecatedAt: r.DeprecatedAt, RetiresAt: r.RetiresAt, Notes: r.Notes}, Reminders[i])
+				step = Reminders[i]
 				break
 			}
 		}
+		s.notify(ctx, store.PgVersion{Major: r.Major, Status: r.Status, DeprecatedAt: r.DeprecatedAt, RetiresAt: r.RetiresAt, Notes: r.Notes}, step)
 	}
 	return nil
 }
@@ -213,36 +219,62 @@ func (s *Service) notify(ctx context.Context, v store.PgVersion, step int) {
 	}
 	sort.Slice(orgs, func(i, j int) bool { return byOrg[orgs[i]][0].OrgName < byOrg[orgs[j]][0].OrgName })
 	for _, org := range orgs {
-		n, err := q.InsertPgVersionNotice(ctx, store.InsertPgVersionNoticeParams{Major: v.Major, OrgID: org, DaysBefore: int32(step)})
-		if err != nil || n == 0 {
-			continue
-		}
-		if s.mail == nil {
-			continue
-		}
-		to, err := q.ProjectAdminEmails(ctx, store.ProjectAdminEmailsParams{OrgID: org, ProjectID: uuid.Nil})
-		if err != nil || len(to) == 0 {
-			continue
-		}
-		var list strings.Builder
-		for _, p := range byOrg[org] {
-			fmt.Fprintf(&list, "- %s: %s/projects/%s/settings (Upgrade)\n", p.Name, strings.TrimRight(s.cfg.PublicURL, "/"), p.ID)
-		}
-		date := v.RetiresAt.Format("2 January 2006")
-		subject := fmt.Sprintf("[Xenibase] Postgres %d is deprecated: upgrade before %s", v.Major, date)
-		if step > 0 {
-			subject = fmt.Sprintf("[Xenibase] Postgres %d retires in %d days (%s)", v.Major, step, date)
-		}
-		body := fmt.Sprintf("Postgres %d is deprecated on Xenibase and retires on %s.\n\n"+
-			"These projects of %s run it:\n%s\n"+
-			"Upgrade each from its settings (Upgrade Postgres): a preflight checks the schema on the new major first, and the move pauses writes for seconds.\n\n"+
-			"After %s the projects keep running but are unsupported: no new projects on Postgres %d, and fixes and help are limited (see the terms).\n",
-			v.Major, date, byOrg[org][0].OrgName, list.String(), date, v.Major)
-		if v.Notes != "" {
-			body += "\n" + v.Notes + "\n"
-		}
-		if err := s.mail.Send(ctx, mail.Message{To: to, Subject: subject, Body: body}); err != nil {
+		if err := s.notifyOrg(ctx, v, step, org, byOrg[org]); err != nil {
 			s.log.Warn("postgres version notice", "major", v.Major, "org", org, "err", err)
 		}
 	}
+}
+
+// notifyOrg sends one organisation its notice, once. The pg_version_notices
+// row is inserted in a transaction that stays open until the mail is sent:
+// another server's insert waits on it and then finds the row, so only one
+// sends, and a send that fails rolls the row back for the next sweep.
+func (s *Service) notifyOrg(ctx context.Context, v store.PgVersion, step int, org uuid.UUID, projects []store.ProjectsOnPgVersionRow) error {
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		n, err := q.InsertPgVersionNotice(ctx, store.InsertPgVersionNoticeParams{Major: v.Major, OrgID: org, DaysBefore: int32(step)})
+		if err != nil || n == 0 {
+			return err // sent already, or being sent
+		}
+		send := s.send
+		if send == nil {
+			if s.mail == nil {
+				return nil
+			}
+			send = s.mail.Send
+		}
+		to, err := q.ProjectAdminEmails(ctx, store.ProjectAdminEmailsParams{OrgID: org, ProjectID: uuid.Nil})
+		if err != nil {
+			return err
+		}
+		if len(to) == 0 {
+			return nil
+		}
+		if err := send(ctx, s.message(v, step, projects, to)); err != nil {
+			return fmt.Errorf("not sent; the next sweep tries again: %w", err)
+		}
+		return nil
+	})
+}
+
+// message is the notice for one organisation's projects on v.
+func (s *Service) message(v store.PgVersion, step int, projects []store.ProjectsOnPgVersionRow, to []string) mail.Message {
+	var list strings.Builder
+	for _, p := range projects {
+		fmt.Fprintf(&list, "- %s: %s/projects/%s/settings (Upgrade)\n", p.Name, strings.TrimRight(s.cfg.PublicURL, "/"), p.ID)
+	}
+	date := v.RetiresAt.Format("2 January 2006")
+	subject := fmt.Sprintf("[Xenibase] Postgres %d is deprecated: upgrade before %s", v.Major, date)
+	if step > 0 {
+		subject = fmt.Sprintf("[Xenibase] Postgres %d retires in %d days (%s)", v.Major, step, date)
+	}
+	body := fmt.Sprintf("Postgres %d is deprecated on Xenibase and retires on %s.\n\n"+
+		"These projects of %s run it:\n%s\n"+
+		"Upgrade each from its settings (Upgrade Postgres): a preflight checks the schema on the new major first, and the move pauses writes for seconds.\n\n"+
+		"After %s the projects keep running but are unsupported: no new projects on Postgres %d, and fixes and help are limited (see the terms).\n",
+		v.Major, date, projects[0].OrgName, list.String(), date, v.Major)
+	if v.Notes != "" {
+		body += "\n" + v.Notes + "\n"
+	}
+	return mail.Message{To: to, Subject: subject, Body: body}
 }

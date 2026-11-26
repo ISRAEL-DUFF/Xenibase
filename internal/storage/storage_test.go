@@ -122,3 +122,29 @@ func TestDeletePrefix(t *testing.T) {
 		t.Fatal("deleted an object outside the prefix")
 	}
 }
+
+// Targets that differ only in how their endpoint or prefix is written have
+// one location; another bucket, prefix or host is another location.
+func TestLocation(t *testing.T) {
+	base := Target{Endpoint: "https://s3.example.com", Bucket: "b", Prefix: "backups"}
+	same := []Target{
+		{Endpoint: "https://s3.example.com/", Bucket: "b", Prefix: "backups/"},
+		{Endpoint: "HTTPS://S3.Example.com:443", Bucket: "b", Prefix: "backups", AccessKey: "other"},
+	}
+	for _, o := range same {
+		if o.Location() != base.Location() {
+			t.Errorf("%+v: location %q, want %q", o, o.Location(), base.Location())
+		}
+	}
+	other := []Target{
+		{Endpoint: "https://s3.example.com", Bucket: "c", Prefix: "backups"},
+		{Endpoint: "https://s3.example.com", Bucket: "b", Prefix: "backups/x"},
+		{Endpoint: "https://s3.example.com", Bucket: "b"},
+		{Endpoint: "https://s3.example.com:9000", Bucket: "b", Prefix: "backups"},
+	}
+	for _, o := range other {
+		if o.Location() == base.Location() {
+			t.Errorf("%+v: same location as %+v", o, base)
+		}
+	}
+}

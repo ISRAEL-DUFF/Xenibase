@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,38 @@ func (q *Queries) DownsampleMetrics(ctx context.Context, since time.Time) (int64
 	return result.RowsAffected(), nil
 }
 
+const freshPoolerReadings = `-- name: FreshPoolerReadings :many
+SELECT source, pools FROM pooler_readings
+WHERE sampled_at > now() - make_interval(secs => $1::float8)
+ORDER BY source
+`
+
+type FreshPoolerReadingsRow struct {
+	Source string
+	Pools  json.RawMessage
+}
+
+// tenant: system - the metrics collector sums every server's pooler readings.
+func (q *Queries) FreshPoolerReadings(ctx context.Context, maxAgeS float64) ([]FreshPoolerReadingsRow, error) {
+	rows, err := q.db.Query(ctx, freshPoolerReadings, maxAgeS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FreshPoolerReadingsRow
+	for rows.Next() {
+		var i FreshPoolerReadingsRow
+		if err := rows.Scan(&i.Source, &i.Pools); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const latestMetrics = `-- name: LatestMetrics :many
 SELECT DISTINCT ON (scope, scope_id, metric) scope, scope_id, metric, ts, value
 FROM metric_points
@@ -78,6 +111,45 @@ func (q *Queries) LatestMetrics(ctx context.Context, since time.Time) ([]LatestM
 			&i.Metric,
 			&i.Ts,
 			&i.Value,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInstanceLabels = `-- name: ListInstanceLabels :many
+SELECT i.id, i.kind, i.node_id, n.name AS node FROM instances i
+JOIN nodes n ON n.id = i.node_id
+ORDER BY i.id
+`
+
+type ListInstanceLabelsRow struct {
+	ID     uuid.UUID
+	Kind   string
+	NodeID uuid.UUID
+	Node   string
+}
+
+// tenant: system - /metrics labels the series of instances (shared clusters and dedicated), not tenants.
+func (q *Queries) ListInstanceLabels(ctx context.Context) ([]ListInstanceLabelsRow, error) {
+	rows, err := q.db.Query(ctx, listInstanceLabels)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInstanceLabelsRow
+	for rows.Next() {
+		var i ListInstanceLabelsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.NodeID,
+			&i.Node,
 		); err != nil {
 			return nil, err
 		}
@@ -182,6 +254,19 @@ func (q *Queries) PruneMetrics(ctx context.Context) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
+const prunePoolerReadings = `-- name: PrunePoolerReadings :execrows
+DELETE FROM pooler_readings WHERE sampled_at < now() - interval '1 hour'
+`
+
+// tenant: system - the metrics collector drops readings of servers that stopped.
+func (q *Queries) PrunePoolerReadings(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, prunePoolerReadings)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const upsertMetricPoints = `-- name: UpsertMetricPoints :exec
 INSERT INTO metric_points (scope, scope_id, metric, ts, resolution, value)
 SELECT $1::text, unnest($2::uuid[]), unnest($3::text[]), $4::timestamptz, '1m', unnest($5::float8[])
@@ -206,5 +291,21 @@ func (q *Queries) UpsertMetricPoints(ctx context.Context, arg UpsertMetricPoints
 		arg.Ts,
 		arg.Vals,
 	)
+	return err
+}
+
+const upsertPoolerReading = `-- name: UpsertPoolerReading :exec
+INSERT INTO pooler_readings (source, pools, sampled_at) VALUES ($1, $2, now())
+ON CONFLICT (source) DO UPDATE SET pools = EXCLUDED.pools, sampled_at = now()
+`
+
+type UpsertPoolerReadingParams struct {
+	Source string
+	Pools  json.RawMessage
+}
+
+// tenant: system - a server's reading of its own poolers, for the metrics collector.
+func (q *Queries) UpsertPoolerReading(ctx context.Context, arg UpsertPoolerReadingParams) error {
+	_, err := q.db.Exec(ctx, upsertPoolerReading, arg.Source, arg.Pools)
 	return err
 }

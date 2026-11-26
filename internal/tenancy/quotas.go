@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/store"
 )
 
@@ -245,27 +246,97 @@ type Dedicated struct {
 }
 
 // WithinAllowance reports whether orgID may run one more dedicated
-// instance of size d without asking (V2 §10.6).
+// instance of size d without asking (V2 §10.6). Read replicas count as
+// instances the size of their primary. The create re-checks it under the
+// organisation's lock (claim).
 func (s *Service) WithinAllowance(ctx context.Context, orgID uuid.UUID, d Dedicated) (bool, error) {
 	_, o, err := s.Limits(ctx, orgID)
 	if err != nil {
 		return false, err
 	}
+	ok, _, err := withinAllowance(ctx, store.New(s.db), o, d)
+	return ok, err
+}
+
+// withinAllowance is WithinAllowance on q, with the use it counted.
+func withinAllowance(ctx context.Context, q *store.Queries, o store.OrgWithPlanRow, d Dedicated) (bool, store.OrgDedicatedUseRow, error) {
 	if o.PlanName == UnlimitedPlan {
-		return true, nil
+		return true, store.OrgDedicatedUseRow{}, nil
 	}
 	a, err := store.DecodeDedicatedAllowance(o.DedicatedAllowance)
 	if err != nil {
-		return false, err
+		return false, store.OrgDedicatedUseRow{}, err
 	}
-	u, err := store.New(s.db).OrgDedicatedUse(ctx, orgID)
+	u, err := q.OrgDedicatedUse(ctx, o.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return false, err
+		return false, u, err
 	}
 	return int(u.Instances)+1 <= a.Instances &&
 		u.Cpus+d.CPUs <= a.CPUs+1e-9 &&
 		int(u.MemMb)+d.MemoryMB <= a.MemoryMB &&
-		int(u.DiskGb)+d.DiskGB <= a.DiskGB, nil
+		int(u.DiskGb)+d.DiskGB <= a.DiskGB, u, nil
+}
+
+// LimitDedicatedAllowance names the dedicated allowance in a QuotaError.
+const LimitDedicatedAllowance = "dedicated_allowance"
+
+// claim is provision's QuotaGate. The checks made before a create
+// (CheckCreateProject, CheckCreateBranch, WithinAllowance) read the counts
+// outside the transaction that inserts, so creates sent in parallel each
+// saw the same count and all passed. claim takes the organisation's row
+// lock in that transaction and counts again, so each create sees the ones
+// committed before it.
+func (s *Service) claim(ctx context.Context, tx pgx.Tx, c provision.Claim) error {
+	if c.OrgID == uuid.Nil {
+		return nil // the isolation check's throwaway tenants
+	}
+	q := store.New(tx)
+	if err := q.LockOrgForQuota(ctx, c.OrgID); err != nil {
+		return err
+	}
+	o, err := q.OrgWithPlan(ctx, c.OrgID)
+	if err != nil {
+		return err
+	}
+	l, err := store.EffectiveLimits(o.PlanLimits, o.LimitOverrides)
+	if err != nil {
+		return err
+	}
+	count := func(limit string, n func(context.Context, uuid.UUID) (int32, error)) error {
+		most, ok := l.Get(limit)
+		if !ok {
+			return nil
+		}
+		used, err := n(ctx, c.OrgID)
+		if err != nil {
+			return err
+		}
+		if int64(used) >= most {
+			return &QuotaError{Limit: limit, Used: int64(used), Max: most}
+		}
+		return nil
+	}
+	if c.Project {
+		if err := count(store.LimitProjects, q.CountOrgProjects); err != nil {
+			return err
+		}
+	}
+	if c.Branch {
+		if err := count(store.LimitBranches, q.CountOrgBranches); err != nil {
+			return err
+		}
+	}
+	if c.Instance != nil {
+		ok, u, err := withinAllowance(ctx, q, o, Dedicated{CPUs: c.Instance.CPUs, MemoryMB: c.Instance.MemoryMB, DiskGB: c.VolumeGB})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			a, _ := store.DecodeDedicatedAllowance(o.DedicatedAllowance)
+			return &QuotaError{Limit: LimitDedicatedAllowance, Used: int64(u.Instances), Max: int64(a.Instances)}
+		}
+	}
+	return nil
 }
 
 // WithinAllowanceChange reports whether orgID may resize one of its

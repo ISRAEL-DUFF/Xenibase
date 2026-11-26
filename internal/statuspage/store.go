@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS current (
 CREATE TABLE IF NOT EXISTS heartbeats (
   component TEXT PRIMARY KEY, state TEXT NOT NULL, detail TEXT NOT NULL, received_at INTEGER NOT NULL
 );
+-- The sent_at (Unix milliseconds) of the newest heartbeat accepted: an
+-- older one (a replay) is refused.
+CREATE TABLE IF NOT EXISTS heartbeat_latest (
+  id INTEGER PRIMARY KEY CHECK (id = 1), sent_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS incidents (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, components TEXT NOT NULL, region TEXT NOT NULL,
   severity TEXT NOT NULL, status TEXT NOT NULL, auto INTEGER NOT NULL,
@@ -207,12 +212,28 @@ type heartbeat struct {
 	At            time.Time
 }
 
-func (s *store) saveHeartbeat(ctx context.Context, states map[string]statusapi.ComponentState, now time.Time) error {
+// errStaleHeartbeat: a heartbeat sent before the newest one accepted (a
+// replay, or one overtaken in transit) would overwrite newer states.
+var errStaleHeartbeat = errors.New("a newer heartbeat has already been accepted")
+
+func (s *store) saveHeartbeat(ctx context.Context, states map[string]statusapi.ComponentState, sentAt, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var latest int64
+	switch err := tx.QueryRowContext(ctx, `SELECT sent_at FROM heartbeat_latest WHERE id = 1`).Scan(&latest); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	case sentAt.UnixMilli() < latest:
+		return errStaleHeartbeat
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO heartbeat_latest (id, sent_at) VALUES (1, ?)
+ON CONFLICT (id) DO UPDATE SET sent_at = max(sent_at, excluded.sent_at)`, sentAt.UnixMilli()); err != nil {
+		return err
+	}
 	for id, c := range states {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO heartbeats (component, state, detail, received_at) VALUES (?, ?, ?, ?)
 ON CONFLICT (component) DO UPDATE SET state = excluded.state, detail = excluded.detail, received_at = excluded.received_at`,

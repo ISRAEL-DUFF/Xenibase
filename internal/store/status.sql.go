@@ -193,7 +193,7 @@ func (q *Queries) OrgOpenIncidents(ctx context.Context, orgID uuid.UUID) ([]OrgO
 }
 
 const providerUnavailableSince = `-- name: ProviderUnavailableSince :many
-SELECT DISTINCT ON (provider) provider, (error LIKE 'provider unavailable%')::bool AS unavailable
+SELECT DISTINCT ON (provider) provider, coalesce(error LIKE 'provider unavailable%', false)::bool AS unavailable
 FROM payment_intents WHERE automatic AND created_at > $1 AND status IN ('succeeded', 'failed')
 ORDER BY provider, created_at DESC
 `
@@ -204,6 +204,7 @@ type ProviderUnavailableSinceRow struct {
 }
 
 // tenant: system - payment providers whose last automatic charge since a time hit an outage.
+// A succeeded charge has no error: coalesce, or the NULL fails the scan into a bool.
 func (q *Queries) ProviderUnavailableSince(ctx context.Context, since time.Time) ([]ProviderUnavailableSinceRow, error) {
 	rows, err := q.db.Query(ctx, providerUnavailableSince, since)
 	if err != nil {
@@ -328,10 +329,10 @@ func (q *Queries) TouchEdge(ctx context.Context, arg TouchEdgeParams) error {
 }
 
 const unissuedDrafts = `-- name: UnissuedDrafts :one
-SELECT count(*)::int FROM invoices WHERE status = 'draft' AND NOT held AND period_start = $1
+SELECT count(*)::int FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= $1
 `
 
-// tenant: system - drafts of a month that aren't held and haven't been issued.
+// tenant: system - drafts of a month or an earlier one that aren't held and haven't been issued.
 func (q *Queries) UnissuedDrafts(ctx context.Context, periodStart pgtype.Date) (int32, error) {
 	row := q.db.QueryRow(ctx, unissuedDrafts, periodStart)
 	var column_1 int32

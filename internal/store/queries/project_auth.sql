@@ -26,6 +26,15 @@ WHERE project_id = ANY(@project_ids::uuid[]) AND status = 'active';
 UPDATE project_jwt_keys SET status = 'verifying', verify_until = @verify_until
 WHERE project_id = @project_id AND status = 'active';
 
+-- name: LockJWTKey :one
+-- tenant: system - a project the request already authorized.
+SELECT * FROM project_jwt_keys WHERE project_id = @project_id AND id = @id FOR UPDATE;
+
+-- name: RetireJWTKey :exec
+-- tenant: system - a project the request already authorized: a key withdrawn at once.
+UPDATE project_jwt_keys SET status = 'retired', retired_at = now()
+WHERE project_id = @project_id AND id = @id AND status <> 'retired';
+
 -- name: RetireJWTKeys :execrows
 -- tenant: system - the signing-key sweep across all projects.
 UPDATE project_jwt_keys SET status = 'retired', retired_at = now()

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,10 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/israel-duff/xenibase/internal/datacat"
+	"github.com/israel-duff/xenibase/internal/edgeapi"
 )
 
 // A project's realtime on this edge process: its connections' channels,
@@ -53,18 +54,23 @@ type rtHub struct {
 	e   *Edge
 	ref string
 
-	conns atomic.Int64
+	count atomic.Int64 // connections, for the limit and metering
 	msgs  atomic.Int64 // messages to and from clients, since the last report
 
 	meterMu   sync.Mutex
 	meteredAt time.Time
 
 	mu        sync.Mutex
+	conns     map[*rtConn]struct{} // the open connections
 	channels  map[*rtChannel]struct{}
 	byTopic   map[string]map[*rtChannel]struct{}
 	subs      map[string]map[*rtSub]struct{} // "schema.table"
 	listening bool
 	emptyAt   time.Time
+	// stopListen ends the current listener, which closes listenDone when
+	// it has; a new one waits for that, since the cursor is its own.
+	stopListen context.CancelFunc
+	listenDone chan struct{}
 	// ready is closed once the listener reads the outbox from a point
 	// after every channel joined so far: a join waits for it before
 	// answering, so no change committed after "subscribed" is missed.
@@ -98,8 +104,8 @@ func (e *Edge) hub(ref string) *rtHub {
 	}
 	h := e.hubs[ref]
 	if h == nil {
-		h = &rtHub{e: e, ref: ref, channels: map[*rtChannel]struct{}{}, byTopic: map[string]map[*rtChannel]struct{}{},
-			subs: map[string]map[*rtSub]struct{}{}}
+		h = &rtHub{e: e, ref: ref, conns: map[*rtConn]struct{}{}, channels: map[*rtChannel]struct{}{},
+			byTopic: map[string]map[*rtChannel]struct{}{}, subs: map[string]map[*rtSub]struct{}{}}
 		h.bc.init()
 		h.meteredAt = time.Now()
 		e.hubs[ref] = h
@@ -109,11 +115,100 @@ func (e *Edge) hub(ref string) *rtHub {
 
 // admit counts a new connection, false when that is past max (0: none).
 func (h *rtHub) admit(limit int) bool {
-	n := h.conns.Add(1)
+	n := h.count.Add(1)
 	return limit <= 0 || n <= int64(limit)
 }
 
-func (h *rtHub) release()        { h.conns.Add(-1) }
+// opened and closed keep the hub's set of open connections.
+func (h *rtHub) opened(rc *rtConn) {
+	h.mu.Lock()
+	h.conns[rc] = struct{}{}
+	h.mu.Unlock()
+}
+
+func (h *rtHub) closed(rc *rtConn) {
+	h.mu.Lock()
+	delete(h.conns, rc)
+	h.mu.Unlock()
+}
+
+// rtProjectsChanged re-checks the open connections of projects whose feed
+// entry changed or that left the feed.
+func (e *Edge) rtProjectsChanged(refs []string) {
+	var hubs []*rtHub
+	e.rtMu.Lock()
+	for _, ref := range refs {
+		if h := e.hubs[ref]; h != nil {
+			hubs = append(hubs, h)
+		}
+	}
+	e.rtMu.Unlock()
+	for _, h := range hubs {
+		h.feedChanged()
+	}
+}
+
+// refusal is why a connection may no longer stay open, "" when it may:
+// the project left the feed (services off) or isn't active, its
+// organisation used up the month's realtime messages or API requests, or
+// the key it was opened with was revoked.
+func refusal(p *project, keyID uuid.UUID) string {
+	switch {
+	case p == nil:
+		return "the project's backend services are off"
+	case p.cfg.State == edgeapi.StateSuspended:
+		return "the project's organisation is suspended"
+	case p.cfg.State != edgeapi.StateActive:
+		return "the project isn't active"
+	case p.cfg.Realtime.MessagesBlocked:
+		return "the organisation's realtime messages for this month are used up"
+	case p.cfg.RequestsBlocked:
+		return "the organisation has used its plan's API requests for the month"
+	}
+	for _, k := range p.keys {
+		if k.ID == keyID {
+			return ""
+		}
+	}
+	return "the API key this connection was opened with was revoked"
+}
+
+// feedChanged applies the project's new configuration to its open
+// connections: those it no longer allows are closed, and once the project
+// has left the feed the listener stops.
+func (h *rtHub) feedChanged() {
+	p := h.e.lookup(h.ref)
+	h.mu.Lock()
+	conns := make([]*rtConn, 0, len(h.conns))
+	for rc := range h.conns {
+		conns = append(conns, rc)
+	}
+	h.mu.Unlock()
+	for _, rc := range conns {
+		if reason := refusal(p, rc.keyID); reason != "" {
+			rc.refuse(reason)
+		}
+	}
+	if p == nil {
+		h.closeAll("the project's backend services are off")
+		h.stop()
+	}
+}
+
+// stop ends the listener now, without waiting out rtLinger.
+func (h *rtHub) stop() {
+	h.mu.Lock()
+	cancel := h.stopListen
+	if cancel != nil {
+		h.listening, h.stopListen = false, nil
+	}
+	h.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (h *rtHub) release()        { h.count.Add(-1) }
 func (h *rtHub) counted(n int64) { h.msgs.Add(n) }
 
 func (h *rtHub) join(ch *rtChannel) {
@@ -132,12 +227,23 @@ func (h *rtHub) join(ch *rtChannel) {
 	}
 	start := !h.listening
 	h.listening = true
+	var ctx context.Context
+	var prev, done chan struct{}
 	if start {
 		h.ready = make(chan struct{})
+		h.e.rtMu.Lock()
+		life := h.e.life
+		h.e.rtMu.Unlock()
+		if life == nil {
+			life = context.Background()
+		}
+		ctx, h.stopListen = context.WithCancel(life)
+		prev, done = h.listenDone, make(chan struct{})
+		h.listenDone = done
 	}
 	h.mu.Unlock()
 	if start {
-		go h.listen()
+		go h.listen(ctx, prev, done)
 	}
 }
 
@@ -194,19 +300,37 @@ func (h *rtHub) leave(ch *rtChannel) {
 	if len(h.channels) == 0 {
 		h.emptyAt = time.Now()
 	}
+	subs := ch.subs
 	h.mu.Unlock()
+	for _, s := range subs {
+		s.seen.release()
+	}
 	h.untrackChannel(ch)
 }
 
-// idle reports a hub with no channels for rtLinger; it stops listening.
-func (h *rtHub) idle() bool {
+// idle reports a hub with no channels for rtLinger, or a listener
+// (done) that was stopped; it stops listening.
+func (h *rtHub) idle(done chan struct{}) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.listenDone != done {
+		return true
+	}
 	if len(h.channels) == 0 && time.Since(h.emptyAt) > rtLinger {
-		h.listening = false
+		h.listening, h.stopListen = false, nil
 		return true
 	}
 	return false
+}
+
+// stopped marks the hub as not listening when listener done ends, unless
+// a newer one took over.
+func (h *rtHub) stopped(done chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.listenDone == done && h.listening {
+		h.listening, h.stopListen = false, nil
+	}
 }
 
 func (h *rtHub) hasSubs() bool {
@@ -267,34 +391,23 @@ func (h *rtHub) forgetTables() {
 }
 
 // listen holds the project's LISTEN connection and reads its outbox until
-// the hub has been idle for rtLinger.
-func (h *rtHub) listen() {
-	h.e.rtMu.Lock()
-	life := h.e.life
-	h.e.rtMu.Unlock()
-	if life == nil {
-		life = context.Background()
+// the hub has been idle for rtLinger, or ctx ends (stop). prev is the
+// listener before it, which must have finished.
+func (h *rtHub) listen(ctx context.Context, prev, done chan struct{}) {
+	defer close(done)
+	if prev != nil {
+		<-prev
 	}
-	ctx, cancel := context.WithCancel(life)
-	defer cancel()
+	defer h.stopped(done)
 	backoff := time.Second
 	first := true
 	for {
-		if h.idle() {
-			return
-		}
-		if ctx.Err() != nil {
-			h.mu.Lock()
-			h.listening = false
-			h.mu.Unlock()
+		if h.idle(done) || ctx.Err() != nil {
 			return
 		}
 		p := h.e.lookup(h.ref)
 		if p == nil {
 			h.closeAll("the project's backend services are off")
-			h.mu.Lock()
-			h.listening = false
-			h.mu.Unlock()
 			return
 		}
 		conn, err := h.e.sessionConn(ctx, p)
@@ -313,14 +426,18 @@ func (h *rtHub) listen() {
 			h.resyncAll()
 		}
 		first = false
-		err = h.serve(ctx, conn)
+		err = h.serve(ctx, conn, done)
 		if conn != nil {
 			_ = conn.Close(context.Background())
 		}
-		if err == nil {
-			return // idle
+		if err == nil || ctx.Err() != nil {
+			return // idle, or stopped
 		}
 		h.e.cfg.Log.Warn("realtime connection lost", "ref", h.ref, "err", err)
+		select {
+		case <-ctx.Done():
+		case <-time.After(backoff):
+		}
 	}
 }
 
@@ -341,12 +458,9 @@ func (e *Edge) sessionConn(ctx context.Context, p *project) (*pgx.Conn, error) {
 	if host == "" || port == 0 {
 		return nil, errNoSession
 	}
-	u := url.URL{Scheme: "postgres", User: url.UserPassword(p.cfg.EdgeUser, p.cfg.Password),
-		Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/" + p.cfg.Database,
-		RawQuery: url.Values{"sslmode": {e.cfg.PoolerSSLMode}, "application_name": {"xenibase-edge realtime"}}.Encode()}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return pgx.Connect(cctx, u.String())
+	return pgx.Connect(cctx, e.poolerURL(p.cfg.EdgeUser, p.cfg.Password, host, port, p.cfg.Database, "xenibase-edge realtime"))
 }
 
 // querier is a connection or pool the outbox is read through.
@@ -358,8 +472,8 @@ type querier interface {
 
 // serve reads the outbox on each notification (or every rtPoll), relays
 // broadcasts, and returns nil once idle or an error when the connection
-// fails.
-func (h *rtHub) serve(ctx context.Context, conn *pgx.Conn) error {
+// fails or ctx ends.
+func (h *rtHub) serve(ctx context.Context, conn *pgx.Conn, done chan struct{}) error {
 	var q querier = conn
 	if conn == nil {
 		p := h.e.lookup(h.ref)
@@ -385,7 +499,10 @@ func (h *rtHub) serve(ctx context.Context, conn *pgx.Conn) error {
 	h.hello(ctx, q, true)
 	lastHello, lastDrain := time.Now(), time.Now()
 	for {
-		if h.idle() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if h.idle(done) {
 			h.goodbye(ctx, q)
 			return nil
 		}
@@ -403,7 +520,10 @@ func (h *rtHub) serve(ctx context.Context, conn *pgx.Conn) error {
 				return err
 			}
 		} else {
-			time.Sleep(rtPoll)
+			select {
+			case <-ctx.Done():
+			case <-time.After(rtPoll):
+			}
 		}
 		if changed || time.Since(lastDrain) >= rtPoll {
 			if err := h.drain(ctx, q); err != nil {
@@ -639,8 +759,7 @@ func (h *rtHub) deliver(ctx context.Context, p *project, keys map[string][]strin
 		for _, s := range subs {
 			req, expired := s.ch.request()
 			if expired {
-				s.ch.system("error", evPostgresChanges, "the access token has expired: send a new one")
-				go s.ch.c.closeChannel(s.ch)
+				s.ch.expire()
 				continue
 			}
 			fp := fingerprint(req)
@@ -665,6 +784,15 @@ func (h *rtHub) deliver(ctx context.Context, p *project, keys map[string][]strin
 				continue
 			}
 			rows, columns, err := h.visibleRows(ctx, p, g.req, k, keys[k], need[k])
+			if errors.Is(err, errNoRLS) {
+				// Row-level security went off after they subscribed: what
+				// they would read now is every row (§6.3).
+				h.dropSubs(g.subs)
+				for _, s := range g.subs {
+					s.ch.system("error", evPostgresChanges, fmt.Sprintf("%s no longer has row-level security, so the subscription is closed: turn it back on (or list the table as public) and subscribe again", k))
+				}
+				continue
+			}
 			if err != nil {
 				h.e.cfg.Log.Warn("realtime visibility check", "ref", h.ref, "table", k, "role", g.req.Role, "err", err)
 				for _, s := range g.subs {
@@ -803,6 +931,23 @@ func (h *rtHub) visibleRows(ctx context.Context, p *project, req Request, k stri
 		if t == nil {
 			return fmt.Errorf("%s isn't in an exposed schema", k)
 		}
+		if req.Role != "service" && !p.publicTable(t) {
+			// As bindChanges requires. The catalogue is cached for a moment,
+			// so the table itself is asked too, under a lock that keeps
+			// ALTER TABLE from turning it off before the read below.
+			on := t.RLS
+			if on {
+				if _, err := tx.Exec(qctx, `LOCK TABLE `+t.Qualified()+` IN ACCESS SHARE MODE`); err != nil {
+					return err
+				}
+				if err := tx.QueryRow(qctx, `SELECT relrowsecurity FROM pg_class WHERE oid = $1::regclass`, t.Qualified()).Scan(&on); err != nil {
+					return err
+				}
+			}
+			if !on {
+				return errNoRLS
+			}
+		}
 		sql, err := visibilitySQL(t, pk)
 		if err != nil {
 			return err
@@ -826,6 +971,33 @@ func (h *rtHub) visibleRows(ctx context.Context, p *project, req Request, k stri
 		return rows.Err()
 	})
 	return out, columns, err
+}
+
+// errNoRLS is a table anon or users subscribed to whose row-level security
+// is now off, and that isn't listed as public.
+var errNoRLS = errors.New("the table has no row-level security")
+
+// dropSubs ends subscriptions (their channels stay joined).
+func (h *rtHub) dropSubs(subs []*rtSub) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range subs {
+		k := s.schema + "." + s.table
+		if m := h.subs[k]; m != nil {
+			delete(m, s)
+			if len(m) == 0 {
+				delete(h.subs, k)
+			}
+		}
+		kept := s.ch.subs[:0:0]
+		for _, o := range s.ch.subs {
+			if o != s {
+				kept = append(kept, o)
+			}
+		}
+		s.ch.subs = kept
+		s.seen.release()
+	}
 }
 
 // visibilitySQL selects table t's rows with the given primary keys (a JSON
@@ -896,7 +1068,7 @@ func (e *Edge) meterRealtime() {
 		}
 		h.meteredAt = now
 		h.meterMu.Unlock()
-		conns, msgs := h.conns.Load(), h.msgs.Swap(0)
+		conns, msgs := h.count.Load(), h.msgs.Swap(0)
 		secs := max(conns, 0) * int64(elapsed.Round(time.Second)/time.Second)
 		if secs <= 0 && msgs == 0 {
 			continue

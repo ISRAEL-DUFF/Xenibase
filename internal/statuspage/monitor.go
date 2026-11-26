@@ -3,6 +3,7 @@ package statuspage
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -11,9 +12,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/israel-duff/xenibase/internal/statusapi"
 )
@@ -30,6 +33,9 @@ type Service struct {
 
 	limiter *rateLimiter
 	tickMu  sync.Mutex
+
+	probeMu   sync.Mutex
+	probeErrs map[string]string // each failing probe's last logged error
 }
 
 // New opens the status database.
@@ -38,7 +44,8 @@ func New(cfg *Config, log *slog.Logger) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{cfg: cfg, st: st, log: log, known: map[string]bool{}, Now: time.Now, Probe: runProbe, limiter: newRateLimiter(5, time.Hour)}
+	s := &Service{cfg: cfg, st: st, log: log, known: map[string]bool{}, Now: time.Now, Probe: runProbe, limiter: newRateLimiter(5, time.Hour),
+		probeErrs: map[string]string{}}
 	for _, c := range cfg.Components {
 		s.known[c.ID] = true
 	}
@@ -86,7 +93,7 @@ func runProbe(ctx context.Context, p Probe) error {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 		if resp.StatusCode/100 != 2 {
-			return fmt.Errorf("HTTP %d", resp.StatusCode)
+			return httpStatusError{resp.StatusCode}
 		}
 		return nil
 	case "postgres":
@@ -97,12 +104,15 @@ func runProbe(ctx context.Context, p Probe) error {
 		defer func() { _ = c.Close(context.Background()) }()
 		rows, err := c.Query(ctx, p.Query)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", errProbeQuery, err)
 		}
 		for rows.Next() {
 		}
 		rows.Close()
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("%w: %w", errProbeQuery, err)
+		}
+		return nil
 	case "tcp":
 		var d net.Dialer
 		c, err := d.DialContext(ctx, "tcp", p.Addr)
@@ -136,7 +146,7 @@ func combine(results []probeResult) (string, string) {
 	var failed []string
 	for _, r := range results {
 		if r.Err != nil {
-			failed = append(failed, r.Name+": "+shortErr(r.Err))
+			failed = append(failed, r.Name+": "+errClass(r.Err))
 		}
 	}
 	switch {
@@ -146,6 +156,67 @@ func combine(results []probeResult) (string, string) {
 		return statusapi.Down, strings.Join(failed, "; ")
 	default:
 		return statusapi.Degraded, strings.Join(failed, "; ")
+	}
+}
+
+// errProbeQuery marks a postgres probe that connected but whose query
+// failed.
+var errProbeQuery = errors.New("query failed")
+
+// httpStatusError is an http probe's answer outside 2xx.
+type httpStatusError struct{ code int }
+
+func (e httpStatusError) Error() string { return fmt.Sprintf("HTTP %d", e.code) }
+
+// errClass is what the public page says about a failed probe: a generic
+// class, never the error's text, which can name a probe's user, database
+// or the address it reached. The full error goes to the log.
+func errClass(err error) string {
+	var pgErr *pgconn.PgError
+	var netErr net.Error
+	var dnsErr *net.DNSError
+	var status httpStatusError
+	var certErr *tls.CertificateVerificationError
+	var hostErr x509.HostnameError
+	var authErr x509.UnknownAuthorityError
+	switch {
+	case errors.As(err, &status):
+		return status.Error()
+	case errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "28"):
+		return "authentication failed"
+	case errors.Is(err, errProbeQuery), errors.As(err, &pgErr):
+		return "query failed"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset"
+	case errors.As(err, &dnsErr):
+		return "name not resolved"
+	case errors.As(err, &certErr), errors.As(err, &hostErr), errors.As(err, &authErr):
+		return "TLS error"
+	default:
+		return "check failed"
+	}
+}
+
+// logProbes logs a probe's full error when it starts failing or its
+// error changes, and when it passes again: the page shows only errClass.
+func (s *Service) logProbes(component string, res []probeResult) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	for _, r := range res {
+		key := component + "/" + r.Name
+		prev, failing := s.probeErrs[key]
+		switch {
+		case r.Err == nil && failing:
+			delete(s.probeErrs, key)
+			s.log.Info("probe passes again", "component", component, "probe", r.Name)
+		case r.Err != nil && r.Err.Error() != prev:
+			s.probeErrs[key] = r.Err.Error()
+			s.log.Warn("probe failed", "component", component, "probe", r.Name, "class", errClass(r.Err), "err", r.Err)
+		}
 	}
 }
 
@@ -282,6 +353,7 @@ func (s *Service) Tick(ctx context.Context) error {
 				}()
 			}
 			pwg.Wait()
+			s.logProbes(c.ID, res)
 			st, d := combine(res)
 			if c.Heartbeat {
 				// Both: the worse wins, with both details.
@@ -415,12 +487,13 @@ func (s *Service) PutIncident(ctx context.Context, in statusapi.Incident) error 
 	return tx.Commit()
 }
 
-// Heartbeat stores xenibase-server's report.
+// Heartbeat stores xenibase-server's report, unless it was sent before the
+// newest one accepted (errStaleHeartbeat).
 func (s *Service) Heartbeat(ctx context.Context, hb statusapi.Heartbeat) error {
 	if err := hb.Validate(); err != nil {
 		return err
 	}
-	return s.st.saveHeartbeat(ctx, s.heartbeatStates(hb), s.Now().UTC())
+	return s.st.saveHeartbeat(ctx, s.heartbeatStates(hb), hb.SentAt, s.Now().UTC())
 }
 
 // heartbeatStates maps a heartbeat's states to the page's components: a

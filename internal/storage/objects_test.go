@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,7 +75,7 @@ func TestObjectsAndPresignedMultipart(t *testing.T) {
 	_, _ = rand.Read(part1)
 	part2 := []byte("tail")
 	for i, body := range [][]byte{part1, part2} {
-		u, err := c.PresignPart(ctx, key, id, int32(i+1), time.Hour)
+		u, err := c.PresignPart(ctx, key, id, int32(i+1), int64(len(body)), time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,5 +126,39 @@ func TestObjectsAndPresignedMultipart(t *testing.T) {
 	}
 	if ups, err := c.Multiparts(ctx, "files/r1/"); err != nil || len(ups) != 0 {
 		t.Fatalf("uploads after: %+v %v", ups, err)
+	}
+}
+
+// A part's URL used to sign the part number and upload id but no length,
+// so it took up to the store's part limit (5 GiB) whatever the upload
+// declared. Content-Length is now a signed header: a URL is good for
+// exactly its part's size.
+func TestPresignedPartSignsItsLength(t *testing.T) {
+	c, err := New(Target{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "files", AccessKey: "test", SecretKey: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sign := func(size int64) url.Values {
+		t.Helper()
+		u, err := c.PresignPart(ctx, "files/r1/objects/big", "upload-1", 1, size, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pu, err := url.Parse(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pu.Query()
+	}
+	a, b := sign(16<<20), sign(16<<20+1)
+	if !strings.Contains(a.Get("X-Amz-SignedHeaders"), "content-length") {
+		t.Fatalf("signed headers: %q", a.Get("X-Amz-SignedHeaders"))
+	}
+	if a.Get("X-Amz-Signature") == b.Get("X-Amz-Signature") {
+		t.Fatal("parts of different sizes have the same signature")
+	}
+	if _, err := c.PresignPart(ctx, "files/r1/objects/big", "upload-1", 1, 0, time.Hour); err == nil {
+		t.Fatal("a part without a size was signed")
 	}
 }

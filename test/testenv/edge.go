@@ -23,7 +23,9 @@ const (
 type Edge struct {
 	*edge.Edge
 	URL string // its listener; requests carry the project's Host
-	t   testing.TB
+	// Domain is the API domain it serves (EdgeDomain unless changed).
+	Domain string
+	t      testing.TB
 	// stop ends the edge before the test does.
 	stop     func()
 	stopOnce sync.Once
@@ -46,7 +48,7 @@ func (e *Env) StartEdge(opts ...func(*edge.Config)) *Edge {
 	done := make(chan struct{})
 	go func() { defer close(done); ed.Run(ctx) }()
 	srv := httptest.NewServer(ed)
-	x := &Edge{Edge: ed, URL: srv.URL, t: e.t, stop: func() { srv.Close(); cancel(); <-done }}
+	x := &Edge{Edge: ed, URL: srv.URL, Domain: cfg.Domain, t: e.t, stop: func() { srv.Close(); cancel(); <-done }}
 	e.t.Cleanup(x.Stop)
 	deadline := time.Now().Add(30 * time.Second)
 	for !ed.Ready() {
@@ -66,7 +68,7 @@ func (x *Edge) Do(ref, method, path string, body io.Reader, headers ...string) (
 	if err != nil {
 		x.t.Fatal(err)
 	}
-	req.Host = ref + "." + EdgeDomain
+	req.Host = ref + "." + x.Domain
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}

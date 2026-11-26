@@ -171,6 +171,15 @@ func SeedPoolerDir(dir string, mode os.FileMode) error {
 	if err := write("userlist.txt", nil); err != nil {
 		return err
 	}
+	// The server's default rules (the admin console on private networks
+	// only) until its first push.
+	_, _, hba, err := pooler.Render(pooler.Config{})
+	if err != nil {
+		return err
+	}
+	if err := write("hba.conf", hba); err != nil {
+		return err
+	}
 	if exists("server.crt") && exists("server.key") {
 		return nil
 	}

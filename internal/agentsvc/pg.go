@@ -30,6 +30,9 @@ func pgEnv(c agentapi.PGConn) []string {
 		"PGAPPNAME=xenibase-agent",
 		"PGCONNECT_TIMEOUT=15",
 	}
+	if c.HostAddr != "" {
+		env = append(env, "PGHOSTADDR="+c.HostAddr)
+	}
 	mode := c.SSLMode
 	if mode == "" {
 		mode = "prefer"

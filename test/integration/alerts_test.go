@@ -251,6 +251,7 @@ func TestAlerts(t *testing.T) {
 	h.take()
 	h.fail.Store(false)
 	exec(`UPDATE alerts SET delivery_lock = now() - interval '1 second'`) // the backoff has passed
+	exec(`UPDATE alert_deliveries SET next_at = now() - interval '1 second' WHERE next_at IS NOT NULL`)
 	if err := e.Alerts.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}

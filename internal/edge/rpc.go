@@ -137,7 +137,7 @@ func (e *Edge) rpc(c *call, req Request, name string) {
 	var gen uint64
 	if caching {
 		gen = e.cache.generation(c.p.cfg.Ref)
-		if fp := c.p.catalog.fingerprint(); fp != "" {
+		if fp := c.p.catalog.fingerprint(e.cfg.CatalogEvery); fp != "" {
 			if f := c.p.catalog.function(name); f != nil && c.cacheable(req, cacheName(f.Schema, f.Name, true)) > 0 &&
 				e.serveCached(c, cacheKey(c.p.cfg.Ref, c.p.cfg.Version, fp, c.r.URL.Path, q)) {
 				return
@@ -171,12 +171,16 @@ func (e *Edge) rpc(c *call, req Request, name string) {
 			return nil
 		}
 		fn = f
+		if ge := c.p.functionGate(cat, req.Role, f); ge != nil {
+			failed = ge
+			return nil
+		}
 		if c.r.Method == http.MethodGet && f.Volatile == 'v' {
 			failed = &apiError{Status: http.StatusMethodNotAllowed, Code: "volatile_function",
 				Message: fmt.Sprintf("%s may change data (it isn't STABLE or IMMUTABLE): call it with POST", f.Name)}
 			return nil
 		}
-		b := &builder{cat: cat}
+		b := &builder{cat: cat, gate: c.p.gateFor(cat, req.Role)}
 		var named []string
 		for _, a := range f.Args {
 			if raw, ok := args[a.Name]; ok {
@@ -188,6 +192,18 @@ func (e *Edge) rpc(c *call, req Request, name string) {
 		if err != nil {
 			failed = asAPIError(err)
 			return nil
+		}
+		// A set-returning function's rows go through the cost guard, which
+		// sees through a SQL function the planner inlines.
+		if limit := c.p.cfg.Settings.MaxQueryCost; limit > 0 && f.RetSet {
+			est, err := cost(ctx, tx, sql, b.args)
+			if err != nil {
+				return err
+			}
+			if est > limit {
+				failed = tooExpensive(est, limit)
+				return nil
+			}
 		}
 		rows, err := tx.Query(ctx, sql, b.args...)
 		if err != nil {

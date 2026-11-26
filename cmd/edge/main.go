@@ -76,6 +76,16 @@ func run(args []string) error {
 		PoolerAddr:    os.Getenv("XENIBASE_EDGE_POOLER_ADDR"),
 		SessionAddr:   os.Getenv("XENIBASE_EDGE_SESSION_ADDR"),
 		PoolerSSLMode: env("XENIBASE_EDGE_POOLER_SSLMODE", "require"),
+		// verify-full with the poolers' CA when their certificate is
+		// self-signed or private (docs/backend-services.md).
+		PoolerRootCert: os.Getenv("XENIBASE_EDGE_POOLER_ROOT_CERT"),
+	}
+	switch cfg.PoolerSSLMode {
+	case "require", "verify-ca", "verify-full":
+	default:
+		// prefer and below would fall back to plain text, with the
+		// service logins' sessions on it.
+		return fmt.Errorf("XENIBASE_EDGE_POOLER_SSLMODE %q: use require, verify-ca or verify-full", cfg.PoolerSSLMode)
 	}
 	if os.Getenv("XENIBASE_EDGE_RENDER_IN_PROCESS") == "" {
 		// Image transforms in child processes (V4.1 §12.4), each capped.
@@ -102,7 +112,7 @@ func run(args []string) error {
 	case cfg.ControlURL == "":
 		return errors.New("XENIBASE_EDGE_CONTROL_URL is required (xenibase-server's URL)")
 	case len(cfg.Secret) < 32:
-		return errors.New("XENIBASE_EDGE_SECRET is required: at least 32 characters, the same as xenibase-server's")
+		return errors.New("XENIBASE_EDGE_SECRET is required: this edge's credential (xenibase-server -issue-edge-credential), or xenibase-server's own XENIBASE_EDGE_SECRET for the regions without their own API domain")
 	case cfg.Domain == "":
 		return errors.New("XENIBASE_EDGE_DOMAIN is required (projects are served at <ref>.<domain>)")
 	}

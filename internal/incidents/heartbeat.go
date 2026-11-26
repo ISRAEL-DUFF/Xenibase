@@ -30,7 +30,7 @@ func (s *Service) States(ctx context.Context) ([]statusapi.ComponentState, error
 	backups := statusapi.ComponentState{ID: ComponentBackups, Status: statusapi.Operational}
 	for _, a := range firing {
 		switch a.Kind {
-		case alerts.KindBackupFailed, alerts.KindBackupOverdue, alerts.KindRestoreTestFailed:
+		case alerts.KindBackupFailed, alerts.KindBackupOverdue, alerts.KindRestoreTestFailed, alerts.KindWALArchive:
 			backups.Status, backups.Detail = statusapi.Degraded, "Some backups are delayed or failing."
 		}
 	}

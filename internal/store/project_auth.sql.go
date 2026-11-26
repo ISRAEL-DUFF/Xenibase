@@ -395,6 +395,34 @@ func (q *Queries) InsertMessageSend(ctx context.Context, arg InsertMessageSendPa
 	return err
 }
 
+const lockJWTKey = `-- name: LockJWTKey :one
+SELECT id, project_id, kid, algorithm, public_jwk, private_enc, status, created_at, retired_at, verify_until FROM project_jwt_keys WHERE project_id = $1 AND id = $2 FOR UPDATE
+`
+
+type LockJWTKeyParams struct {
+	ProjectID uuid.UUID
+	ID        uuid.UUID
+}
+
+// tenant: system - a project the request already authorized.
+func (q *Queries) LockJWTKey(ctx context.Context, arg LockJWTKeyParams) (ProjectJwtKey, error) {
+	row := q.db.QueryRow(ctx, lockJWTKey, arg.ProjectID, arg.ID)
+	var i ProjectJwtKey
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Kid,
+		&i.Algorithm,
+		&i.PublicJwk,
+		&i.PrivateEnc,
+		&i.Status,
+		&i.CreatedAt,
+		&i.RetiredAt,
+		&i.VerifyUntil,
+	)
+	return i, err
+}
+
 const markAuthEmailFailed = `-- name: MarkAuthEmailFailed :exec
 UPDATE auth_message_outbox SET attempts = attempts + 1, last_error = $1, next_attempt_at = $2,
   message_enc = CASE WHEN $3::boolean THEN NULL ELSE message_enc END
@@ -628,6 +656,22 @@ func (q *Queries) PruneAuthHooks(ctx context.Context, before time.Time) (int64, 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const retireJWTKey = `-- name: RetireJWTKey :exec
+UPDATE project_jwt_keys SET status = 'retired', retired_at = now()
+WHERE project_id = $1 AND id = $2 AND status <> 'retired'
+`
+
+type RetireJWTKeyParams struct {
+	ProjectID uuid.UUID
+	ID        uuid.UUID
+}
+
+// tenant: system - a project the request already authorized: a key withdrawn at once.
+func (q *Queries) RetireJWTKey(ctx context.Context, arg RetireJWTKeyParams) error {
+	_, err := q.db.Exec(ctx, retireJWTKey, arg.ProjectID, arg.ID)
+	return err
 }
 
 const retireJWTKeys = `-- name: RetireJWTKeys :execrows

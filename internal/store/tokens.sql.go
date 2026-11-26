@@ -26,6 +26,7 @@ type ApproveDeviceRequestParams struct {
 	DeviceCodeHash string
 }
 
+// tenant: system - a device login has no organisation until it is approved.
 func (q *Queries) ApproveDeviceRequest(ctx context.Context, arg ApproveDeviceRequestParams) (int64, error) {
 	result, err := q.db.Exec(ctx, approveDeviceRequest,
 		arg.ApprovedBy,
@@ -144,7 +145,7 @@ func (q *Queries) GetDeviceRequestByCode(ctx context.Context, userCode string) (
 }
 
 const getOrgToken = `-- name: GetOrgToken :one
-SELECT id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id FROM api_tokens WHERE id = $1 AND org_id = $2
+SELECT id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id, parent_id FROM api_tokens WHERE id = $1 AND org_id = $2
 `
 
 type GetOrgTokenParams struct {
@@ -173,6 +174,7 @@ func (q *Queries) GetOrgToken(ctx context.Context, arg GetOrgTokenParams) (ApiTo
 		&i.ExpiryNotifiedAt,
 		&i.CreatedAt,
 		&i.OauthClientID,
+		&i.ParentID,
 	)
 	return i, err
 }
@@ -232,7 +234,7 @@ func (q *Queries) GetTokenForAuth(ctx context.Context, tokenHash string) (GetTok
 }
 
 const getUserToken = `-- name: GetUserToken :one
-SELECT id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id FROM api_tokens WHERE id = $1 AND user_id = $2
+SELECT id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id, parent_id FROM api_tokens WHERE id = $1 AND user_id = $2
 `
 
 type GetUserTokenParams struct {
@@ -262,14 +264,15 @@ func (q *Queries) GetUserToken(ctx context.Context, arg GetUserTokenParams) (Api
 		&i.ExpiryNotifiedAt,
 		&i.CreatedAt,
 		&i.OauthClientID,
+		&i.ParentID,
 	)
 	return i, err
 }
 
 const insertAPIToken = `-- name: InsertAPIToken :one
-INSERT INTO api_tokens (user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, created_via, oauth_client_id)
-VALUES ($1, $2, $3, $4, $5, $6::text[], $7::uuid[], $8, $9, $10)
-RETURNING id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id
+INSERT INTO api_tokens (user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, created_via, oauth_client_id, parent_id)
+VALUES ($1, $2, $3, $4, $5, $6::text[], $7::uuid[], $8, $9, $10, $11)
+RETURNING id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id, parent_id
 `
 
 type InsertAPITokenParams struct {
@@ -283,8 +286,11 @@ type InsertAPITokenParams struct {
 	ExpiresAt     time.Time
 	CreatedVia    string
 	OauthClientID *uuid.UUID
+	ParentID      *uuid.UUID
 }
 
+// parent_id is the token that created this one: revoking it revokes this
+// one too (a trigger, migration 00088).
 func (q *Queries) InsertAPIToken(ctx context.Context, arg InsertAPITokenParams) (ApiToken, error) {
 	row := q.db.QueryRow(ctx, insertAPIToken,
 		arg.UserID,
@@ -297,6 +303,7 @@ func (q *Queries) InsertAPIToken(ctx context.Context, arg InsertAPITokenParams) 
 		arg.ExpiresAt,
 		arg.CreatedVia,
 		arg.OauthClientID,
+		arg.ParentID,
 	)
 	var i ApiToken
 	err := row.Scan(
@@ -317,6 +324,7 @@ func (q *Queries) InsertAPIToken(ctx context.Context, arg InsertAPITokenParams) 
 		&i.ExpiryNotifiedAt,
 		&i.CreatedAt,
 		&i.OauthClientID,
+		&i.ParentID,
 	)
 	return i, err
 }
@@ -347,7 +355,7 @@ func (q *Queries) InsertDeviceRequest(ctx context.Context, arg InsertDeviceReque
 }
 
 const listOrgTokens = `-- name: ListOrgTokens :many
-SELECT t.id, t.user_id, t.org_id, t.name, t.token_hash, t.prefix, t.scopes, t.project_ids, t.expires_at, t.last_used_at, t.last_used_ip, t.revoked_at, t.revoked_by, t.created_via, t.expiry_notified_at, t.created_at, t.oauth_client_id, u.email AS user_email, u.name AS user_name, c.name AS oauth_client_name
+SELECT t.id, t.user_id, t.org_id, t.name, t.token_hash, t.prefix, t.scopes, t.project_ids, t.expires_at, t.last_used_at, t.last_used_ip, t.revoked_at, t.revoked_by, t.created_via, t.expiry_notified_at, t.created_at, t.oauth_client_id, t.parent_id, u.email AS user_email, u.name AS user_name, c.name AS oauth_client_name
 FROM api_tokens t JOIN users u ON u.id = t.user_id
 LEFT JOIN oauth_clients c ON c.id = t.oauth_client_id
 WHERE t.org_id = $1
@@ -372,6 +380,7 @@ type ListOrgTokensRow struct {
 	ExpiryNotifiedAt *time.Time
 	CreatedAt        time.Time
 	OauthClientID    *uuid.UUID
+	ParentID         *uuid.UUID
 	UserEmail        string
 	UserName         *string
 	OauthClientName  *string
@@ -404,6 +413,7 @@ func (q *Queries) ListOrgTokens(ctx context.Context, orgID uuid.UUID) ([]ListOrg
 			&i.ExpiryNotifiedAt,
 			&i.CreatedAt,
 			&i.OauthClientID,
+			&i.ParentID,
 			&i.UserEmail,
 			&i.UserName,
 			&i.OauthClientName,
@@ -419,7 +429,7 @@ func (q *Queries) ListOrgTokens(ctx context.Context, orgID uuid.UUID) ([]ListOrg
 }
 
 const listUserTokens = `-- name: ListUserTokens :many
-SELECT t.id, t.user_id, t.org_id, t.name, t.token_hash, t.prefix, t.scopes, t.project_ids, t.expires_at, t.last_used_at, t.last_used_ip, t.revoked_at, t.revoked_by, t.created_via, t.expiry_notified_at, t.created_at, t.oauth_client_id, o.name AS org_name, c.name AS oauth_client_name
+SELECT t.id, t.user_id, t.org_id, t.name, t.token_hash, t.prefix, t.scopes, t.project_ids, t.expires_at, t.last_used_at, t.last_used_ip, t.revoked_at, t.revoked_by, t.created_via, t.expiry_notified_at, t.created_at, t.oauth_client_id, t.parent_id, o.name AS org_name, c.name AS oauth_client_name
 FROM api_tokens t JOIN organizations o ON o.id = t.org_id
 LEFT JOIN oauth_clients c ON c.id = t.oauth_client_id
 WHERE t.user_id = $1
@@ -444,6 +454,7 @@ type ListUserTokensRow struct {
 	ExpiryNotifiedAt *time.Time
 	CreatedAt        time.Time
 	OauthClientID    *uuid.UUID
+	ParentID         *uuid.UUID
 	OrgName          string
 	OauthClientName  *string
 }
@@ -476,6 +487,7 @@ func (q *Queries) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]ListU
 			&i.ExpiryNotifiedAt,
 			&i.CreatedAt,
 			&i.OauthClientID,
+			&i.ParentID,
 			&i.OrgName,
 			&i.OauthClientName,
 		); err != nil {

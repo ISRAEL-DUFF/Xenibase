@@ -1,0 +1,28 @@
+# Co-hosting: another app on this server (Taskiem, docs/cohosting.md) is
+# served by Xenibase's Caddy, which alone holds ports 80 and 443. Turn it on
+# with one line in .env:
+#
+#   COMPOSE_FILE=compose.yaml:compose.cohost.yaml
+#
+# Every `docker compose` command in this directory (install.sh, upgrade.sh,
+# enable-services.sh, deploy-ssh.sh, and yours) then reads both files.
+#
+# Caddy joins an external network, XENIBASE_COHOST_NETWORK (default cohost),
+# that the other app's containers join too, so its sites reach them by name.
+# install.sh creates the network if it doesn't exist. The other app writes
+# its sites to caddy.d/<app>.caddy and its global options to
+# caddy.d/<app>.global; Xenibase never touches files there it didn't write.
+services:
+  caddy:
+    environment:
+      # Port 80 sends a host with no site of its own (a business's domain
+      # whose certificate Caddy gets on demand) to HTTPS on that same name,
+      # not to Xenibase's web UI.
+      CADDY_HTTP_REDIRECT: ${CADDY_HTTP_REDIRECT:-https://{host}{uri}}
+    networks:
+      cohost: {}
+
+networks:
+  cohost:
+    name: ${XENIBASE_COHOST_NETWORK:-cohost}
+    external: true

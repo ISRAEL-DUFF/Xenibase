@@ -628,8 +628,28 @@ func codeHash(id uuid.UUID, code string) string {
 }
 
 // NewCode makes a code and link for userID's kind, to target (an email
-// address); it replaces the user's earlier ones of that kind.
+// address); it replaces the user's earlier ones of that kind. It keeps
+// the password the code it replaces was sent with (a sign-up code sent
+// again).
 func NewCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target string, ttl time.Duration) (Code, error) {
+	return newCode(ctx, q, userID, kind, target, ttl, nil)
+}
+
+// NewPasswordCode is NewCode for a request that set the user's password
+// to passwordHash: the code records it, so whoever uses the code keeps
+// that password only while it is still the user's (KeepsPassword).
+func NewPasswordCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target string, ttl time.Duration, passwordHash string) (Code, error) {
+	sha := passwordSHA(passwordHash)
+	return newCode(ctx, q, userID, kind, target, ttl, &sha)
+}
+
+// passwordSHA is what a code records of a password hash.
+func passwordSHA(h string) string {
+	s := sha256.Sum256([]byte("password:" + h))
+	return hex.EncodeToString(s[:])
+}
+
+func newCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target string, ttl time.Duration, password *string) (Code, error) {
 	code, err := randomDigits(codeDigits)
 	if err != nil {
 		return Code{}, err
@@ -639,21 +659,60 @@ func NewCode(ctx context.Context, q Querier, userID uuid.UUID, kind, target stri
 		return Code{}, err
 	}
 	tok := base64.RawURLEncoding.EncodeToString(b)
-	if _, err := q.Exec(ctx, `DELETE FROM xb_auth.one_time_codes WHERE user_id = $1 AND kind = $2`, userID, kind); err != nil {
-		return Code{}, err
-	}
 	id := uuid.New()
-	_, err = q.Exec(ctx, `INSERT INTO xb_auth.one_time_codes (id, user_id, kind, target, code_hash, token_hash, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, id, userID, kind, NormalizeEmail(target), codeHash(id, code), hashToken(tok), time.Now().Add(ttl))
+	_, err = q.Exec(ctx, `WITH old AS (DELETE FROM xb_auth.one_time_codes WHERE user_id = $2 AND kind = $3 RETURNING password_sha, created_at)
+		INSERT INTO xb_auth.one_time_codes (id, user_id, kind, target, code_hash, token_hash, expires_at, password_sha)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8, (SELECT password_sha FROM old ORDER BY created_at DESC LIMIT 1)))`,
+		id, userID, kind, NormalizeEmail(target), codeHash(id, code), hashToken(tok), time.Now().Add(ttl), password)
 	return Code{Code: code, Token: tok}, err
 }
 
-// LastCodeAt is when a code of one of kinds was last made for target.
-func LastCodeAt(ctx context.Context, q Querier, target string, kinds []string) (*time.Time, error) {
-	var at *time.Time
-	err := q.QueryRow(ctx, `SELECT max(created_at) FROM xb_auth.one_time_codes WHERE target = $1 AND kind = ANY($2)`,
-		NormalizeEmail(target), kinds).Scan(&at)
-	return at, err
+// Code requests are kept a day, by a hash of the address or number, for
+// every request for a code whether or not the target has a user: limits
+// counted on them answer the same for an address with an account as for
+// one without.
+
+func targetHash(target string) string {
+	h := sha256.Sum256([]byte("target:" + NormalizeEmail(target)))
+	return hex.EncodeToString(h[:])
+}
+
+// CodeRequests are the requests for codes to one target in the last day.
+type CodeRequests struct {
+	// Last is the latest of the kinds asked about.
+	Last *time.Time
+	// Hour and Day count requests of any kind; HourFrom and DayFrom are
+	// the oldest of each.
+	Hour, Day         int
+	HourFrom, DayFrom *time.Time
+}
+
+// RecentCodeRequests are the requests for codes to target in the last
+// day, Last among kinds. It holds other requests for target until the
+// transaction ends, so two at once can't both pass a limit.
+func RecentCodeRequests(ctx context.Context, q Querier, target string, kinds []string) (CodeRequests, error) {
+	h := targetHash(target)
+	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "xb_auth.code_requests:"+h); err != nil {
+		return CodeRequests{}, err
+	}
+	var r CodeRequests
+	err := q.QueryRow(ctx, `SELECT max(at) FILTER (WHERE kind = ANY($2)),
+		  count(*) FILTER (WHERE at > now() - interval '1 hour'), min(at) FILTER (WHERE at > now() - interval '1 hour'),
+		  count(*), min(at)
+		FROM xb_auth.code_requests WHERE target_hash = $1 AND at > now() - interval '1 day'`, h, kinds).
+		Scan(&r.Last, &r.Hour, &r.HourFrom, &r.Day, &r.DayFrom)
+	return r, err
+}
+
+// RecordCodeRequest records a request for a code of kind to target (and
+// forgets a few requests over a day old).
+func RecordCodeRequest(ctx context.Context, q Querier, target, kind string) error {
+	if _, err := q.Exec(ctx, `DELETE FROM xb_auth.code_requests WHERE id = ANY (ARRAY(SELECT id FROM xb_auth.code_requests
+		WHERE at < now() - interval '25 hours' ORDER BY at LIMIT 20 FOR UPDATE SKIP LOCKED))`); err != nil {
+		return err
+	}
+	_, err := q.Exec(ctx, `INSERT INTO xb_auth.code_requests (target_hash, kind) VALUES ($1, $2)`, targetHash(target), kind)
+	return err
 }
 
 // Verified is a code or link used: whose, for what, sent where.
@@ -664,6 +723,18 @@ type Verified struct {
 	// OK is false for a wrong or expired code; the attempt is counted,
 	// so the caller commits.
 	OK bool
+	// passwordSHA records the password the request that sent the code
+	// set (NewPasswordCode), if it set one.
+	passwordSHA *string
+}
+
+// KeepsPassword reports whether u's password is the one the request that
+// sent the code set. A code proving an address for the first time keeps
+// only that password: one set by anyone else (whoever signed up with the
+// address before its owner) is cleared.
+func (v Verified) KeepsPassword(u *User) bool {
+	return u.passwordHash != nil && v.passwordSHA != nil &&
+		subtle.ConstantTimeCompare([]byte(passwordSHA(*u.passwordHash)), []byte(*v.passwordSHA)) == 1
 }
 
 // VerifyCode checks a 6-digit code sent to target for one of kinds; a
@@ -672,9 +743,10 @@ func VerifyCode(ctx context.Context, q Querier, target string, kinds []string, c
 	var id, uid uuid.UUID
 	var kind, hash string
 	var attempts int
-	err := q.QueryRow(ctx, `SELECT id, user_id, kind, code_hash, attempts FROM xb_auth.one_time_codes
+	var password *string
+	err := q.QueryRow(ctx, `SELECT id, user_id, kind, code_hash, attempts, password_sha FROM xb_auth.one_time_codes
 		WHERE target = $1 AND kind = ANY($2) AND expires_at > now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-		NormalizeEmail(target), kinds).Scan(&id, &uid, &kind, &hash, &attempts)
+		NormalizeEmail(target), kinds).Scan(&id, &uid, &kind, &hash, &attempts, &password)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Verified{}, nil
 	}
@@ -682,9 +754,8 @@ func VerifyCode(ctx context.Context, q Querier, target string, kinds []string, c
 		return Verified{}, err
 	}
 	if attempts >= MaxCodeTries {
-		// Used up: refused even when right. It stays until it expires, so the
-		// one-code-a-minute rule (LastCodeAt) still sees it and a new code
-		// can't be had at once for five more guesses.
+		// Used up: refused even when right, until it expires or a new code
+		// replaces it (no sooner than the one-a-minute rule allows).
 		return Verified{}, nil
 	}
 	if subtle.ConstantTimeCompare([]byte(codeHash(id, strings.TrimSpace(code))), []byte(hash)) != 1 {
@@ -692,14 +763,14 @@ func VerifyCode(ctx context.Context, q Querier, target string, kinds []string, c
 		return Verified{}, err
 	}
 	_, err = q.Exec(ctx, `DELETE FROM xb_auth.one_time_codes WHERE id = $1`, id)
-	return Verified{UserID: uid, Kind: kind, Target: NormalizeEmail(target), OK: true}, err
+	return Verified{UserID: uid, Kind: kind, Target: NormalizeEmail(target), OK: true, passwordSHA: password}, err
 }
 
 // VerifyToken uses a link's token, if it is one of kinds and not expired.
 func VerifyToken(ctx context.Context, q Querier, token string, kinds []string) (Verified, error) {
 	var v Verified
 	err := q.QueryRow(ctx, `DELETE FROM xb_auth.one_time_codes WHERE token_hash = $1 AND kind = ANY($2) AND expires_at > now()
-		RETURNING user_id, kind, target`, hashToken(token), kinds).Scan(&v.UserID, &v.Kind, &v.Target)
+		RETURNING user_id, kind, target, password_sha`, hashToken(token), kinds).Scan(&v.UserID, &v.Kind, &v.Target, &v.passwordSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Verified{}, nil
 	}

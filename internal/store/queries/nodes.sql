@@ -38,6 +38,7 @@ WHERE id = @id;
 UPDATE nodes SET status = @status WHERE id = @id;
 
 -- name: NodeForInstance :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT n.* FROM nodes n JOIN instances i ON i.node_id = n.id WHERE i.id = @instance_id;
 
 -- name: FirstAgentNode :one
@@ -48,6 +49,7 @@ SELECT * FROM nodes WHERE agent_cert_fp IS NOT NULL AND role <> 'pooler' ORDER B
 UPDATE nodes SET status = 'removed', agent_cert_fp = NULL, registration_token = NULL WHERE id = @id;
 
 -- name: NodeLiveInstances :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT count(*)::int FROM instances WHERE node_id = @node_id AND deleted_at IS NULL;
 
 -- name: SetNodeRole :one

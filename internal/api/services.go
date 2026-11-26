@@ -38,6 +38,8 @@ func (s *Server) servicesError(w http.ResponseWriter, what string, err error) {
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, services.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	case errors.Is(err, services.ErrEdgeScope):
+		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	default:
 		s.internalError(w, what, err)
 	}
@@ -366,27 +368,40 @@ func (s *Server) ListAPIRequestLogs(w http.ResponseWriter, r *http.Request, id g
 
 // ---- xenibase-edge's feed ------------------------------------------------------
 
-// edgeAuth reads the body and checks the edge signature.
-func (s *Server) edgeAuth(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+// edgeAuth reads the body, checks the edge signature, and returns which
+// regions the edge may see.
+func (s *Server) edgeAuth(w http.ResponseWriter, r *http.Request) ([]byte, services.EdgeScope, bool) {
 	if s.services == nil || !s.services.FeedEnabled() {
 		writeError(w, http.StatusNotFound, "not_found", "no such endpoint")
-		return nil, false
+		return nil, services.EdgeScope{}, false
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "unreadable body")
-		return nil, false
+		return nil, services.EdgeScope{}, false
 	}
-	if err := s.services.VerifyEdge(r, body); err != nil {
+	scope, err := s.services.VerifyEdge(r, body)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "bad edge signature")
-		return nil, false
+		return nil, services.EdgeScope{}, false
 	}
-	return body, true
+	return body, scope, true
+}
+
+// edgeRef checks that the project an edge request is about is in the
+// edge's scope.
+func (s *Server) edgeRef(w http.ResponseWriter, r *http.Request, scope services.EdgeScope, ref, what string) bool {
+	if err := s.services.EdgeProjectInScope(r.Context(), scope, ref); err != nil {
+		s.servicesError(w, what, err)
+		return false
+	}
+	return true
 }
 
 // EdgeConfig implements GET /api/v1/edge/config.
 func (s *Server) EdgeConfig(w http.ResponseWriter, r *http.Request, params gen.EdgeConfigParams) {
-	if _, ok := s.edgeAuth(w, r); !ok {
+	_, scope, ok := s.edgeAuth(w, r)
+	if !ok {
 		return
 	}
 	var since int64
@@ -401,7 +416,12 @@ func (s *Server) EdgeConfig(w http.ResponseWriter, r *http.Request, params gen.E
 	if params.Region != nil {
 		region = *params.Region
 	}
-	c, err := s.services.Config(r.Context(), region, since, time.Duration(wait)*time.Second)
+	allow, err := scope.Feed(region)
+	if err != nil {
+		s.servicesError(w, "edge config", err)
+		return
+	}
+	c, err := s.services.Config(r.Context(), allow, since, time.Duration(wait)*time.Second)
 	if err != nil {
 		s.internalError(w, "edge config", err)
 		return
@@ -411,13 +431,17 @@ func (s *Server) EdgeConfig(w http.ResponseWriter, r *http.Request, params gen.E
 
 // EdgeReport implements POST /api/v1/edge/report.
 func (s *Server) EdgeReport(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.edgeAuth(w, r)
+	body, scope, ok := s.edgeAuth(w, r)
 	if !ok {
 		return
 	}
 	var rep edgeapi.Report
 	if err := json.Unmarshal(body, &rep); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "not a report")
+		return
+	}
+	if err := s.services.ScopeReport(r.Context(), scope, &rep); err != nil {
+		s.servicesError(w, "edge report", err)
 		return
 	}
 	if err := s.services.Report(r.Context(), rep); err != nil {
@@ -429,13 +453,16 @@ func (s *Server) EdgeReport(w http.ResponseWriter, r *http.Request) {
 
 // EdgeWake implements POST /api/v1/edge/wake.
 func (s *Server) EdgeWake(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.edgeAuth(w, r)
+	body, scope, ok := s.edgeAuth(w, r)
 	if !ok {
 		return
 	}
 	var req edgeapi.Wake
 	if err := json.Unmarshal(body, &req); err != nil || req.Ref == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "not a wake request")
+		return
+	}
+	if !s.edgeRef(w, r, scope, req.Ref, "edge wake") {
 		return
 	}
 	if err := s.services.Wake(r.Context(), req.Ref); err != nil {

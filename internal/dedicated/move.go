@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/israel-duff/xenibase/internal/jobs"
 	"github.com/israel-duff/xenibase/internal/logical"
@@ -88,7 +89,7 @@ func (s *Service) Move(ctx context.Context, mp MoveParams) (store.Operation, err
 			if src.NodeID == mp.NodeID {
 				return nil, fmt.Errorf("%w: the project is already on that node", provision.ErrInvalid)
 			}
-			if err := checkMoveRegion(ctx, q, pr, mp.NodeID); err != nil {
+			if err := s.checkMoveRegion(ctx, q, pr, mp.NodeID); err != nil {
 				return nil, err
 			}
 			if pr.Tier == provision.TierShared {
@@ -116,16 +117,20 @@ func (s *Service) Move(ctx context.Context, mp MoveParams) (store.Operation, err
 			if mp.Size != nil {
 				size = *mp.Size
 			}
-			cp := provision.CreateParams{NodeID: &mp.NodeID, Profile: DefaultProfile, VolumeGB: size.DiskGB}
+			cp := provision.CreateParams{NodeID: &mp.NodeID, Size: &provision.Profile{CPUs: size.CPUs, MemoryMB: size.MemoryMB}, VolumeGB: size.DiskGB}
 			if _, err := s.Validate(ctx, &cp); err != nil {
 				return nil, err
 			}
 			target := uuid.New()
 			prefix := "instances/" + target.String() + "/wal-g"
 			mem, vol, name := int32(size.MemoryMB), int32(size.DiskGB), profileName(size)
+			maxConns := int32(provision.MaxConnectionsFor(size.MemoryMB))
+			if mp.Size == nil {
+				maxConns = max(maxConns, src.MaxConnections) // the same size: what it had
+			}
 			if _, err := q.InsertInstance(ctx, store.InsertInstanceParams{
 				ID: target, NodeID: mp.NodeID, Kind: provision.TierDedicated, PgVersion: src.PgVersion, CpuLimit: numeric(size.CPUs),
-				MemLimitMb: &mem, VolumeGb: &vol, Profile: &name, WalgPrefix: &prefix,
+				MemLimitMb: &mem, VolumeGb: &vol, Profile: &name, WalgPrefix: &prefix, MaxConnections: &maxConns,
 			}); err != nil {
 				return nil, err
 			}
@@ -137,8 +142,9 @@ func (s *Service) Move(ctx context.Context, mp MoveParams) (store.Operation, err
 }
 
 // checkMoveRegion: a move may go to another region's node (a region
-// move), except out of a data-residency project's region (V3 §6.3).
-func checkMoveRegion(ctx context.Context, q *store.Queries, pr store.Project, nodeID uuid.UUID) error {
+// move), except out of a data-residency project's region (V3 §6.3), or
+// with stored files, which stay in the region (filesStay).
+func (s *Service) checkMoveRegion(ctx context.Context, q *store.Queries, pr store.Project, nodeID uuid.UUID) error {
 	n, err := q.GetNode(ctx, nodeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: no node %s", provision.ErrInvalid, nodeID)
@@ -158,7 +164,48 @@ func checkMoveRegion(ctx context.Context, q *store.Queries, pr store.Project, no
 		return err
 	}
 	if r.Status != "active" {
-		return fmt.Errorf("%w: region %s is not open for projects", provision.ErrInvalid, r.ID)
+		// A hidden region takes its early-access organisations' projects.
+		ok, err := q.RegionHasEarlyAccess(ctx, store.RegionHasEarlyAccessParams{RegionID: r.ID, OrgID: pr.OrgID})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: region %s is not open for projects", provision.ErrInvalid, r.ID)
+		}
+	}
+	return s.filesStay(ctx, q, pr, n.Region)
+}
+
+// filesStay refuses a region move while the project has stored files (V4
+// §5): their bytes are in its region's object store under files/<ref>/,
+// and a move copies the database, not them, so every file would answer
+// "missing" in the new region (decisions V4-M33 #13). It is checked when
+// the move is asked for, and again once writes are frozen for the cutover.
+func (s *Service) filesStay(ctx context.Context, q *store.Queries, pr store.Project, to string) error {
+	svc, err := q.GetProjectServices(ctx, pr.ID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && svc.SchemaVersion < 4) {
+		return nil // no storage schema, so no files
+	}
+	if err != nil {
+		return err
+	}
+	conn, err := s.projects.AdminConn(ctx, pr.InstanceID, pr.DbName)
+	if err != nil {
+		return fmt.Errorf("check the project's files: %w", err)
+	}
+	defer conn.Close(context.Background())
+	var has bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM xb_storage.objects) OR EXISTS (SELECT 1 FROM xb_storage.uploads)`).Scan(&has)
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "42P01" {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check the project's files: %w", err)
+	}
+	if has {
+		return fmt.Errorf("%w: the project has stored files, which stay in %s's object store: moving it to %s would leave every file behind. "+
+			"Delete its files (Project → Storage) first, or move it to a node in %s", provision.ErrConflict, pr.Region, to, pr.Region)
 	}
 	return nil
 }
@@ -184,6 +231,9 @@ func (s *Service) runMove(ctx context.Context, op store.Operation, log *jobs.Ste
 	if p.InstanceID != params.SourceInstance {
 		return jobs.Permanent(errors.New("the project is no longer on the instance being moved from"))
 	}
+	if err := s.thawRetry(ctx, op, p, log); err != nil {
+		return err
+	}
 	pt := p
 	pt.InstanceID = params.TargetInstance
 	if params.NewInstance {
@@ -201,6 +251,13 @@ func (s *Service) runMove(ctx context.Context, op store.Operation, log *jobs.Ste
 	run, err := s.copyForMove(ctx, op, p, pt, agent, log, true)
 	if err != nil {
 		return err
+	}
+	// Writes are frozen: files uploaded since the move was asked for stop a
+	// region move here, before the cutover.
+	if agent.Node.Region != p.Region {
+		if err := s.filesStay(ctx, q, p, agent.Node.Region); err != nil {
+			return jobs.Permanent(err)
+		}
 	}
 
 	// The commit is the point of no return. The source is kept for 48
@@ -259,6 +316,9 @@ func (s *Service) prepareTarget(ctx context.Context, op store.Operation, p, pt s
 		return err
 	}
 	if err := s.restoreIntegratorRoles(ctx, p, pt, log); err != nil {
+		return err
+	}
+	if err := s.restoreOwnedRoles(ctx, p, pt, log); err != nil {
 		return err
 	}
 	src, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
@@ -503,6 +563,13 @@ func (s *Service) finishMove(ctx context.Context, op store.Operation, p store.Pr
 		if err := log.Info(ctx, "resize", "the project runs at its new size on the new node"); err != nil {
 			return err
 		}
+		if limit, err := s.projects.FitConnectionLimit(ctx, p.ID, log); err != nil {
+			return err
+		} else if limit > 0 {
+			if err := log.Info(ctx, "connections", "the project's connection limit is now %d, the most this size allows", limit); err != nil {
+				return err
+			}
+		}
 	}
 	if p.Tier == provision.TierDedicated {
 		s.projects.Provisioned(ctx, p, log)
@@ -592,11 +659,11 @@ func (s *Service) failMove(ctx context.Context, op store.Operation, log *jobs.St
 		return s.finishMove(ctx, op, p, params.SourceInstance, log, time.Time{})
 	}
 	s.moveFailed(ctx, op, p.InstanceID, params.TargetInstance, p.DbName, log)
-	if err := s.unfreeze(ctx, p, log, "source writable again; route resumed"); err != nil {
-		return err
-	}
-	if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
-		return err
+	thawErr := s.unfreeze(ctx, p, log, "source writable again; route resumed")
+	if thawErr == nil {
+		if err := q.SetProjectStatus(ctx, store.SetProjectStatusParams{ID: p.ID, Status: provision.StatusActive}); err != nil {
+			return err
+		}
 	}
 	if params.NewInstance {
 		if inst, err := q.GetInstance(ctx, params.TargetInstance); err == nil {
@@ -606,6 +673,9 @@ func (s *Service) failMove(ctx context.Context, op store.Operation, log *jobs.St
 		}
 	} else if err := s.dropCopy(ctx, params.TargetInstance, p.DbName, p.OwnerRole); err != nil {
 		_ = log.Warn(ctx, "rollback", "could not drop the partial copy: %v", err)
+	}
+	if thawErr != nil {
+		return s.stuck(ctx, p, log, thawErr)
 	}
 	return log.Warn(ctx, "rollback", "move rolled back; the project stays where it was with no data lost")
 }

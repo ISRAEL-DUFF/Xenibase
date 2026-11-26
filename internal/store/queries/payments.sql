@@ -10,6 +10,20 @@ RETURNING *;
 UPDATE payment_events SET processed_at = now(), outcome = @outcome, error = sqlc.narg(error), org_id = coalesce(sqlc.narg(org_id), org_id)
 WHERE id = @id;
 
+-- name: ClaimPaymentEvent :one
+-- tenant: system - takes a stored event for processing again: one that failed, or one
+-- whose processing was cut off (unfinished and claimed over ten minutes ago).
+UPDATE payment_events SET outcome = NULL, error = NULL, processed_at = NULL, attempts = attempts + 1, claimed_at = now()
+WHERE provider = @provider AND provider_event_id = @provider_event_id
+  AND (outcome = 'failed' OR (outcome IS NULL AND claimed_at < now() - interval '10 minutes'))
+RETURNING *;
+
+-- name: RetryablePaymentEvents :many
+-- tenant: system - a provider's events of the last 30 days to process again (see ClaimPaymentEvent).
+SELECT * FROM payment_events WHERE provider = @provider AND received_at > now() - interval '30 days'
+  AND (outcome = 'failed' OR (outcome IS NULL AND claimed_at < now() - interval '10 minutes'))
+ORDER BY id LIMIT 200;
+
 -- name: ListPaymentEvents :many
 -- tenant: system - the admin's event log.
 SELECT * FROM payment_events WHERE (sqlc.narg(outcome)::text IS NULL OR outcome = sqlc.narg(outcome))
@@ -25,6 +39,19 @@ RETURNING *;
 -- tenant: system - a wallet debit ended.
 UPDATE payment_intents SET status = @status, error = sqlc.narg(error), completed_at = now()
 WHERE reference = @reference AND status = 'pending';
+
+-- name: LockPendingIntent :one
+-- tenant: system - a wallet debit still unresolved, locked by whoever acts on it (the attempt that made it, while it
+-- waits for the provider, or a resolver); one that another session holds is skipped, not waited for.
+SELECT * FROM payment_intents WHERE reference = @reference AND status = 'pending' FOR UPDATE SKIP LOCKED;
+
+-- name: LockPaymentIntent :one
+-- tenant: system - a wallet debit, locked by the attempt that made it (waiting for a resolver that holds it).
+SELECT * FROM payment_intents WHERE reference = @reference FOR UPDATE;
+
+-- name: PaymentIntentStatus :one
+-- tenant: system - a wallet debit's status.
+SELECT status FROM payment_intents WHERE reference = @reference;
 
 -- name: PendingIntents :many
 -- tenant: system - a provider's charges still open, for re-querying.

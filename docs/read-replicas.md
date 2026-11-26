@@ -75,6 +75,48 @@ primary's own `replay_lag` would freeze.
 Operators set the threshold with `ReplicaMaxLag` in the dedicated service
 configuration (tests use 3 seconds).
 
+## Long queries on a replica
+
+A replica replays the primary's changes while it answers queries, and the
+two can collide. For example, a report on the replica is still reading rows
+that the primary has deleted and its vacuum has since removed. Replay then
+either waits for the query or cancels it, and the application gets
+`ERROR: canceling statement due to conflict with recovery`. Two settings,
+set per replica, decide which:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Hot standby feedback | off | The replica tells the primary which rows its running queries still read, and the primary's vacuum keeps them. Most conflicts never happen. The cost is on the primary: dead rows stay longer, so one very long query on the replica can bloat tables there. |
+| Wait for conflicting queries | 30 s | How long replay waits for a conflicting query before cancelling it: 0 to 900 seconds. It sets `max_standby_streaming_delay` and `max_standby_archive_delay` together. Longer lets long queries finish, but the replica falls behind while it waits. |
+
+Set them when you add a replica, or later with **Settings…** on its row
+(Project Settings → Compute → Read replicas), or through the API:
+
+```http
+PATCH /api/v1/projects/{id}/replicas/{replica_id}
+{"hot_standby_feedback": true, "max_standby_delay_seconds": 30}
+```
+
+From the CLI: `xenibase replicas set <project> <replica-id> --feedback on
+--standby-delay 30`, or the same flags on `replicas create`.
+
+A change applies to that replica alone, at once, with a configuration
+reload: no restart, and open connections stay open. The primary and HA
+standbys keep Postgres's defaults. If the replica can't be reached (it is
+down or restarting), the settings are stored and applied when it is back.
+`settings_error` on the replica says why it is waiting. Xenibase checks
+every replica's settings every five minutes and puts back any that drifted,
+for example after the replica is rebuilt from a backup.
+
+A replica waiting for a long query falls behind, and once it is past the
+rotation threshold (10 seconds) it leaves the read route until it catches
+up. Reads then go to the other replica or the primary. With a wait longer
+than the threshold, expect a replica that runs long reports to leave
+rotation now and then while they run.
+
+Detaching a replica resets both settings: the new project starts with
+Postgres's defaults.
+
 ## Failover
 
 Replicas are Patroni members tagged `nofailover` and `nosync`:

@@ -106,9 +106,21 @@ func TestAuthCodeBruteForce(t *testing.T) {
 	}
 	chID := challenge(factor.ID)
 	code = phoneCode(t, e, "sms", mfaPhone, 0)
-	guess("mfa phone", http.StatusUnprocessableEntity, "mfa_verification_failed", func(c string) authResult {
+	// Five wrong codes in a row also lock the factor, across challenges.
+	mfaTry := func(c string) authResult {
 		return pub.call("POST", "/auth/v1/factors/"+factor.ID+"/verify", fmt.Sprintf(`{"challenge_id":%q,"code":%q}`, chID, c), token)
-	}, code)
+	}
+	for i := 1; i <= 5; i++ {
+		if r := mfaTry(wrongFor(code)); r.Code != http.StatusUnprocessableEntity || r.Error.Code != "mfa_verification_failed" {
+			t.Fatalf("mfa phone: wrong code %d: %d %s", i, r.Code, r.Body)
+		}
+	}
+	if r := mfaTry(code); r.Code != http.StatusTooManyRequests || r.Error.Code != "mfa_factor_locked" {
+		t.Fatalf("mfa phone: the right code after five wrong ones: %d %s", r.Code, r.Body)
+	}
+	if r := pub.call("POST", "/auth/v1/factors/"+factor.ID+"/challenge", `{}`, token); r.Code != http.StatusTooManyRequests {
+		t.Fatalf("mfa phone: a new challenge for a locked factor: %d %s", r.Code, r.Body)
+	}
 
 	// ---- A TOTP code works once ----------------------------------------------------
 	r = pub.call("POST", "/auth/v1/factors", `{"factor_type":"totp","friendly_name":"app"}`, token)

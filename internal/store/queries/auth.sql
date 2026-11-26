@@ -96,13 +96,42 @@ SELECT * FROM users WHERE email = @email;
 SELECT * FROM users WHERE id = @id;
 
 -- name: RecordLoginFailure :one
--- Counts a failed password or TOTP attempt and locks the account for
--- @lock_seconds once @threshold consecutive failures are reached.
+-- Counts a failed password or TOTP attempt. The threshold-th failure in a
+-- row locks the account for lock_seconds, and each further one for twice
+-- as long as the last, up to max_lock_seconds.
 UPDATE users
-SET failed_logins = CASE WHEN failed_logins + 1 >= @threshold::int THEN 0 ELSE failed_logins + 1 END,
-    locked_until  = CASE WHEN failed_logins + 1 >= @threshold::int THEN now() + make_interval(secs => @lock_seconds::int) ELSE locked_until END
+SET failed_logins = failed_logins + 1,
+    locked_until  = CASE WHEN failed_logins + 1 >= (@threshold::int)
+      THEN (@now::timestamptz) + interval '1 second' * least((@lock_seconds::float8) * power(2, least(failed_logins + 1 - (@threshold::int), 30)), (@max_lock_seconds::float8))
+      ELSE locked_until END
 WHERE id = @id
 RETURNING failed_logins, locked_until;
+
+-- name: ClaimLockoutNotice :execrows
+-- Claims the lockout email for an account, at most once every every_seconds.
+UPDATE users SET lockout_notified_at = (@now::timestamptz)
+WHERE id = @id AND (lockout_notified_at IS NULL OR lockout_notified_at <= (@now::timestamptz) - interval '1 second' * (@every_seconds::float8));
+
+-- name: GetAddressLock :one
+-- When a sign-in address with no enabled account is locked until.
+SELECT locked_until FROM login_address_failures WHERE email = @email;
+
+-- name: RecordAddressFailure :one
+-- Counts a failed sign-in for an address with no enabled account, and locks
+-- it as RecordLoginFailure locks an account.
+INSERT INTO login_address_failures AS f (email, failed_logins, locked_until, updated_at)
+VALUES (@email, 1, CASE WHEN 1 >= (@threshold::int) THEN (@now::timestamptz) + interval '1 second' * least((@lock_seconds::float8), (@max_lock_seconds::float8)) END, (@now::timestamptz))
+ON CONFLICT (email) DO UPDATE
+SET failed_logins = f.failed_logins + 1,
+    locked_until  = CASE WHEN f.failed_logins + 1 >= (@threshold::int)
+      THEN (@now::timestamptz) + interval '1 second' * least((@lock_seconds::float8) * power(2, least(f.failed_logins + 1 - (@threshold::int), 30)), (@max_lock_seconds::float8))
+      ELSE f.locked_until END,
+    updated_at    = (@now::timestamptz)
+RETURNING failed_logins, locked_until;
+
+-- name: DeleteStaleAddressFailures :exec
+DELETE FROM login_address_failures
+WHERE updated_at < (@before::timestamptz) AND (locked_until IS NULL OR locked_until <= (@now::timestamptz));
 
 -- name: ResetLoginFailures :exec
 UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = @id;

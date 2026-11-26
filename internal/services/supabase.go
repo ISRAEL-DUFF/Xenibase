@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -14,8 +15,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/israel-duff/xenibase/internal/agentapi"
+	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/files"
 	"github.com/israel-duff/xenibase/internal/jobs"
+	"github.com/israel-duff/xenibase/internal/outbound"
+	"github.com/israel-duff/xenibase/internal/pgsource"
 	"github.com/israel-duff/xenibase/internal/projauth"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/storage"
@@ -46,10 +50,6 @@ const (
 	KindMigrateSupabaseStorage  = "migrate_supabase_storage"
 )
 
-// supabaseSecretTTL bounds how long a migration's source credentials stay
-// in memory.
-const supabaseSecretTTL = 12 * time.Hour
-
 // SupabaseS3 is a Supabase project's S3 endpoint and access key
 // (Project Settings → Storage → S3 connection).
 type SupabaseS3 struct {
@@ -77,7 +77,17 @@ type supabaseSecrets struct {
 type supabaseParams struct {
 	SecretRef *uuid.UUID `json:"secret_ref,omitempty"`
 	Source    string     `json:"source,omitempty"` // redacted, for the log
+	// Secrets holds supabaseSecrets sealed with the master key, bound to
+	// SecretRef, until the step ends (backup.SealOpSecret).
+	Secrets *supabaseSealed `json:"secrets,omitempty"`
 }
+
+type supabaseSealed struct {
+	Sealed string `json:"supabase_source"`
+}
+
+// supabaseSourcePurpose binds a step's sealed credentials to their use.
+const supabaseSourcePurpose = "supabase_source"
 
 var supabaseSteps = map[string]string{
 	"policies": KindMigrateSupabasePolicies,
@@ -88,8 +98,8 @@ var supabaseSteps = map[string]string{
 func (s *Service) supabaseKinds() map[string]jobs.Kind {
 	return map[string]jobs.Kind{
 		KindMigrateSupabasePolicies: {Handler: s.runMigratePolicies, MaxAttempts: 1, Timeout: 30 * time.Minute},
-		KindMigrateSupabaseUsers:    {Handler: s.runMigrateUsers, MaxAttempts: 1, Timeout: 2 * time.Hour},
-		KindMigrateSupabaseStorage:  {Handler: s.runMigrateStorage, MaxAttempts: 1, Timeout: 12 * time.Hour},
+		KindMigrateSupabaseUsers:    {Handler: s.runMigrateUsers, MaxAttempts: 1, Timeout: 2 * time.Hour, Class: jobs.ClassLong},
+		KindMigrateSupabaseStorage:  {Handler: s.runMigrateStorage, MaxAttempts: 1, Timeout: 12 * time.Hour, Class: jobs.ClassLong},
 	}
 }
 
@@ -102,7 +112,11 @@ func (s *Service) MigrateSupabase(ctx context.Context, projectID uuid.UUID, m Su
 	params := supabaseParams{}
 	var secrets *supabaseSecrets
 	if kind != KindMigrateSupabasePolicies {
-		conn, pg, err := connectSupabase(ctx, m.SourceURL)
+		proj, err := s.projects.Get(ctx, projectID)
+		if err != nil {
+			return store.Operation{}, err
+		}
+		conn, pg, err := connectSupabase(ctx, m.SourceURL, s.sourceGuard(proj.OrgID))
 		if err != nil {
 			return store.Operation{}, err
 		}
@@ -160,18 +174,32 @@ func (s *Service) MigrateSupabase(ctx context.Context, projectID uuid.UUID, m Su
 			return fmt.Errorf("%w: another operation is in progress on this project", ErrConflict)
 		}
 		if secrets != nil {
-			ref := uuid.New()
-			b, _ := json.Marshal(secrets)
-			s.secrets.Put(ref, string(b), supabaseSecretTTL)
-			params.SecretRef = &ref
+			if err := s.sealSecrets(&params, *secrets); err != nil {
+				return err
+			}
 		}
 		op, err = jobs.Enqueue(ctx, tx, jobs.EnqueueParams{Kind: kind, ProjectID: &p.ID, Params: params, CreatedBy: by})
 		return err
 	})
-	if err != nil && params.SecretRef != nil {
-		s.secrets.Delete(*params.SecretRef)
-	}
 	return op, err
+}
+
+// sealSecrets puts sec into a step's params, sealed with the master key:
+// whichever server claims the step opens them (migrationStart), and the
+// job runner removes them when it ends.
+func (s *Service) sealSecrets(params *supabaseParams, sec supabaseSecrets) error {
+	ref := uuid.New()
+	b, err := json.Marshal(sec)
+	if err != nil {
+		return err
+	}
+	sealed, err := backup.SealOpSecret(s.keyring, supabaseSourcePurpose, ref, b)
+	if err != nil {
+		return err
+	}
+	params.SecretRef = &ref
+	params.Secrets = &supabaseSealed{Sealed: sealed}
+	return nil
 }
 
 func (c *SupabaseS3) target(bucket string) storage.Target {
@@ -183,22 +211,43 @@ func (c *SupabaseS3) target(bucket string) storage.Target {
 		AccessKey: c.AccessKey, SecretKey: c.SecretKey, PathStyle: true}
 }
 
-// connectSupabase opens a read-only session on the source database.
-func connectSupabase(ctx context.Context, raw string) (*pgx.Conn, agentapi.PGConn, error) {
-	pg, err := agentapi.ParseURL(raw)
-	if err != nil {
-		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, err)
+// sourceGuard checks a migration source's address against org's
+// outbound rules: Xenibase connects from an address the clusters trust, so
+// the source must not be one of its own. It is the import's check
+// (CheckSource, the backup service's), which also refuses the platform's
+// private networks for a host allow-listed for the organisation;
+// outbound.CheckSource without them only when that is not set.
+func (s *Service) sourceGuard(org uuid.UUID) pgsource.Guard {
+	if s.CheckSource != nil {
+		return func(ctx context.Context, host string, port int) (netip.Addr, error) {
+			return s.CheckSource(ctx, org, host, port)
+		}
 	}
-	cfg, err := pgx.ParseConfig(strings.TrimSpace(raw))
+	ob := s.Outbound
+	if ob == nil {
+		ob = outbound.New(s.db, outbound.Config{}, s.log)
+	}
+	return func(ctx context.Context, host string, port int) (netip.Addr, error) {
+		return ob.CheckSource(ctx, org, host, port)
+	}
+}
+
+// connectSupabase opens a read-only session on the source database, at
+// the address guard checked.
+func connectSupabase(ctx context.Context, raw string, guard pgsource.Guard) (*pgx.Conn, agentapi.PGConn, error) {
+	cfg, pg, err := pgsource.Config(ctx, raw, guard)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redact(err, pg.Password))
 	}
 	cfg.ConnectTimeout = 15 * time.Second
 	cfg.RuntimeParams["application_name"] = "xenibase-migrate"
-	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, pg, fmt.Errorf("%w: cannot connect to the source: %w", ErrInvalid, redact(err, pg.Password))
+	}
+	if err := pgsource.ReadOnly(ctx, conn); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, pg, fmt.Errorf("%w: %w", ErrInvalid, redact(err, pg.Password))
 	}
 	return conn, pg, nil
 }
@@ -212,37 +261,36 @@ func redact(err error, password string) error {
 
 // migrationStart is what each step begins with: the project, its params
 // and (for the steps that read the source) the secrets.
-func (s *Service) migrationStart(ctx context.Context, op store.Operation, needSource bool) (store.Project, supabaseSecrets, func(), error) {
+func (s *Service) migrationStart(ctx context.Context, op store.Operation, needSource bool) (store.Project, supabaseSecrets, error) {
 	var params supabaseParams
 	var sec supabaseSecrets
 	if err := json.Unmarshal(op.Params, &params); err != nil {
-		return store.Project{}, sec, nil, jobs.Permanent(err)
+		return store.Project{}, sec, jobs.Permanent(err)
 	}
-	done := func() {}
 	if needSource {
 		if params.SecretRef == nil {
-			return store.Project{}, sec, nil, jobs.Permanent(errors.New("no source"))
+			return store.Project{}, sec, jobs.Permanent(errors.New("no source"))
 		}
-		raw, ok := s.secrets.Get(*params.SecretRef)
-		if !ok {
-			return store.Project{}, sec, nil, jobs.Permanent(errors.New("the source credentials are no longer in memory (xenibase-server restarted?); start the step again"))
+		sealed := ""
+		if params.Secrets != nil {
+			sealed = params.Secrets.Sealed
 		}
-		if err := json.Unmarshal([]byte(raw), &sec); err != nil {
-			return store.Project{}, sec, nil, jobs.Permanent(err)
+		raw, err := backup.OpenOpSecret(s.keyring, supabaseSourcePurpose, *params.SecretRef, sealed)
+		if err != nil {
+			return store.Project{}, sec, jobs.Permanent(fmt.Errorf("the source credentials: %w; start the step again", err))
 		}
-		ref := *params.SecretRef
-		done = func() { s.secrets.Delete(ref) }
+		if err := json.Unmarshal(raw, &sec); err != nil {
+			return store.Project{}, sec, jobs.Permanent(err)
+		}
 	}
 	p, err := store.New(s.db).GetProject(ctx, *op.ProjectID)
 	if err != nil {
-		done()
-		return p, sec, nil, err
+		return p, sec, err
 	}
 	if p.DeletedAt != nil {
-		done()
-		return p, sec, nil, jobs.Permanent(errors.New("the project was deleted"))
+		return p, sec, jobs.Permanent(errors.New("the project was deleted"))
 	}
-	return p, sec, done, nil
+	return p, sec, nil
 }
 
 // warnList logs up to 40 lines of a report.
@@ -315,11 +363,10 @@ var authShimCompat = []string{
 }
 
 func (s *Service) runMigratePolicies(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
-	p, _, done, err := s.migrationStart(ctx, op, false)
+	p, _, err := s.migrationStart(ctx, op, false)
 	if err != nil {
 		return err
 	}
-	defer done()
 	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
 	if err != nil {
 		return err
@@ -467,12 +514,11 @@ func supabasePhone(p string) string {
 var supabaseProviders = map[string]string{"azure": "microsoft"}
 
 func (s *Service) runMigrateUsers(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
-	p, sec, done, err := s.migrationStart(ctx, op, true)
+	p, sec, err := s.migrationStart(ctx, op, true)
 	if err != nil {
 		return err
 	}
-	defer done()
-	src, pg, err := connectSupabase(ctx, sec.SourceURL)
+	src, pg, err := connectSupabase(ctx, sec.SourceURL, s.sourceGuard(p.OrgID))
 	if err != nil {
 		return jobs.Permanent(err)
 	}
@@ -697,15 +743,14 @@ func (s *Service) runMigrateUsers(ctx context.Context, op store.Operation, log *
 const supabasePlaceholder = ".emptyFolderPlaceholder"
 
 func (s *Service) runMigrateStorage(ctx context.Context, op store.Operation, log *jobs.StepLogger) error {
-	p, sec, done, err := s.migrationStart(ctx, op, true)
+	p, sec, err := s.migrationStart(ctx, op, true)
 	if err != nil {
 		return err
 	}
-	defer done()
 	if sec.S3 == nil {
 		return jobs.Permanent(errors.New("no S3 access for the source"))
 	}
-	src, pg, err := connectSupabase(ctx, sec.SourceURL)
+	src, pg, err := connectSupabase(ctx, sec.SourceURL, s.sourceGuard(p.OrgID))
 	if err != nil {
 		return jobs.Permanent(err)
 	}

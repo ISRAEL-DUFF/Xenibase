@@ -133,6 +133,7 @@ func TestProvisioningConfig(t *testing.T) {
 		"XENIBASE_POOLER_POOLED_ADDR":    "10.0.0.2:6543",
 		"XENIBASE_SHARED_ADMIN_URL":      "postgres://xenibase_admin:x@10.0.0.3/postgres",
 		"XENIBASE_SHARED_POOLER_PORT":    "5433",
+		"XENIBASE_POOLER_ADMIN_ALLOW":    "10.0.0.0/16, fd00::/8",
 	}), noFiles)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +142,9 @@ func TestProvisioningConfig(t *testing.T) {
 	if p.FileMode != 0o644 || p.AdminUser != "xenibase" || p.AdminPassword != "pw" ||
 		p.SessionAddr != "db.example.com:6432" || p.PooledAddr != "10.0.0.2:6543" || p.SSLMode != "prefer" {
 		t.Fatalf("pooler: %+v", p)
+	}
+	if len(p.AdminAllow) != 2 || p.AdminAllow[0] != "10.0.0.0/16" || p.AdminAllow[1] != "fd00::/8" {
+		t.Fatalf("admin allow: %v", p.AdminAllow)
 	}
 	if cfg.Shared.NodeName != "local" || cfg.Shared.PoolerPort != 5433 {
 		t.Fatalf("shared: %+v", cfg.Shared)
@@ -152,6 +156,7 @@ func TestProvisioningInvalid(t *testing.T) {
 		{"XENIBASE_POOLER_CONFIG_DIR": "/x"}, // no admin password
 		{"XENIBASE_POOLER_CONFIG_DIR": "/x", "XENIBASE_POOLER_ADMIN_PASSWORD": "p", "XENIBASE_POOLER_FILE_MODE": "9"},
 		{"XENIBASE_POOLER_CONFIG_DIR": "/x", "XENIBASE_POOLER_ADMIN_PASSWORD": "p", "XENIBASE_POOLER_SESSION_ADDR": "nohost"},
+		{"XENIBASE_POOLER_CONFIG_DIR": "/x", "XENIBASE_POOLER_ADMIN_PASSWORD": "p", "XENIBASE_POOLER_ADMIN_ALLOW": "10.0.0.1/16"},
 		{"XENIBASE_DB_SSLMODE": "sometimes"},
 		{"XENIBASE_DB_POOLED_PORT": "99999"},
 	} {
@@ -193,16 +198,26 @@ func TestInsightConfig(t *testing.T) {
 	if cfg.Insight.ConsoleDisabled || cfg.Insight.MetricsInterval != time.Minute || cfg.Insight.MetricsToken != "" {
 		t.Fatalf("insight defaults: %+v", cfg.Insight)
 	}
+	if in := cfg.Insight; in.WebhookListenMax != 50 || in.WebhookIdleAfter != 10*time.Minute || in.WebhookIdlePoll != 30*time.Second {
+		t.Fatalf("webhook LISTEN defaults: %+v", in)
+	}
 	cfg, err = load(env(map[string]string{
 		"XENIBASE_CONSOLE_DISABLED": "true", "XENIBASE_METRICS_INTERVAL": "15s", "XENIBASE_METRICS_TOKEN": strings.Repeat("t", 24),
+		"XENIBASE_WEBHOOK_LISTEN_MAX": "0", "XENIBASE_WEBHOOK_IDLE_AFTER": "2m", "XENIBASE_WEBHOOK_IDLE_POLL": "10s",
 	}), noFiles)
 	if err != nil || !cfg.Insight.ConsoleDisabled || cfg.Insight.MetricsInterval != 15*time.Second || len(cfg.Insight.MetricsToken) != 24 {
 		t.Fatalf("insight overrides: %+v %v", cfg.Insight, err)
 	}
+	if in := cfg.Insight; in.WebhookListenMax != 0 || in.WebhookIdleAfter != 2*time.Minute || in.WebhookIdlePoll != 10*time.Second {
+		t.Fatalf("webhook LISTEN overrides: %+v", in)
+	}
 	for k, v := range map[string]string{
-		"XENIBASE_CONSOLE_DISABLED": "maybe",
-		"XENIBASE_METRICS_INTERVAL": "100ms",
-		"XENIBASE_METRICS_TOKEN":    "short",
+		"XENIBASE_CONSOLE_DISABLED":   "maybe",
+		"XENIBASE_METRICS_INTERVAL":   "100ms",
+		"XENIBASE_METRICS_TOKEN":      "short",
+		"XENIBASE_WEBHOOK_LISTEN_MAX": "-1",
+		"XENIBASE_WEBHOOK_IDLE_AFTER": "1s",
+		"XENIBASE_WEBHOOK_IDLE_POLL":  "1h",
 	} {
 		if _, err := load(env(map[string]string{k: v}), noFiles); err == nil || !strings.Contains(err.Error(), k) {
 			t.Errorf("%s=%s: %v", k, v, err)

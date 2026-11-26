@@ -118,6 +118,7 @@ type ListLiveSharedInstancesRow struct {
 	Status   string
 }
 
+// tenant: system - the isolation checker; shared clusters belong to no organisation.
 func (q *Queries) ListLiveSharedInstances(ctx context.Context) ([]ListLiveSharedInstancesRow, error) {
 	rows, err := q.db.Query(ctx, listLiveSharedInstances)
 	if err != nil {

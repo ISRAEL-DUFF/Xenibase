@@ -11,7 +11,7 @@ const STATE_TEXT: Record<string, { tone: "warn" | "danger"; title: string; body:
   warn: {
     tone: "warn",
     title: "Nearly full",
-    body: "This project is over 90% of its storage limit. At 100% it becomes read-only; at 120% apps can no longer connect.",
+    body: "This project is over 90% of its storage limit. At 100% it becomes read-only; at 120%, or if it keeps growing while read-only, apps can no longer connect.",
   },
   soft: {
     tone: "danger",
@@ -184,13 +184,13 @@ export function ReapedCard({ p }: { p: Project }) {
   return (
     <Panel title="Ended by Xenibase">
       <p className="mb-2 text-xs text-muted">
-        On the shared tier, statements running over 10 minutes are cancelled and sessions idle in a transaction over 5 minutes are ended.
+        On the shared tier, statements running over 10 minutes are cancelled (and ended with their session if they keep running), and sessions idle in a transaction over 5 minutes are ended.
       </p>
       <Table head={["When", "What", "Role", "Ran for", "Query"]}>
         {q.data.items.map((r, i) => (
           <tr key={i} data-testid="reaped-session">
             <td className="px-3 py-1.5 text-xs">{relativeTime(r.created_at)}</td>
-            <td className="px-3 py-1.5 text-xs">{r.kind === "statement" ? "statement cancelled" : "idle transaction ended"}</td>
+            <td className="px-3 py-1.5 text-xs">{r.kind === "statement" ? "statement cancelled" : r.kind === "statement_terminated" ? "statement ended (it ignored the cancel)" : "idle transaction ended"}</td>
             <td className="px-3 py-1.5 font-mono text-xs">{r.role}</td>
             <td className="px-3 py-1.5 text-xs">{Math.round(r.duration_s / 60)} min</td>
             <td className="max-w-xs truncate px-3 py-1.5 font-mono text-xs" title={r.query ?? ""}>

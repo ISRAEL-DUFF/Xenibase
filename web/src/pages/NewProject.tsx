@@ -47,7 +47,12 @@ export function NewProjectPage() {
   const [region, setRegion] = useState("");
   const [residency, setResidency] = useState(false);
   const regions = useQuery({ queryKey: ["regions"], queryFn: api.regions });
-  const regionList = regions.data?.items ?? [];
+  // A hidden region is listed for its early-access organisations.
+  const regionList = (regions.data?.items ?? []).filter(
+    (r) =>
+      !r.early_access_org_ids ||
+      (!!org && r.early_access_org_ids.includes(org.id)),
+  );
   const picked =
     regionList.find((r) => r.id === region) ?? regionList.find((r) => r.home);
   const [busy, setBusy] = useState(false);
@@ -219,6 +224,7 @@ export function NewProjectPage() {
                     {r.name}
                     {r.country ? ` (${r.country})` : ""}
                     {r.home ? " (default)" : ""}
+                    {r.early_access_org_ids ? " (early access)" : ""}
                   </option>
                 ))}
               </Select>

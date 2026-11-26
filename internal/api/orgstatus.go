@@ -103,7 +103,7 @@ func (s *Server) UpdateBillingContact(w http.ResponseWriter, r *http.Request, or
 	for _, c := range rows {
 		if strings.EqualFold(c.Email, email) {
 			on := c.StatusEmails
-			writeJSON(w, http.StatusOK, gen.BillingContact{Email: c.Email, Name: c.Name, StatusEmails: &on})
+			writeJSON(w, http.StatusOK, gen.BillingContact{Email: c.Email, Name: c.Name, StatusEmails: &on, Verified: ptrTo(c.VerifiedAt != nil)})
 			return
 		}
 	}

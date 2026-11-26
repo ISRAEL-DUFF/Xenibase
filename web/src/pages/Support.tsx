@@ -126,6 +126,9 @@ function TicketBadges({ t }: { t: Ticket }) {
         <Badge tone={PRIORITY_TONE[t.priority]}>{t.priority}</Badge>
       )}
       {due && <Badge tone={due.tone}>{due.text}</Badge>}
+      {t.unverified_sender && (
+        <Badge tone="danger">unverified sender</Badge>
+      )}
     </span>
   );
 }
@@ -438,7 +441,7 @@ function WhatsAppNumbers({
       title="WhatsApp"
       description={
         q.data.available
-          ? "Messages to our support number from these numbers open a ticket for this organisation, and we answer there."
+          ? "Messages to our support number from these numbers open a ticket for this organisation, and we answer there. A new number works once its code is sent from it to our support number on WhatsApp."
           : "WhatsApp support comes with the Pro and Team plans."
       }
       testId="support-phones"
@@ -453,9 +456,28 @@ function WhatsAppNumbers({
               key={p.phone}
               className="flex items-center justify-between text-sm"
             >
-              <span className="flex items-center gap-2">
+              <span className="flex flex-wrap items-center gap-2">
                 <MessageCircle className="h-4 w-4 text-muted" />
                 {p.phone}
+                {p.verified ? (
+                  <Badge tone="ok">confirmed</Badge>
+                ) : (
+                  <>
+                    <Badge tone="warn">waiting for code</Badge>
+                    {p.code && (
+                      <span
+                        className="text-xs text-muted"
+                        data-testid="support-phone-code"
+                      >
+                        Send <code className="font-mono">{p.code}</code> from
+                        this number to Xenibase support on WhatsApp
+                        {p.code_expires_at &&
+                          ` by ${formatDate(p.code_expires_at)}`}
+                        .
+                      </span>
+                    )}
+                  </>
+                )}
               </span>
               {manager && (
                 <Button
@@ -643,7 +665,7 @@ function ConsoleTicket({
       title={t ? `${t.ref}: ${t.subject}` : "Ticket"}
       description={
         t &&
-        `${CHANNEL_LABEL[t.channel]} · ${t.requester} · opened ${formatDate(t.created_at)}`
+        `${CHANNEL_LABEL[t.channel]} · ${t.requester}${t.unverified_sender ? " (unverified sender)" : ""} · opened ${formatDate(t.created_at)}`
       }
       size="xlarge"
       testId="console-ticket"
@@ -688,6 +710,15 @@ function ConsoleTicket({
       {d && t ? (
         <div className="grid gap-5 lg:grid-cols-[1fr_18rem]">
           <div className="flex min-w-0 flex-col gap-4">
+            {t.unverified_sender && (
+              <Alert tone="warn">
+                The email provider couldn&apos;t authenticate this sender (no
+                DMARC pass), so the From address may be forged. It isn&apos;t
+                linked to an organisation and replies to it never join it.
+                Don&apos;t act on what it asks without checking with the
+                organisation another way.
+              </Alert>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Select
                 aria-label="Status"

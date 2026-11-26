@@ -18,6 +18,7 @@ import (
 
 	"github.com/israel-duff/xenibase/internal/alerts"
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/auditlog"
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/billing"
@@ -59,6 +60,8 @@ type Server struct {
 	exporting map[uuid.UUID]int
 	log       *slog.Logger
 	db        DB
+	schema    func() error
+	audit     *auditlog.Writer
 	streamer  *jobs.Streamer
 	projects  *provision.Service
 	dev       bool
@@ -122,6 +125,13 @@ type Options struct {
 	DevEndpoints bool
 	// StreamCtx ends open SSE streams when done; nil means never.
 	StreamCtx context.Context
+	// Audit writes audit rows; the caller runs it (Run, then Close at
+	// shutdown). Nil means one of NewHandler's own, retried until
+	// StreamCtx ends.
+	Audit *auditlog.Writer
+	// Schema is non-nil while the metadata schema is newer than this
+	// release (store.SchemaWatcher.Err); /readyz then answers 503.
+	Schema func() error
 	// Projects runs provisioning; nil disables the projects endpoints.
 	Projects *provision.Service
 	// UI is the web UI build output; UIIndex names its entry document.
@@ -224,12 +234,17 @@ func NewHandler(opts Options) http.Handler {
 		orgRate = DefaultOrgTokenRate
 	}
 	s.tokenLimit, s.orgTokenLimit = auth.NewLimiter(rate, time.Minute), auth.NewLimiter(orgRate, time.Minute)
+	streamCtx := opts.StreamCtx
+	if streamCtx == nil {
+		streamCtx = context.Background()
+	}
 	if opts.DB != nil && opts.Notifier != nil {
-		streamCtx := opts.StreamCtx
-		if streamCtx == nil {
-			streamCtx = context.Background()
-		}
 		s.streamer = jobs.NewStreamer(streamCtx, opts.DB, opts.Notifier, opts.Logger)
+	}
+	s.audit, s.schema = opts.Audit, opts.Schema
+	if s.audit == nil && opts.DB != nil {
+		s.audit = auditlog.New(opts.DB, opts.Logger, auditlog.Config{})
+		go s.audit.Run(streamCtx)
 	}
 
 	r := chi.NewRouter()
@@ -288,6 +303,12 @@ func (s *Server) GetReadyz(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.Ping(ctx); err != nil {
 			s.log.Warn("readiness check failed", "err", err)
 			writeJSON(w, http.StatusServiceUnavailable, gen.Health{Status: "metadata database unavailable"})
+			return
+		}
+	}
+	if s.schema != nil {
+		if err := s.schema(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, gen.Health{Status: "metadata schema is newer than this server"})
 			return
 		}
 	}

@@ -99,7 +99,7 @@ func OpaqueDBName() (string, error) {
 
 // The suffixes are the owner, read-only, console and personal roles, and
 // backend services' request roles and edge login (V4 §2).
-var opaqueRoleRe = regexp.MustCompile(`^p_[a-z2-7]{10}(_owner|_ro|_console|_u_[a-z0-9]{6}|_anon|_user|_service|_edge|_auth_hook)$`)
+var opaqueRoleRe = regexp.MustCompile(`^p_[a-z2-7]{10}(_owner|_ro|_console|_console_ro|_u_[a-z0-9]{6}|_anon|_user|_service|_edge|_auth_hook)$`)
 
 // IsOpaqueRole reports whether role is one of an opaque project's roles.
 func IsOpaqueRole(role string) bool { return opaqueRoleRe.MatchString(role) }

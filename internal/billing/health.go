@@ -14,8 +14,9 @@ const outageWindow = 30 * time.Minute
 
 // Health is the billing component of the status page (V4.1 §7.2):
 // degraded while a payment provider's last automatic charge in the last
-// half hour hit an outage, or when last month's invoices haven't issued
-// by the 2nd. The detail is public: it says what, not for whom.
+// half hour hit an outage, or when last month's invoices (or an earlier
+// month's) haven't issued by the 2nd. The detail is public: it says what,
+// not for whom.
 func (s *Service) Health(ctx context.Context, now time.Time) (statusapi.ComponentState, error) {
 	st := statusapi.ComponentState{ID: ComponentBilling, Status: statusapi.Operational}
 	q := store.New(s.db)

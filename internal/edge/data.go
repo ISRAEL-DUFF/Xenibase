@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/israel-duff/xenibase/internal/datacat"
 )
 
 // The data API (V4 §3): reads in this milestone.
@@ -27,8 +29,8 @@ const (
 
 // gateFor is the RLS gate for the request's role (V4 §3.6): anon and user
 // may read a table only with row-level security on (or marked public), and
-// a view only when it runs as the invoker.
-func (p *project) gateFor(role string) gate {
+// a view only when it runs as the invoker and what it reads passes too.
+func (p *project) gateFor(cat *Catalog, role string) gate {
 	if role == "service" {
 		return nil
 	}
@@ -39,7 +41,7 @@ func (p *project) gateFor(role string) gate {
 		switch t.Kind {
 		case kindView:
 			if t.Invoker {
-				return nil
+				return p.viewGate(cat, role, t, false)
 			}
 			return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: map[string]any{"table": t.Name},
 				Message: fmt.Sprintf("view %s doesn't run as the caller (security_invoker), so row-level security can't apply: set it, or mark it public", t.Name)}
@@ -51,6 +53,47 @@ func (p *project) gateFor(role string) gate {
 		return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: map[string]any{"table": t.Name},
 			Message: fmt.Sprintf("%s has no row-level security, so it can't be read with the publishable key: enable it and add policies, or mark the table public", t.Name)}
 	}
+}
+
+// viewGate checks what a security_invoker view reads (datacat's
+// Unprotected and CallsFunctions): every relation without row-level
+// security must be a public table (for a read), and a view that calls the
+// project's functions passes only when functionGate would.
+func (p *project) viewGate(cat *Catalog, role string, t *Table, write bool) *apiError {
+	for _, u := range t.Unprotected {
+		if write || !p.publicName(u) {
+			return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: map[string]any{"table": t.Name, "reads": u},
+				Message: fmt.Sprintf("view %s reads %s, which row-level security doesn't protect, so it can't be used with the publishable key: enable row-level security on %s and add policies, or mark it public", t.Name, u, u)}
+		}
+	}
+	if t.CallsFunctions {
+		if reach := cat.Reach[role]; len(reach) > 0 {
+			return reachError("view "+t.Name+" calls a function, which", reach, map[string]any{"table": t.Name})
+		}
+	}
+	return nil
+}
+
+// functionGate is the RLS gate for a function: one that runs as the
+// caller reaches whatever the caller's role may, so anon and user may call
+// it only while their role holds no privilege on a relation nothing
+// protects (Catalog.Reach; the project's database takes those back when
+// the catalog changes, so this is a backstop). A SECURITY DEFINER
+// function runs as its owner, which the advisor flags.
+func (p *project) functionGate(cat *Catalog, role string, f *datacat.Function) *apiError {
+	if role == "service" || f.Definer {
+		return nil
+	}
+	if reach := cat.Reach[role]; len(reach) > 0 {
+		return reachError(f.Name+" runs as the caller, who", reach, map[string]any{"function": f.Name})
+	}
+	return nil
+}
+
+func reachError(who string, reach []string, details map[string]any) *apiError {
+	details["reaches"] = reach
+	return &apiError{Status: http.StatusForbidden, Code: "rls_required", Details: details,
+		Message: fmt.Sprintf("%s can reach %s, which row-level security doesn't protect, so it can't be called with the publishable key: enable row-level security on %s, or revoke the request roles' privileges on it", who, reach[0], reach[0])}
 }
 
 func (c *call) apiFail(e *apiError) {
@@ -321,19 +364,15 @@ func filterFromJSON(raw json.RawMessage, depth int) (Filter, error) {
 	return f, nil
 }
 
-// cost is the estimated cost of a statement shape, explained once per
-// catalog version.
-func (e *Edge) cost(ctx context.Context, tx pgx.Tx, st *catalogState, sql string, args []any) (float64, error) {
-	st.mu.Lock()
-	c, ok := st.shapes[sql]
-	st.mu.Unlock()
-	if ok {
-		return c, nil
-	}
+// cost is a statement's estimated cost (V4 §3.6), planned as the caller
+// with the request's own values: a cost kept per statement text let a
+// cheap value admit an expensive one, and a plan made for the service
+// role admit anon. Planning a typical read takes a small fraction of
+// running it.
+func cost(ctx context.Context, tx pgx.Tx, sql string, args []any) (float64, error) {
 	var plan []struct {
 		Plan struct {
 			TotalCost float64 `json:"Total Cost"`
-			Rows      float64 `json:"Plan Rows"`
 		} `json:"Plan"`
 	}
 	var raw []byte
@@ -343,14 +382,14 @@ func (e *Edge) cost(ctx context.Context, tx pgx.Tx, st *catalogState, sql string
 	if err := json.Unmarshal(raw, &plan); err != nil || len(plan) == 0 {
 		return 0, fmt.Errorf("unreadable plan")
 	}
-	c = plan[0].Plan.TotalCost
-	st.mu.Lock()
-	if len(st.shapes) > 2000 {
-		st.shapes = map[string]float64{}
-	}
-	st.shapes[sql] = c
-	st.mu.Unlock()
-	return c, nil
+	return plan[0].Plan.TotalCost, nil
+}
+
+// tooExpensive is the cost guard's answer.
+func tooExpensive(cost, limit float64) *apiError {
+	return &apiError{Status: http.StatusBadRequest, Code: "query_too_expensive",
+		Message: "the query's estimated cost is over the project's limit: add an index, a filter or a smaller limit",
+		Details: map[string]any{"estimated_cost": cost, "limit": limit}}
 }
 
 // read runs a read: a list, or one row by its key.
@@ -360,7 +399,7 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 	var gen uint64
 	if caching {
 		gen = e.cache.generation(c.p.cfg.Ref)
-		if fp := c.p.catalog.fingerprint(); fp != "" {
+		if fp := c.p.catalog.fingerprint(e.cfg.CatalogEvery); fp != "" {
 			if t := c.p.catalog.table(name); t != nil && c.cacheable(req, cacheName(t.Schema, t.Name, false)) > 0 &&
 				e.serveCached(c, cacheKey(c.p.cfg.Ref, c.p.cfg.Version, fp, c.r.URL.Path, c.r.URL.Query())) {
 				return
@@ -380,7 +419,7 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 		fp     string
 	)
 	err := e.WithRequest(ctx, c.p, req, func(tx pgx.Tx) error {
-		cat, st, err := e.catalog(ctx, c.p, tx)
+		cat, _, err := e.catalog(ctx, c.p, tx)
 		if err != nil {
 			return err
 		}
@@ -392,7 +431,7 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 				Message: fmt.Sprintf("no table or view %q in the exposed schemas (%s)", name, strings.Join(cat.Schemas, ", "))}
 			return nil
 		}
-		g := c.p.gateFor(req.Role)
+		g := c.p.gateFor(cat, req.Role)
 		if g != nil {
 			if ge := g(t); ge != nil {
 				failed = ge
@@ -411,15 +450,14 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 			}
 			return err
 		}
-		if limit := c.p.cfg.Settings.MaxQueryCost; limit > 0 {
-			cost, err := e.cost(ctx, tx, st, stmt.SQL, stmt.Args)
+		limit := c.p.cfg.Settings.MaxQueryCost
+		if limit > 0 {
+			est, err := cost(ctx, tx, stmt.SQL, stmt.Args)
 			if err != nil {
 				return err
 			}
-			if cost > limit {
-				failed = &apiError{Status: http.StatusBadRequest, Code: "query_too_expensive",
-					Message: "the query's estimated cost is over the project's limit: add an index, a filter or a smaller limit",
-					Details: map[string]any{"estimated_cost": cost, "limit": limit}}
+			if est > limit {
+				failed = tooExpensive(est, limit)
 				return nil
 			}
 		}
@@ -456,6 +494,17 @@ func (e *Edge) read(c *call, req Request, name string, q Query, one bool) {
 		}
 		switch q.Count {
 		case "exact":
+			// Over the cost limit, the count isn't run: null, as when it
+			// times out.
+			if limit > 0 {
+				est, err := cost(ctx, tx, stmt.CountSQL, stmt.CountArgs)
+				if err != nil {
+					return err
+				}
+				if est > limit {
+					break
+				}
+			}
 			n, err := countExact(ctx, tx, stmt)
 			if err != nil {
 				return err

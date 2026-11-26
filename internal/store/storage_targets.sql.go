@@ -21,7 +21,7 @@ func (q *Queries) ClearDefaultStorageTarget(ctx context.Context) error {
 }
 
 const dedicatedArchiveDrift = `-- name: DedicatedArchiveDrift :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles FROM projects p JOIN instances i ON i.id = p.instance_id
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files FROM projects p JOIN instances i ON i.id = p.instance_id
 WHERE p.deleted_at IS NULL AND p.status = 'active' AND p.tier = 'dedicated'
   AND i.status = 'running' AND i.walg_prefix IS NOT NULL AND i.walg_target_id IS NOT NULL
   AND (COALESCE(p.storage_target_id, (SELECT t.id FROM storage_targets t WHERE t.is_default AND t.org_id IS NULL AND t.deleted_at IS NULL)) IS DISTINCT FROM i.walg_target_id
@@ -86,6 +86,9 @@ func (q *Queries) DedicatedArchiveDrift(ctx context.Context) ([]Project, error) 
 			&i.ForwardRegion,
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 		); err != nil {
 			return nil, err
 		}
@@ -222,7 +225,7 @@ func (q *Queries) GetPlatformStorageTarget(ctx context.Context, id uuid.UUID) (S
 }
 
 const getProjectForUpdate = `-- name: GetProjectForUpdate :one
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects WHERE id = $1 FOR UPDATE
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE id = $1 FOR UPDATE
 `
 
 // tenant: system - a project the request already authorized, locked while its backup settings change.
@@ -274,6 +277,9 @@ func (q *Queries) GetProjectForUpdate(ctx context.Context, id uuid.UUID) (Projec
 		&i.ForwardRegion,
 		&i.ForwardUntil,
 		&i.IntegratorRoles,
+		&i.ManageRoles,
+		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
@@ -408,6 +414,7 @@ type InstanceArchivingToParams struct {
 	WalgTargetID *uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) InstanceArchivingTo(ctx context.Context, arg InstanceArchivingToParams) (bool, error) {
 	row := q.db.QueryRow(ctx, instanceArchivingTo, arg.WalgPrefix, arg.WalgTargetID)
 	var column_1 bool
@@ -495,6 +502,47 @@ func (q *Queries) ListPlatformStorageTargets(ctx context.Context) ([]StorageTarg
 	return items, nil
 }
 
+const liveStorageTargetLocations = `-- name: LiveStorageTargetLocations :many
+SELECT id, org_id, name, endpoint, bucket, prefix FROM storage_targets WHERE deleted_at IS NULL
+`
+
+type LiveStorageTargetLocationsRow struct {
+	ID       uuid.UUID
+	OrgID    *uuid.UUID
+	Name     string
+	Endpoint string
+	Bucket   string
+	Prefix   string
+}
+
+// tenant: system - a target being saved is checked against every live target's location, across organisations; only ids, names, owners and locations.
+func (q *Queries) LiveStorageTargetLocations(ctx context.Context) ([]LiveStorageTargetLocationsRow, error) {
+	rows, err := q.db.Query(ctx, liveStorageTargetLocations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LiveStorageTargetLocationsRow
+	for rows.Next() {
+		var i LiveStorageTargetLocationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrgID,
+			&i.Name,
+			&i.Endpoint,
+			&i.Bucket,
+			&i.Prefix,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const orgPlatformBackupBytes = `-- name: OrgPlatformBackupBytes :one
 SELECT COALESCE(sum(b.size_bytes), 0)::float8
 FROM backups b JOIN projects p ON p.id = b.project_id JOIN storage_targets t ON t.id = b.storage_target_id
@@ -565,6 +613,7 @@ type SetInstanceWALGParams struct {
 	ID           uuid.UUID
 }
 
+// tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 func (q *Queries) SetInstanceWALG(ctx context.Context, arg SetInstanceWALGParams) error {
 	_, err := q.db.Exec(ctx, setInstanceWALG,
 		arg.WalgPrefix,

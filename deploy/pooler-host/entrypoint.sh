@@ -13,8 +13,12 @@
 #   XENIBASE_EDGE_VRRP_PASSWORD                 shared, at most 8 characters
 #   XENIBASE_EDGE_INTERFACE (eth0), XENIBASE_EDGE_VIP, XENIBASE_EDGE_ROUTER_ID (51),
 #   XENIBASE_EDGE_PRIORITY (100)
-#   XENIBASE_AGENT_SERVER_ID, XENIBASE_AGENT_HETZNER_TOKEN,
-#   XENIBASE_AGENT_FLOATING_IP_ID, XENIBASE_AGENT_HETZNER_API   the floating IP
+#   XENIBASE_AGENT_SERVER_ID                    this machine's Hetzner ID, the floating IP's target
+#   XENIBASE_AGENT_ASSIGN_FLOATING_IP, XENIBASE_AGENT_HETZNER_TOKEN,
+#   XENIBASE_AGENT_FLOATING_IP_ID, XENIBASE_AGENT_HETZNER_API   only to assign the
+#   floating IP from this host too (by default xenibase-server does)
+#   XENIBASE_POOLER_SERVER_TLS_SSLMODE (prefer), XENIBASE_POOLER_SERVER_TLS_CA_FILE
+#                                               TLS to the backends (verify-full needs the CA)
 # Without XENIBASE_EDGE_SELF_IP no keepalived configuration is written.
 set -eu
 
@@ -30,9 +34,13 @@ if [ -n "${XENIBASE_EDGE_SELF_IP:-}" ]; then
   mv "$edge/keepalived.conf.tmp" "$edge/keepalived.conf"
 fi
 
-pgbouncer /etc/pgbouncer/session.ini &
+# The PgBouncers run on copies with this host's backend TLS settings.
+xenibase-agent pooler-ini --in /etc/pgbouncer/session.ini --out "$run/session.ini"
+xenibase-agent pooler-ini --in /etc/pgbouncer/transaction.ini --out "$run/transaction.ini"
+
+pgbouncer "$run/session.ini" &
 echo $! > "$run/session.pid"
-pgbouncer /etc/pgbouncer/transaction.ini &
+pgbouncer "$run/transaction.ini" &
 echo $! > "$run/transaction.pid"
 xenibase-agent run &
 agent=$!

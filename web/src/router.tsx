@@ -145,6 +145,10 @@ const VerifyEmailPage = lazyRouteComponent(
   () => import("./pages/Public"),
   "VerifyEmailPage",
 );
+const ConfirmContactPage = lazyRouteComponent(
+  () => import("./pages/Public"),
+  "ConfirmContactPage",
+);
 const NewProjectPage = lazyRouteComponent(
   () => import("./pages/NewProject"),
   "NewProjectPage",
@@ -321,6 +325,12 @@ const verifyEmail = createRoute({
   path: "/verify-email",
   validateSearch: token,
   component: VerifyEmailPage,
+});
+const confirmContact = createRoute({
+  getParentRoute: () => root,
+  path: "/confirm-contact",
+  validateSearch: token,
+  component: ConfirmContactPage,
 });
 const resetPassword = createRoute({
   getParentRoute: () => root,
@@ -681,6 +691,7 @@ const routeTree = root.addChildren([
   login,
   signup,
   verifyEmail,
+  confirmContact,
   resetPassword,
   invite,
   app.addChildren([

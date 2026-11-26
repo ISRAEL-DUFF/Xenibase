@@ -59,7 +59,7 @@ func (q *Queries) GetOAuthClient(ctx context.Context, clientID string) (OauthCli
 }
 
 const getOAuthClientToken = `-- name: GetOAuthClientToken :one
-SELECT id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id FROM api_tokens WHERE token_hash = $1 AND oauth_client_id = $2
+SELECT id, user_id, org_id, name, token_hash, prefix, scopes, project_ids, expires_at, last_used_at, last_used_ip, revoked_at, revoked_by, created_via, expiry_notified_at, created_at, oauth_client_id, parent_id FROM api_tokens WHERE token_hash = $1 AND oauth_client_id = $2
 `
 
 type GetOAuthClientTokenParams struct {
@@ -89,6 +89,7 @@ func (q *Queries) GetOAuthClientToken(ctx context.Context, arg GetOAuthClientTok
 		&i.ExpiryNotifiedAt,
 		&i.CreatedAt,
 		&i.OauthClientID,
+		&i.ParentID,
 	)
 	return i, err
 }

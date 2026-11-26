@@ -1,4 +1,5 @@
 -- name: ListLiveSharedInstances :many
+-- tenant: system - the isolation checker; shared clusters belong to no organisation.
 SELECT i.id, i.node_id, n.name AS node_name, i.status
 FROM instances i JOIN nodes n ON n.id = i.node_id
 WHERE i.kind = 'shared' AND i.deleted_at IS NULL AND n.status <> 'removed'

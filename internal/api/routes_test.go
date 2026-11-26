@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/auditlog"
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/authz"
 	"github.com/israel-duff/xenibase/internal/crypto"
@@ -127,6 +128,7 @@ var expected = map[authz.Action][]string{
 	authz.OrgBillingManage:   {rOwner, rBilling}, // V3 §3.2: not admins
 	authz.ProjectExport:      {rOwner},
 	authz.ProjectResidency:   {rOwner},
+	authz.ProjectManageRoles: {rOwner},
 	authz.PlatformManage:     {rPlatform},
 }
 
@@ -264,7 +266,7 @@ func newMatrixWorld(t *testing.T) *matrixWorld {
 	w.invitation = uuid.New()
 
 	// The guard in front of a server that answers 501 everywhere.
-	s := &Server{log: log, db: pool, auth: svc}
+	s := &Server{log: log, db: pool, auth: svc, audit: auditlog.New(pool, log, auditlog.Config{})}
 	r := chi.NewRouter()
 	r.Use(s.guard)
 	gen.HandlerWithOptions(stubServer{}, gen.ChiServerOptions{BaseRouter: r})
@@ -441,6 +443,7 @@ var specMatrix = map[authz.Action][]string{
 		// V4 §4 auth settings, templates, SMTP and signing keys
 		"PATCH /api/v1/projects/{id}/auth/config", "POST /api/v1/projects/{id}/auth/smtp/test",
 		"POST /api/v1/projects/{id}/auth/templates/preview", "POST /api/v1/projects/{id}/auth/signing-keys/rotate",
+		"POST /api/v1/projects/{id}/auth/signing-keys/{keyId}/revoke",
 		// V4 §9 the Supabase migration helper
 		"POST /api/v1/projects/{id}/migrate/supabase",
 	},
@@ -509,6 +512,8 @@ var specMatrix = map[authz.Action][]string{
 	},
 	// "Rotate app password, settings/guardrails, extensions"
 	authz.ProjectSettings: {
+		"GET /api/v1/projects/{id}/manage-roles", "POST /api/v1/projects/{id}/manage-roles/sync",
+		"GET /api/v1/projects/{id}/network", "PUT /api/v1/projects/{id}/network",
 		"PATCH /api/v1/projects/{id}/settings", "POST /api/v1/projects/{id}/rotate-password",
 		"POST /api/v1/projects/{id}/extensions", "POST /api/v1/projects/{id}/instance",
 		// §10.2 switch to opaque credentials (a new app password), §10.4 Reclaim space
@@ -531,6 +536,7 @@ var specMatrix = map[authz.Action][]string{
 		"POST /api/v1/projects/{id}/ha/etcd-move",
 		// V4 §7 read replicas: create, delete, detach into a project
 		"POST /api/v1/projects/{id}/replicas", "DELETE /api/v1/projects/{id}/replicas/{replica_id}",
+		"PATCH /api/v1/projects/{id}/replicas/{replica_id}",
 		"POST /api/v1/projects/{id}/replicas/{replica_id}/detach",
 	},
 	// "Delete project" (transfer also needs owner of both orgs, checked in the handler)
@@ -592,6 +598,8 @@ var specMatrix = map[authz.Action][]string{
 	authz.ProjectExport: {"GET /api/v1/backups/{id}/download"},
 	// V3 §6.3 the data residency setting: owners only
 	authz.ProjectResidency: {"PUT /api/v1/projects/{id}/residency"},
+	// The owner's CREATEROLE on a dedicated project: owners only
+	authz.ProjectManageRoles: {"PUT /api/v1/projects/{id}/manage-roles"},
 	// The signed-in user's own account
 	authz.Self: {
 		"POST /api/v1/auth/reauth", "POST /api/v1/auth/logout", "GET /api/v1/me", "PATCH /api/v1/me", "POST /api/v1/me/password",
@@ -627,7 +635,7 @@ var specMatrix = map[authz.Action][]string{
 		"POST /api/v1/nodes", "GET /api/v1/nodes/{id}", "PATCH /api/v1/nodes/{id}", "DELETE /api/v1/nodes/{id}",
 		// V3 §5 capacity automation, §5.4 and §7.2 costs and margins
 		// V3 §6.1 regions
-		"GET /api/v1/admin/pg-versions", "PATCH /api/v1/admin/pg-versions/{major}", "GET /api/v1/admin/regions", "PUT /api/v1/admin/regions/{region_id}", "GET /api/v1/admin/regions/{region_id}/readiness",
+		"GET /api/v1/admin/pg-versions", "GET /api/v1/admin/agent-client-certs", "POST /api/v1/admin/agent-client-certs/revoke", "PATCH /api/v1/admin/pg-versions/{major}", "GET /api/v1/admin/regions", "PUT /api/v1/admin/regions/{region_id}", "GET /api/v1/admin/regions/{region_id}/readiness",
 		"GET /api/v1/admin/capacity", "PUT /api/v1/admin/capacity/settings", "POST /api/v1/admin/capacity/evaluate", "POST /api/v1/admin/capacity/proposals/{proposal_id}/approve", "POST /api/v1/admin/capacity/proposals/{proposal_id}/reject", "POST /api/v1/admin/capacity/rebalance", "POST /api/v1/admin/capacity/batches/{batch_id}", "GET /api/v1/admin/cloud/catalog", "POST /api/v1/nodes/{id}/drain", "DELETE /api/v1/nodes/{id}/drain", "PUT /api/v1/nodes/{id}/cost", "GET /api/v1/admin/costs", "POST /api/v1/admin/costs/attribute", "GET /api/v1/admin/costs/settings", "PUT /api/v1/admin/costs/settings", "GET /api/v1/admin/fx-rates", "POST /api/v1/admin/fx-rates",
 		"POST /api/v1/nodes/{id}/shared-cluster", "POST /api/v1/nodes/{id}/registration-token", "GET /api/v1/nodes/{id}/metrics",
 		"GET /api/v1/security/isolation-checks", "POST /api/v1/security/isolation-checks", "GET /api/v1/alerts",

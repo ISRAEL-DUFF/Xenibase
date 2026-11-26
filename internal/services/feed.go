@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -27,10 +26,10 @@ import (
 const feedPage = 500
 
 // Config is the configuration feed for xenibase-edge (V4 §2.1): projects
-// changed after since, waiting up to wait for one. With region set, a
-// project in another region comes as disabled, so an edge that served it
-// before a move drops it.
-func (s *Service) Config(ctx context.Context, region string, since int64, wait time.Duration) (edgeapi.Config, error) {
+// changed after since, waiting up to wait for one. A project in a region
+// the edge may not see (allow, from EdgeScope.Feed) comes as disabled, so
+// an edge that served it before a move drops it.
+func (s *Service) Config(ctx context.Context, allow func(region string) bool, since int64, wait time.Duration) (edgeapi.Config, error) {
 	q := store.New(s.db)
 	deadline := time.Now().Add(wait)
 	for {
@@ -39,7 +38,7 @@ func (s *Service) Config(ctx context.Context, region string, since int64, wait t
 			return edgeapi.Config{}, err
 		}
 		if len(rows) > 0 || !time.Now().Before(deadline) {
-			return s.page(ctx, region, since, rows)
+			return s.page(ctx, allow, since, rows)
 		}
 		select {
 		case <-ctx.Done():
@@ -49,7 +48,7 @@ func (s *Service) Config(ctx context.Context, region string, since int64, wait t
 	}
 }
 
-func (s *Service) page(ctx context.Context, region string, since int64, rows []store.EdgeConfigChangesRow) (edgeapi.Config, error) {
+func (s *Service) page(ctx context.Context, allow func(region string) bool, since int64, rows []store.EdgeConfigChangesRow) (edgeapi.Config, error) {
 	out := edgeapi.Config{Projects: []edgeapi.Project{}, Next: since, More: len(rows) == feedPage}
 	var live []uuid.UUID
 	for _, r := range rows {
@@ -115,7 +114,7 @@ func (s *Service) page(ctx context.Context, region string, since int64, rows []s
 		out.Next = r.ChangedSeq
 		p := edgeapi.Project{Ref: r.Ref, ProjectID: r.ProjectID, OrgID: r.OrgID, Region: r.Region, State: state(r),
 			Version: r.ConfigVersion, Seq: r.ChangedSeq}
-		if region != "" && r.Region != region {
+		if !allow(r.Region) {
 			p.State = edgeapi.StateDisabled
 		}
 		if p.State == edgeapi.StateDisabled {
@@ -365,11 +364,6 @@ func (s *Service) Report(ctx context.Context, r edgeapi.Report) error {
 		}
 		return nil
 	})
-}
-
-// VerifyEdge checks a request's edge signature.
-func (s *Service) VerifyEdge(r *http.Request, body []byte) error {
-	return edgeapi.Verify(s.cfg.EdgeSecret, r, body, time.Now())
 }
 
 // Wake resumes the paused project ref names.

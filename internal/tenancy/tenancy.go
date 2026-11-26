@@ -85,14 +85,18 @@ type Service struct {
 
 	trafficMu sync.Mutex
 	traffic   map[string]int64 // last SHOW STATS byte counts per pooler/database
+
+	softMu   sync.Mutex
+	softBase map[uuid.UUID]float64 // ratio when first seen soft-locked (grewWhileSoft)
 }
 
 // New returns a Service and installs its login gate on projects.
 func New(db *pgxpool.Pool, projects *provision.Service, m *mail.Service, cfg Config, log *slog.Logger) *Service {
 	cfg.defaults()
-	s := &Service{db: db, projects: projects, mail: m, cfg: cfg, log: log, console: map[uuid.UUID]int{}}
+	s := &Service{db: db, projects: projects, mail: m, cfg: cfg, log: log, console: map[uuid.UUID]int{}, softBase: map[uuid.UUID]float64{}}
 	if projects != nil {
 		projects.LoginGate = s.LoginAllowed
+		projects.QuotaGate = s.claim
 	}
 	return s
 }
@@ -141,6 +145,9 @@ func (s *Service) Sweep(ctx context.Context) error {
 	}
 	if err := s.FinishOrgDeletions(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("org deletion: %w", err))
+	}
+	if err := s.PruneRetention(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("retention: %w", err))
 	}
 	return errors.Join(errs...)
 }

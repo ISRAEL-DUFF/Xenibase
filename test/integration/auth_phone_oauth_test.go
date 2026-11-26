@@ -189,6 +189,16 @@ func TestAuthPhoneOAuthMFA(t *testing.T) {
 		*cfg.HookRole != hookRole || !strings.HasSuffix(*cfg.OauthCallbackUrl, "/auth/v1/callback") || !cfg.Phone.PlatformWhatsapp {
 		t.Fatalf("auth config: %+v", cfg)
 	}
+	// A developer reads the settings but not the hook secret.
+	if code := e.Do("POST", base+"/members", map[string]any{"email": "dev@example.com", "role": "developer"}, nil); code != http.StatusOK {
+		t.Fatalf("invite a developer: %d", code)
+	}
+	dev := e.AcceptInvitation(e.MailToken("dev@example.com", "invitation"), "dev@example.com")
+	var devCfg gen.AuthConfig
+	if code := dev.Do("GET", base+"/auth/config", nil, &devCfg); code != http.StatusOK || devCfg.HookSecret != nil ||
+		devCfg.HookSecretSet == nil || !*devCfg.HookSecretSet {
+		t.Fatalf("a developer's auth config: %d %v %v", code, devCfg.HookSecret, devCfg.HookSecretSet)
+	}
 	// An Apple app needs its key ids; a hook must name a function.
 	if code := e.Do("PATCH", base+"/auth/config", gen.AuthConfigUpdate{Settings: &gen.AuthSettings{
 		Oauth: &map[string]gen.AuthOAuthSetting{"apple": {Enabled: true, ClientId: "com.example.app"}}}}, nil); code != 400 {

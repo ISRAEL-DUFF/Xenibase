@@ -3,7 +3,8 @@
 -- name: SetProjectBranch :exec
 -- tenant: system - set in the transaction that creates the branch project.
 UPDATE projects SET parent_project_id = @parent_project_id, branch_source = @branch_source,
-  branch_schema_only = @branch_schema_only, expires_at = sqlc.narg(expires_at), sensitive_data = @sensitive_data
+  branch_schema_only = @branch_schema_only, expires_at = sqlc.narg(expires_at), sensitive_data = @sensitive_data,
+  branch_copy_files = @branch_copy_files
 WHERE id = @id;
 
 -- name: SetProjectSensitive :exec
@@ -16,8 +17,7 @@ WHERE parent_project_id = @parent_project_id AND org_id = @org_id AND deleted_at
 ORDER BY created_at DESC;
 
 -- name: CountLiveBranches :one
--- tenant: system - a parent the request already authorized.
-SELECT count(*)::int FROM projects WHERE parent_project_id = @parent_project_id AND deleted_at IS NULL;
+SELECT count(*)::int FROM projects WHERE parent_project_id = @parent_project_id AND org_id = @org_id AND deleted_at IS NULL;
 
 -- name: CountOrgBranches :one
 -- Branches that count towards the branches quota.
@@ -104,3 +104,10 @@ SELECT (parent_project_id IS NOT NULL)::bool FROM projects WHERE id = @id;
 -- tenant: system - the authorization step that finds a project's
 -- organisation (and parent, for branches) before anything is checked.
 SELECT org_id, parent_project_id FROM projects WHERE id = @id;
+
+-- name: DeleteBranchMemberships :execrows
+-- Someone removed from a project leaves its live branches too: they hold
+-- its data, and their members are a copy of its own (V2 s8.1).
+DELETE FROM project_members m USING projects b
+WHERE b.id = m.project_id AND b.parent_project_id = @parent_id AND b.org_id = @org_id AND b.deleted_at IS NULL
+  AND m.user_id = @user_id AND m.org_id = @org_id;

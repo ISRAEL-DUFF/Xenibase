@@ -173,6 +173,25 @@ SELECT * FROM billing_contacts WHERE org_id = @org_id ORDER BY email;
 INSERT INTO billing_contacts (org_id, email, name) VALUES (@org_id, @email, sqlc.narg(name))
 ON CONFLICT (org_id, email) DO UPDATE SET name = EXCLUDED.name RETURNING *;
 
+-- name: IsVerifiedMemberEmail :one
+-- Whether email is the verified address of an enabled member of the org.
+SELECT EXISTS (SELECT 1 FROM org_members m JOIN users u ON u.id = m.user_id
+  WHERE m.org_id = @org_id AND u.email = @email::citext AND u.email_verified_at IS NOT NULL AND u.disabled_at IS NULL)::boolean;
+
+-- name: MarkBillingContactVerified :exec
+UPDATE billing_contacts SET verified_at = coalesce(verified_at, @now), verify_token_hash = NULL, verify_expires_at = NULL
+WHERE org_id = @org_id AND email = @email;
+
+-- name: SetBillingContactVerifyToken :exec
+UPDATE billing_contacts SET verify_token_hash = @token_hash, verify_expires_at = @expires_at, verify_sent_at = @now
+WHERE org_id = @org_id AND email = @email AND verified_at IS NULL;
+
+-- name: ConfirmBillingContact :one
+-- tenant: system - the confirmation link's token names the contact; it is unguessable and expires.
+UPDATE billing_contacts SET verified_at = @now, verify_token_hash = NULL, verify_expires_at = NULL
+WHERE verify_token_hash = @token_hash AND verify_expires_at > @now AND verified_at IS NULL
+RETURNING *;
+
 -- name: DeleteBillingContact :execrows
 -- tenant: system - a contact of an org the caller resolved.
 DELETE FROM billing_contacts WHERE org_id = @org_id AND email = @email;
@@ -322,6 +341,11 @@ ORDER BY i.period_start DESC, o.name LIMIT @lim;
 -- name: DraftsForPeriod :many
 -- tenant: system - a month's drafts, for issuing.
 SELECT * FROM invoices WHERE status = 'draft' AND period_start = @period_start ORDER BY created_at;
+
+-- name: DraftsDue :many
+-- tenant: system - unheld drafts of a month and every earlier one, for issuing.
+SELECT * FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= @through
+ORDER BY period_start, created_at;
 
 -- name: SetInvoiceHold :one
 -- tenant: system - the admin holds or releases a draft.

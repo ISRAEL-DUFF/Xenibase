@@ -37,9 +37,6 @@ ON CONFLICT DO NOTHING;
 -- name: UnsetSavedQueryFavorite :exec
 DELETE FROM saved_query_favorites WHERE query_id = @query_id AND user_id = @user_id AND org_id = @org_id;
 
--- name: MoveProjectSavedQueries :exec
-UPDATE saved_queries SET org_id = @new_org_id WHERE project_id = @project_id AND org_id = @org_id;
-
 -- name: MoveProjectSavedQueryFavorites :exec
 UPDATE saved_query_favorites f SET org_id = @new_org_id
 WHERE f.org_id = @org_id AND f.query_id IN (SELECT q.id FROM saved_queries q WHERE q.project_id = @project_id);

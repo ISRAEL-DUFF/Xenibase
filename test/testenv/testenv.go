@@ -74,6 +74,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/pooler"
 	"github.com/israel-duff/xenibase/internal/provision"
 	"github.com/israel-duff/xenibase/internal/regions"
+	"github.com/israel-duff/xenibase/internal/rotate"
 	"github.com/israel-duff/xenibase/internal/schedjobs"
 	"github.com/israel-duff/xenibase/internal/services"
 	"github.com/israel-duff/xenibase/internal/settings"
@@ -255,6 +256,10 @@ func Start(t testing.TB, opts Options) *Env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As the server does: Derive keys on the sealed seed (rotate.DeriveSeed).
+	if err := rotate.LoadDeriveSeed(context.Background(), db, keyring, key); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := provision.RegisterSharedCluster(ctx, db, keyring, provision.SharedCluster{
@@ -288,6 +293,7 @@ func Start(t testing.TB, opts Options) *Env {
 	pp, _ := strconv.Atoi(pport)
 	st := settings.New(db, host)
 	regionSvc := regions.New(db, "eu-central", log)
+	regionSvc.SetPlatformDomain(EdgeDomain)
 	if err := regionSvc.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +398,7 @@ func Start(t testing.TB, opts Options) *Env {
 	// (Env.StartEdge).
 	turnstile := NewFakeTurnstile()
 	t.Cleanup(turnstile.Close)
-	servicesSvc := services.New(db, svc, services.Config{Domain: EdgeDomain, EdgeSecret: EdgeSecret, CaptchaVerifyURL: turnstile.URL}, log)
+	servicesSvc := services.New(db, svc, services.Config{Domain: EdgeDomain, RegionDomain: regionSvc.APIDomain, EdgeSecret: EdgeSecret, CaptchaVerifyURL: turnstile.URL}, log)
 	branchSvc.API = servicesSvc
 	servicesSvc.Mail = mailSvc
 	servicesSvc.Files = backups.FilesTarget
@@ -432,7 +438,10 @@ func Start(t testing.TB, opts Options) *Env {
 
 	consoleSvc := console.New(db, svc, keyring, false, log)
 	insightSvc := insights.New(db, svc, consoleSvc, insights.Config{SlowQuery: 200 * time.Millisecond, Plans: []string{"all"}}, log)
-	alertSvc := alerts.New(db, keyring, alerts.Config{PublicURL: "https://xenibase.test", Poolers: append(pm.Admins(), opts.ExtraPoolers...), PoolerGrace: time.Nanosecond, WakerAddr: pm.WakerAddr}, log)
+	alertSvc := alerts.New(db, keyring, alerts.Config{PublicURL: "https://xenibase.test", Poolers: append(pm.Admins(), opts.ExtraPoolers...), PoolerGrace: time.Nanosecond, WakerAddr: pm.WakerAddr,
+		OperationClass: jobs.Classifier(kinds),
+		// One clear evaluation resolves, as the integration tests expect.
+		ResolveAfter: 1}, log)
 	collector := metrics.NewCollector(db, svc, pm, nodeSvc, time.Second, log)
 
 	clock := &Clock{t: time.Now()}
@@ -461,10 +470,11 @@ func Start(t testing.TB, opts Options) *Env {
 	autoNow := func() time.Time { return time.Now().Add(time.Duration(e.automationOffset.Load())) }
 	outboundSvc := outbound.New(db, outbound.Config{Now: autoNow}, log)
 	servicesSvc.Outbound = outboundSvc
+	servicesSvc.CheckSource = backups.CheckSource
 	// The auth message and hook sender starts once its outbound client is set.
 	wg.Add(1)
 	go func() { defer wg.Done(); servicesSvc.RunAuthEmail(ctx) }()
-	webhookSvc := webhooks.New(db, keyring, svc, outboundSvc, tenancySvc, mailSvc, webhooks.Config{Poll: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
+	webhookSvc := webhooks.New(db, keyring, svc, outboundSvc, tenancySvc, mailSvc, webhooks.Config{Poll: 200 * time.Millisecond, IdlePoll: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
 	jobSvc := schedjobs.New(db, keyring, svc, consoleSvc, outboundSvc, tenancySvc, mailSvc, schedjobs.Config{Tick: 200 * time.Millisecond, Now: autoNow, PublicURL: "https://xenibase.test"}, log)
 	svc.RefreshWebhooks = webhookSvc.Reinstall
 	tokenSvc := tokens.New(db, keyring, mailSvc, tokens.Config{Now: clock.Now, PublicURL: "https://xenibase.test"}, log)
@@ -537,6 +547,8 @@ func Start(t testing.TB, opts Options) *Env {
 		e.StopAutomation()
 		cancel()
 		wg.Wait()
+		// The collector keeps its instance connections between samples.
+		collector.Close()
 		e.dropLeftovers()
 		// Leave the test poolers with no routes from this run.
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -679,6 +691,7 @@ func (e *Env) dropLeftovers() {
 		_, _ = conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{n.DB}.Sanitize()+" WITH (FORCE)")
 		_, _ = conn.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{n.Role}.Sanitize())
 		_, _ = conn.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{provision.ConsoleRole(n.DB)}.Sanitize())
+		_, _ = conn.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{provision.ConsoleReadOnlyRole(n.DB)}.Sanitize())
 		// The read-only group role and members' logins (V2 §3.5).
 		if more, err := conn.Query(ctx, `SELECT rolname FROM pg_roles WHERE rolname = $1 OR starts_with(rolname, $2)`,
 			provision.ReadOnlyRole(n.DB), n.DB+"_u_"); err == nil {

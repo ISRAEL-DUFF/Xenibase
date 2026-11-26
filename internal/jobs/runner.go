@@ -23,6 +23,14 @@ import (
 type RunnerConfig struct {
 	// Concurrency is the number of operations run at once. Default 4.
 	Concurrency int
+	// LongSlots and ScheduledSlots are the most of those slots ClassLong
+	// and ClassScheduled operations may hold at once. Together they never
+	// take the last slot, which stays for interactive operations (unless
+	// Concurrency is 1, when nothing can be kept back). Defaults: half the
+	// slots for long ones, all but one for scheduled ones; with 4 slots, at
+	// most 2 long and 3 scheduled, and at most 3 of the two together.
+	LongSlots      int
+	ScheduledSlots int
 	// PollInterval is the fallback claim interval when no notification
 	// arrives (notifications usually wake workers immediately). Default 2s.
 	PollInterval time.Duration
@@ -36,12 +44,28 @@ type RunnerConfig struct {
 	RetryMax  time.Duration
 	// WorkerID identifies this process in locked_by. Default host-pid-rand.
 	WorkerID string
+	// Paused, when set and true, stops new claims (running operations
+	// finish): the schema is newer than this release (store.SchemaWatcher).
+	Paused func() bool
+	// UnservedAfter is how long a runnable operation of a kind this runner
+	// doesn't serve may wait before it is failed as one no worker runs.
+	// Default 24h.
+	UnservedAfter time.Duration
 }
 
 func (c *RunnerConfig) setDefaults() {
 	if c.Concurrency <= 0 {
 		c.Concurrency = 4
 	}
+	background := c.backgroundSlots()
+	if c.LongSlots <= 0 {
+		c.LongSlots = max(1, c.Concurrency/2)
+	}
+	c.LongSlots = min(c.LongSlots, background)
+	if c.ScheduledSlots <= 0 {
+		c.ScheduledSlots = background
+	}
+	c.ScheduledSlots = min(c.ScheduledSlots, background)
 	if c.PollInterval <= 0 {
 		c.PollInterval = 2 * time.Second
 	}
@@ -54,12 +78,21 @@ func (c *RunnerConfig) setDefaults() {
 	if c.RetryMax <= 0 {
 		c.RetryMax = 5 * time.Minute
 	}
+	if c.UnservedAfter <= 0 {
+		c.UnservedAfter = 24 * time.Hour
+	}
 	if c.WorkerID == "" {
 		host, _ := os.Hostname()
 		b := make([]byte, 3)
 		_, _ = rand.Read(b)
 		c.WorkerID = fmt.Sprintf("%s-%d-%s", host, os.Getpid(), hex.EncodeToString(b))
 	}
+}
+
+// backgroundSlots is how many slots long and scheduled operations may
+// hold together: all but one, kept for interactive ones.
+func (c *RunnerConfig) backgroundSlots() int {
+	return max(1, c.Concurrency-1)
 }
 
 // Runner is a pool of workers executing operations.
@@ -71,6 +104,14 @@ type Runner struct {
 	log      *slog.Logger
 	kinds    map[string]Kind
 	names    []string
+	// byClass lists the kinds of each class, sorted.
+	byClass map[Class][]string
+	// freed wakes the claim loop when an attempt ends, since a class that
+	// was at its cap may now claim.
+	freed chan struct{}
+
+	mu      sync.Mutex
+	running map[Class]int
 }
 
 // NewRunner returns a Runner for the given kinds. The notifier must be
@@ -82,6 +123,11 @@ func NewRunner(pool *pgxpool.Pool, notifier *Notifier, log *slog.Logger, cfg Run
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	byClass := map[Class][]string{}
+	for _, name := range names {
+		c := kinds[name].ClassOf()
+		byClass[c] = append(byClass[c], name)
+	}
 	return &Runner{
 		cfg:      cfg,
 		pool:     pool,
@@ -90,6 +136,47 @@ func NewRunner(pool *pgxpool.Pool, notifier *Notifier, log *slog.Logger, cfg Run
 		log:      log.With("worker", cfg.WorkerID),
 		kinds:    kinds,
 		names:    names,
+		byClass:  byClass,
+		freed:    make(chan struct{}, 1),
+		running:  map[Class]int{},
+	}
+}
+
+// claimable returns the kinds this runner may claim now, given what it is
+// running: interactive kinds always, long and scheduled ones while their
+// class is under its cap and the two together leave a slot for
+// interactive work.
+func (r *Runner) claimable() []string {
+	r.mu.Lock()
+	long, scheduled := r.running[ClassLong], r.running[ClassScheduled]
+	r.mu.Unlock()
+	kinds := append([]string(nil), r.byClass[ClassInteractive]...)
+	if long+scheduled >= r.cfg.backgroundSlots() {
+		return kinds
+	}
+	if long < r.cfg.LongSlots {
+		kinds = append(kinds, r.byClass[ClassLong]...)
+	}
+	if scheduled < r.cfg.ScheduledSlots {
+		kinds = append(kinds, r.byClass[ClassScheduled]...)
+	}
+	return kinds
+}
+
+// started and finished count the attempts running per class.
+func (r *Runner) started(c Class) {
+	r.mu.Lock()
+	r.running[c]++
+	r.mu.Unlock()
+}
+
+func (r *Runner) finished(c Class) {
+	r.mu.Lock()
+	r.running[c]--
+	r.mu.Unlock()
+	select {
+	case r.freed <- struct{}{}:
+	default:
 	}
 }
 
@@ -113,7 +200,8 @@ func (r *Runner) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 
-	r.log.Info("operation workers started", "concurrency", r.cfg.Concurrency, "kinds", r.names)
+	r.log.Info("operation workers started", "concurrency", r.cfg.Concurrency, "long_slots", r.cfg.LongSlots,
+		"scheduled_slots", r.cfg.ScheduledSlots, "kinds", r.names)
 	for {
 		// Claim as long as there are free slots and runnable work.
 		for ctx.Err() == nil {
@@ -127,9 +215,12 @@ func (r *Runner) Run(ctx context.Context) {
 				<-slots
 				break
 			}
+			class := r.kinds[op.Kind].ClassOf()
+			r.started(class)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer r.finished(class)
 				defer func() { <-slots }()
 				r.execute(ctx, op)
 			}()
@@ -141,13 +232,19 @@ func (r *Runner) Run(ctx context.Context) {
 			r.log.Info("operation workers stopped")
 			return
 		case <-wake:
+		case <-r.freed:
 		case <-ticker.C:
 		}
 	}
 }
 
 func (r *Runner) claim(ctx context.Context) (store.Operation, bool) {
-	op, err := r.q.ClaimOperation(ctx, store.ClaimOperationParams{Worker: r.cfg.WorkerID, Kinds: r.names})
+	if r.cfg.Paused != nil && r.cfg.Paused() {
+		return store.Operation{}, false
+	}
+	op, err := r.q.ClaimOperation(ctx, store.ClaimOperationParams{
+		Worker: r.cfg.WorkerID, Kinds: r.claimable(), FirstKinds: r.byClass[ClassInteractive],
+	})
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) && ctx.Err() == nil {
 			r.log.Error("claim operation", "err", err)
@@ -161,12 +258,25 @@ func (r *Runner) reclaimLoop(ctx context.Context) {
 	t := time.NewTicker(r.cfg.LeaseTTL / 2)
 	defer t.Stop()
 	for {
-		ids, err := r.q.ReclaimStaleOperations(ctx, time.Now().Add(-r.cfg.LeaseTTL))
+		ids, err := r.q.ReclaimStaleOperations(ctx, r.cfg.LeaseTTL.Seconds())
 		if err != nil && ctx.Err() == nil {
 			r.log.Error("reclaim stale operations", "err", err)
 		}
 		for _, id := range ids {
 			r.log.Warn("requeued operation with expired lease", "operation_id", id)
+		}
+		// A runner paused on a newer schema leaves unserved kinds alone: they
+		// are most likely new kinds the newer servers run.
+		if r.cfg.Paused == nil || !r.cfg.Paused() {
+			unserved, err := r.q.FailUnservedOperations(ctx, store.FailUnservedOperationsParams{
+				Kinds: r.names, AfterSeconds: r.cfg.UnservedAfter.Seconds(),
+			})
+			if err != nil && ctx.Err() == nil {
+				r.log.Error("fail unserved operations", "err", err)
+			}
+			for _, u := range unserved {
+				r.log.Error("failed an operation no worker runs", "operation_id", u.ID, "kind", u.Kind)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -187,19 +297,27 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 		timeout = DefaultTimeout
 	}
 	log := r.log.With("operation_id", op.ID, "kind", op.Kind, "attempt", op.Attempts)
-	steps := &StepLogger{q: r.q, id: op.ID, worker: r.cfg.WorkerID, slog: log}
+	steps := &StepLogger{q: r.q, id: op.ID, worker: r.cfg.WorkerID, attempt: op.Attempts, slog: log}
 
 	// Final state writes must happen even when ctx is cancelled for shutdown.
 	finishCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	}
 
-	if int(op.Attempts) > maxAttempts {
-		// Reclaimed after a crash on its last attempt.
+	if int(op.Attempts) > maxAttempts+1 {
+		// Its worker crashed on the last attempt and again on the extra
+		// run below: a crash loop.
 		fctx, cancel := finishCtx()
 		defer cancel()
 		r.fail(fctx, kind, op, steps, fmt.Errorf("gave up after %d attempts", maxAttempts))
 		return
+	}
+	if int(op.Attempts) > maxAttempts {
+		// Reclaimed after a crash on its last attempt, which may have come
+		// after the handler finished but before success was recorded.
+		// Handlers are idempotent, so run once more to finish or find the
+		// work done, rather than roll back what may have succeeded.
+		_ = steps.Warn(ctx, "queue", "the last attempt was cut short; running once more before giving up")
 	}
 
 	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
@@ -228,14 +346,19 @@ func (r *Runner) execute(ctx context.Context, op store.Operation) {
 	defer cancel()
 	switch {
 	case err == nil:
-		if _, werr := r.q.SucceedOperation(fctx, store.SucceedOperationParams{ID: op.ID, Worker: r.cfg.WorkerID}); werr != nil {
+		if _, werr := r.q.SucceedOperation(fctx, store.SucceedOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts}); werr != nil {
 			log.Error("mark operation succeeded", "err", werr)
 		}
 		log.Info("operation succeeded")
 	case ctx.Err() != nil:
-		// Shutting down: hand the operation back for another worker now.
+		// Shutting down: hand the operation back for another worker now,
+		// with the attempt given back (a clean shutdown is not a crash).
 		_ = steps.Warn(fctx, "queue", "interrupted by worker shutdown; requeued")
-		r.retry(fctx, op, err, time.Now())
+		if _, werr := r.q.RequeueInterruptedOperation(fctx, store.RequeueInterruptedOperationParams{
+			ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error(),
+		}); werr != nil {
+			log.Error("requeue interrupted operation", "err", werr)
+		}
 	case IsPermanent(err) || int(op.Attempts) >= maxAttempts:
 		r.fail(fctx, kind, op, steps, err)
 	default:
@@ -265,20 +388,37 @@ func (r *Runner) safeOnFail(ctx context.Context, kind Kind, op store.Operation, 
 	return kind.OnFail(ctx, op, steps, cause)
 }
 
+// heartbeat renews the lease every LeaseTTL/3. It abandons the attempt
+// (closes lost and cancels it) when the row is no longer this attempt's, or
+// when heartbeats have failed for two thirds of the lease: by then another
+// worker may be about to reclaim the operation, and a worker that cannot
+// reach the metadata database must not keep running it alongside.
 func (r *Runner) heartbeat(ctx context.Context, op store.Operation, lost chan<- struct{}, cancel context.CancelFunc) {
-	t := time.NewTicker(r.cfg.LeaseTTL / 3)
+	interval := r.cfg.LeaseTTL / 3
+	t := time.NewTicker(interval)
 	defer t.Stop()
+	lastOK := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		n, err := r.q.HeartbeatOperation(ctx, store.HeartbeatOperationParams{ID: op.ID, Worker: r.cfg.WorkerID})
+		hctx, hcancel := context.WithTimeout(ctx, interval)
+		n, err := r.q.HeartbeatOperation(hctx, store.HeartbeatOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts})
+		hcancel()
 		if err != nil {
-			if ctx.Err() == nil {
-				r.log.Warn("operation heartbeat failed", "operation_id", op.ID, "err", err)
+			if ctx.Err() != nil {
+				return
 			}
+			if since := time.Since(lastOK); since >= 2*r.cfg.LeaseTTL/3 {
+				r.log.Error("operation heartbeats failing; abandoning attempt before its lease expires",
+					"operation_id", op.ID, "since_last_heartbeat", since.Round(time.Millisecond), "err", err)
+				close(lost)
+				cancel()
+				return
+			}
+			r.log.Warn("operation heartbeat failed", "operation_id", op.ID, "err", err)
 			continue
 		}
 		if n == 0 {
@@ -286,6 +426,7 @@ func (r *Runner) heartbeat(ctx context.Context, op store.Operation, lost chan<- 
 			cancel()
 			return
 		}
+		lastOK = time.Now()
 	}
 }
 
@@ -306,7 +447,7 @@ func (r *Runner) fail(parent context.Context, kind Kind, op store.Operation, ste
 	ctx, cancel := context.WithTimeout(base, 10*time.Second)
 	defer cancel()
 	_ = steps.Error(ctx, "queue", "operation failed: %v", err)
-	if _, werr := r.q.FailOperation(ctx, store.FailOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Error: err.Error()}); werr != nil {
+	if _, werr := r.q.FailOperation(ctx, store.FailOperationParams{ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error()}); werr != nil {
 		r.log.Error("mark operation failed", "operation_id", op.ID, "err", werr)
 	}
 	r.log.Warn("operation failed", "operation_id", op.ID, "kind", op.Kind, "err", err)
@@ -314,7 +455,7 @@ func (r *Runner) fail(parent context.Context, kind Kind, op store.Operation, ste
 
 func (r *Runner) retry(ctx context.Context, op store.Operation, err error, at time.Time) {
 	if _, werr := r.q.RetryOperation(ctx, store.RetryOperationParams{
-		ID: op.ID, Worker: r.cfg.WorkerID, Error: err.Error(), RunAfter: at,
+		ID: op.ID, Worker: r.cfg.WorkerID, Attempt: op.Attempts, Error: err.Error(), RunAfter: at,
 	}); werr != nil {
 		r.log.Error("requeue operation", "operation_id", op.ID, "err", werr)
 	}

@@ -56,9 +56,16 @@ type Config struct {
 	MaxLifetime time.Duration
 	// ReauthWindow is how long a step-up authentication stays valid.
 	ReauthWindow time.Duration
-	// LockoutThreshold failures lock an account for LockoutDuration.
+	// LockoutThreshold failures in a row lock an account for
+	// LockoutDuration, and each further one locks it for twice as long as
+	// the last, up to MaxLockout. An address without an account is counted
+	// the same way, so the lock says nothing about which addresses have one.
 	LockoutThreshold int
 	LockoutDuration  time.Duration
+	MaxLockout       time.Duration
+	// LockoutNoticeEvery is the least time between two lockout emails to
+	// one account.
+	LockoutNoticeEvery time.Duration
 	// ChallengeTTL bounds the gap between password and TOTP.
 	ChallengeTTL time.Duration
 	// Issuer labels the TOTP entry in authenticator apps.
@@ -84,6 +91,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.LockoutDuration <= 0 {
 		c.LockoutDuration = 15 * time.Minute
+	}
+	if c.MaxLockout <= 0 {
+		c.MaxLockout = 24 * time.Hour
+	}
+	if c.LockoutNoticeEvery <= 0 {
+		c.LockoutNoticeEvery = time.Hour
 	}
 	if c.ChallengeTTL <= 0 {
 		c.ChallengeTTL = 5 * time.Minute
@@ -424,24 +437,22 @@ type enrollPayload struct {
 
 // Login checks email and password and returns a short-lived challenge for
 // the TOTP step (or TOTP enrolment, on an account's first sign-in).
-// Unknown emails take the same time as wrong passwords.
+// Unknown and disabled addresses take the same time as wrong passwords, and
+// their failures are counted and locked like an account's, so neither the
+// answer nor the lock tells an address with an account from one without.
 func (s *Service) Login(ctx context.Context, email, password string) (Challenge, error) {
 	q := store.New(s.db)
-	u, err := q.GetUserByEmail(ctx, strings.TrimSpace(email))
-	if errors.Is(err, pgx.ErrNoRows) {
-		_, _ = VerifyPassword(password, dummyHash)
-		return Challenge{}, ErrInvalidCredentials
+	email = strings.TrimSpace(email)
+	u, err := q.GetUserByEmail(ctx, email)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && u.DisabledAt != nil) {
+		return Challenge{}, s.addressFailure(ctx, email, password)
 	}
 	if err != nil {
 		return Challenge{}, err
 	}
 	out := Challenge{UserID: u.ID}
-	if u.DisabledAt != nil {
-		_, _ = VerifyPassword(password, dummyHash)
-		return out, ErrInvalidCredentials
-	}
 	if u.LockedUntil != nil && u.LockedUntil.After(s.cfg.Now()) {
-		return out, ErrLocked
+		return out, lockedError{until: *u.LockedUntil}
 	}
 	ok, err := VerifyPassword(password, u.PasswordHash)
 	if err != nil {
@@ -509,7 +520,7 @@ func (s *Service) CompleteLogin(ctx context.Context, challenge, code string, ip 
 		return SignedIn{}, ErrInvalidCredentials
 	}
 	if u.LockedUntil != nil && u.LockedUntil.After(s.cfg.Now()) {
-		return SignedIn{}, ErrLocked
+		return SignedIn{}, lockedError{until: *u.LockedUntil}
 	}
 	var codes []string
 	if ch.Kind == "enroll" {
@@ -598,18 +609,111 @@ func (s *Service) checkTOTP(ctx context.Context, u store.User, code string) erro
 	return nil
 }
 
+// lockedError is ErrLocked with the time the lock ends.
+type lockedError struct{ until time.Time }
+
+func (lockedError) Error() string { return ErrLocked.Error() }
+func (lockedError) Unwrap() error { return ErrLocked }
+
+// LockedUntil returns when the lock behind an ErrLocked ends.
+func LockedUntil(err error) (time.Time, bool) {
+	var l lockedError
+	if errors.As(err, &l) {
+		return l.until, true
+	}
+	return time.Time{}, false
+}
+
+// lockParams are the lockout's settings, as RecordLoginFailure and
+// RecordAddressFailure take them.
+func (s *Service) lockParams() (threshold int32, base, maxLock float64) {
+	return int32(s.cfg.LockoutThreshold), s.cfg.LockoutDuration.Seconds(), s.cfg.MaxLockout.Seconds()
+}
+
 func (s *Service) recordFailure(ctx context.Context, id uuid.UUID) error {
+	threshold, base, maxLock := s.lockParams()
 	row, err := store.New(s.db).RecordLoginFailure(ctx, store.RecordLoginFailureParams{
-		ID: id, Threshold: int32(s.cfg.LockoutThreshold), LockSeconds: int32(s.cfg.LockoutDuration.Seconds()),
+		ID: id, Now: s.cfg.Now(), Threshold: threshold, LockSeconds: base, MaxLockSeconds: maxLock,
 	})
 	if err != nil {
 		return err
 	}
 	if row.LockedUntil != nil && row.LockedUntil.After(s.cfg.Now()) {
-		s.log.Warn("user locked out after repeated failures", "user_id", id, "until", row.LockedUntil)
-		return ErrLocked
+		s.log.Warn("user locked out after repeated failures", "user_id", id, "failures", row.FailedLogins, "until", row.LockedUntil)
+		s.noticeLockout(ctx, id, *row.LockedUntil)
+		return lockedError{until: *row.LockedUntil}
 	}
 	return ErrInvalidCredentials
+}
+
+// addressFailure fails a sign-in for an address with no enabled account:
+// it costs a password hash, as a wrong password does, and is counted and
+// locked per address as an account's failures are.
+func (s *Service) addressFailure(ctx context.Context, email, password string) error {
+	q := store.New(s.db)
+	if len(email) > 254 {
+		_, _ = VerifyPassword(password, dummyHash)
+		return ErrInvalidCredentials // no account has an address this long
+	}
+	until, err := q.GetAddressLock(ctx, email)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if until != nil && until.After(s.cfg.Now()) {
+		return lockedError{until: *until}
+	}
+	_, _ = VerifyPassword(password, dummyHash)
+	threshold, base, maxLock := s.lockParams()
+	row, err := q.RecordAddressFailure(ctx, store.RecordAddressFailureParams{
+		Email: email, Now: s.cfg.Now(), Threshold: threshold, LockSeconds: base, MaxLockSeconds: maxLock,
+	})
+	if err != nil {
+		return err
+	}
+	if row.LockedUntil != nil && row.LockedUntil.After(s.cfg.Now()) {
+		return lockedError{until: *row.LockedUntil}
+	}
+	return ErrInvalidCredentials
+}
+
+// noticeLockout emails the account's owner that it is locked, at most once
+// every LockoutNoticeEvery. It sends in the background, so a lock answers
+// as fast as an unknown address's does.
+func (s *Service) noticeLockout(ctx context.Context, id uuid.UUID, until time.Time) {
+	if s.mailer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	go func() {
+		defer cancel()
+		q := store.New(s.db)
+		n, err := q.ClaimLockoutNotice(ctx, store.ClaimLockoutNoticeParams{ID: id, Now: s.cfg.Now(), EverySeconds: s.cfg.LockoutNoticeEvery.Seconds()})
+		if err != nil || n == 0 {
+			if err != nil {
+				s.log.Warn("lockout email", "user_id", id, "err", err)
+			}
+			return
+		}
+		u, err := q.GetUser(ctx, id)
+		if err != nil {
+			s.log.Warn("lockout email", "user_id", id, "err", err)
+			return
+		}
+		if err := s.sendContent(ctx, u.Email, "Your Xenibase account is locked for now", pgmail.Content{
+			Preheader: "Too many wrong passwords or codes in a row. If that wasn't you, reset your password.",
+			Title:     "Sign-in is locked for now",
+			Blocks: []pgmail.Block{
+				pgmail.P(pgmail.Hi(nameOf(u))),
+				pgmail.P(fmt.Sprintf("After %d wrong passwords or two-factor codes in a row, signing in to your Xenibase account is locked until %s. Each further wrong attempt locks it for twice as long, up to a day.",
+					s.cfg.LockoutThreshold, until.UTC().Format("2 January 2006 at 15:04 MST"))),
+				pgmail.P("If that was you, wait and try again. If it wasn't, someone may be guessing your password: choose a new one, and turn on two-factor sign-in under Account → Security if it is off."),
+				pgmail.Button("Choose a new password", s.cfg.PublicURL+"/reset-password"),
+			},
+			Note: "We send this when repeated failed attempts lock your account, at most once an hour.",
+		}); err != nil {
+			s.log.Warn("lockout email", "user_id", id, "err", err)
+		}
+	}()
 }
 
 // ---- Sessions --------------------------------------------------------------
@@ -684,7 +788,7 @@ func (s *Service) Reauthenticate(ctx context.Context, sess Session, password, co
 		return err
 	}
 	if u.LockedUntil != nil && u.LockedUntil.After(s.cfg.Now()) {
-		return ErrLocked
+		return lockedError{until: *u.LockedUntil}
 	}
 	ok, err := VerifyPassword(password, u.PasswordHash)
 	if err != nil {
@@ -710,6 +814,13 @@ func (s *Service) Sweep(ctx context.Context) error {
 	now := s.cfg.Now()
 	if err := q.DeleteIdleSessions(ctx, store.DeleteIdleSessionsParams{
 		IdleBefore: now.Add(-s.cfg.IdleTimeout), CreatedBefore: now.Add(-s.cfg.MaxLifetime),
+	}); err != nil {
+		return err
+	}
+	// An address's failures are forgotten a day after the last one, once
+	// it is not locked.
+	if err := q.DeleteStaleAddressFailures(ctx, store.DeleteStaleAddressFailuresParams{
+		Now: now, Before: now.Add(-s.cfg.MaxLockout),
 	}); err != nil {
 		return err
 	}

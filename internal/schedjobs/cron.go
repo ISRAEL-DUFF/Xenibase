@@ -12,7 +12,11 @@ import (
 type Schedule struct {
 	minute, hour, dom, month, dow uint64 // bit sets
 	domStar, dowStar              bool
-	loc                           *time.Location
+	// fixed is a schedule whose minute and hour are both given (neither
+	// starts with *): it fires once on the day a wall-clock hour repeats,
+	// and at the end of a skipped hour it fell in (as cronie does).
+	fixed bool
+	loc   *time.Location
 }
 
 var macros = map[string]string{
@@ -37,7 +41,8 @@ func Parse(expr, tz string) (Schedule, error) {
 	if len(f) != 5 {
 		return Schedule{}, fmt.Errorf("a cron expression has 5 fields (minute hour day month weekday), not %d", len(f))
 	}
-	s := Schedule{loc: loc, domStar: f[2] == "*" || f[2] == "?", dowStar: f[4] == "*" || f[4] == "?"}
+	star := func(f string) bool { return strings.HasPrefix(f, "*") || strings.HasPrefix(f, "?") }
+	s := Schedule{loc: loc, domStar: f[2] == "*" || f[2] == "?", dowStar: f[4] == "*" || f[4] == "?", fixed: !star(f[0]) && !star(f[1])}
 	specs := []struct {
 		dst      *uint64
 		min, max int
@@ -129,31 +134,96 @@ func (s Schedule) matchDay(t time.Time) bool {
 	}
 }
 
-// Next is the first run strictly after t, or the zero time if there is
-// none within five years (e.g. 30 February).
+// Next is the first run strictly after t (at least a minute after it), or
+// the zero time if there is none within five years (e.g. 30 February).
+//
+// The schedule matches wall-clock time in its zone, walked one zone period
+// (the span between two offset changes) at a time, so a daylight-saving
+// change neither repeats nor drops a fixed-time run. On the day an hour
+// repeats, a fixed-time schedule matches only its first occurrence, and a
+// fixed time in an hour that is skipped fires at the first minute after
+// the gap; schedules with * in the minute or hour run by the clock through
+// both (Vixie cron and cronie behave the same).
 func (s Schedule) Next(t time.Time) time.Time {
-	t = t.In(s.loc).Truncate(time.Minute).Add(time.Minute)
-	end := t.AddDate(5, 0, 0)
-	for t.Before(end) {
+	cur := t.In(s.loc).Truncate(time.Minute).Add(time.Minute)
+	end := cur.AddDate(5, 0, 0)
+	for cur.Before(end) {
+		start, until := cur.ZoneBounds()
+		_, off := cur.Zone()
+		prevOff := off
+		if !start.IsZero() {
+			_, prevOff = start.Add(-time.Nanosecond).Zone()
+		}
+		if s.fixed && cur.Equal(start) && prevOff < off && s.matchesIn(wall(start, prevOff), wall(start, off)) {
+			return cur // a fixed time the clocks skipped over
+		}
+		from := wall(cur, off)
+		if s.fixed && prevOff > off {
+			// The first prevOff-off of this period repeat wall-clock time
+			// the previous period already showed.
+			from = maxTime(from, wall(start, prevOff))
+		}
+		stop := wall(end, off)
+		if !until.IsZero() && until.Before(end) {
+			stop = wall(until, off)
+		}
+		if w, ok := s.nextWall(from, stop); ok {
+			return time.Unix(w.Unix()-int64(off), 0).In(s.loc)
+		}
+		if until.IsZero() {
+			break
+		}
+		cur = until
+	}
+	return time.Time{}
+}
+
+// wall is t's wall clock at offset off (seconds east of UTC) as a UTC time,
+// in which there is no daylight saving to step around.
+func wall(t time.Time, off int) time.Time {
+	return t.UTC().Add(time.Duration(off) * time.Second)
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// matchesIn is whether a wall-clock minute in [from, stop) matches.
+func (s Schedule) matchesIn(from, stop time.Time) bool {
+	_, ok := s.nextWall(from, stop)
+	return ok
+}
+
+// nextWall is the first matching wall-clock minute at or after from and
+// before stop, both wall clocks in UTC (see wall).
+func (s Schedule) nextWall(from, stop time.Time) (time.Time, bool) {
+	t := from.Truncate(time.Minute)
+	if t.Before(from) {
+		t = t.Add(time.Minute)
+	}
+	for t.Before(stop) {
 		if s.month&(1<<uint(t.Month())) == 0 {
-			t = time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, s.loc)
+			t = time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 			continue
 		}
 		if !s.matchDay(t) {
-			t = time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, s.loc)
+			t = time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, time.UTC)
 			continue
 		}
 		if s.hour&(1<<uint(t.Hour())) == 0 {
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+1, 0, 0, 0, s.loc)
+			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+1, 0, 0, 0, time.UTC)
 			continue
 		}
 		if s.minute&(1<<uint(t.Minute())) == 0 {
 			t = t.Add(time.Minute)
 			continue
 		}
-		return t
+		return t, true
 	}
-	return time.Time{}
+	return time.Time{}, false
 }
 
 // Upcoming lists the next n runs after t.

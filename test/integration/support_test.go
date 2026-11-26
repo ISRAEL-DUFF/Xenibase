@@ -107,7 +107,8 @@ func TestSupportTickets(t *testing.T) {
 	}
 	reply := map[string]any{
 		"from": testenv.OwnerEmail, "subject": "Re: [" + tk.Ref + "] Slow queries", "message_id": "<r1@customer.example>",
-		"in_reply_to": replyTo, "text": "SELECT * FROM orders WHERE status = 'open'\n\nOn Mon, Xenibase wrote:\n> Could you send the slowest query?",
+		"in_reply_to": replyTo, "authentication_results": "mx.provider.test; dmarc=pass",
+		"text": "SELECT * FROM orders WHERE status = 'open'\n\nOn Mon, Xenibase wrote:\n> Could you send the slowest query?",
 	}
 	for range 2 { // a redelivery threads once
 		if code := inboundEmail(t, e, e.SupportInboundSecret, reply); code != http.StatusOK {
@@ -150,16 +151,20 @@ func TestSupportTickets(t *testing.T) {
 		t.Fatalf("console list: %d %+v", code, list)
 	}
 	for _, it := range list.Items {
-		if it.Subject == "Pricing question" && (it.OrgId != nil || it.Requester != "ada@stranger.example" || it.RespondBy != nil) {
+		if it.Subject == "Pricing question" && (it.OrgId != nil || it.Requester != "ada@stranger.example" || it.RespondBy != nil || !it.UnverifiedSender) {
 			t.Errorf("the stranger's ticket: %+v", it)
 		}
 	}
 
-	// WhatsApp: a Pro org registers its number; messages from it open a
-	// ticket, and replies go back by WhatsApp. Other numbers are told how
-	// to reach support.
-	if code := e.Do("POST", org+"/support/phones", map[string]string{"phone": "0803 123 4567"}, nil); code != http.StatusCreated {
-		t.Fatalf("register a phone: %d", code)
+	// WhatsApp: a Pro org registers its number and sends its code from
+	// it; messages from it then open a ticket, and replies go back by
+	// WhatsApp. Other numbers are told how to reach support.
+	var ph gen.SupportPhone
+	if code := e.Do("POST", org+"/support/phones", map[string]string{"phone": "0803 123 4567"}, &ph); code != http.StatusCreated || ph.Verified || ph.Code == nil {
+		t.Fatalf("register a phone: %d %+v", code, ph)
+	}
+	if code, err := e.WhatsApp.Deliver("+2348031234567", "Owner", *ph.Code); err != nil || code != http.StatusOK {
+		t.Fatalf("whatsapp code: %d %v", code, err)
 	}
 	if code, err := e.WhatsApp.Deliver("+2348031234567", "Owner", "The database is down!"); err != nil || code != http.StatusOK {
 		t.Fatalf("whatsapp: %d %v", code, err)

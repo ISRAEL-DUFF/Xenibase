@@ -34,6 +34,29 @@ func (s *Service) setConnections(ctx context.Context, p store.Project, allow boo
 	return nil
 }
 
+// mayNotSleep says why the Free tier may no longer pause or archive p, or
+// "" if it may: the organisation is active, on the Free billing plan and
+// not on the Unlimited quota plan, and the project is shared, as when the
+// sweep queued the operation (decision M22 #2). An operation re-checks
+// when it runs, since the organisation may have upgraded in between.
+func (s *Service) mayNotSleep(ctx context.Context, p store.Project) (string, error) {
+	plan, err := store.New(s.db).ProjectSleepPlan(ctx, p.ID)
+	if err != nil {
+		return "", fmt.Errorf("check the project's plan: %w", err)
+	}
+	switch {
+	case p.Tier != provision.TierShared:
+		return fmt.Sprintf("the project is on the %s tier", p.Tier), nil
+	case plan.OrgStatus != "active":
+		return fmt.Sprintf("the organisation is %s", plan.OrgStatus), nil
+	case plan.Plan != "free":
+		return fmt.Sprintf("the organisation is on the %s plan", plan.Plan), nil
+	case plan.QuotaPlan == "Unlimited":
+		return "the organisation is on the Unlimited quota plan", nil
+	}
+	return "", nil
+}
+
 // runPause pauses an idle Free project (V3 §4.2): the route to the waker
 // first, so new connections wake it rather than fail, then the database
 // stops accepting connections and its sessions end.
@@ -42,10 +65,22 @@ func (s *Service) runPause(ctx context.Context, op store.Operation, log *jobs.St
 	if err != nil {
 		return err
 	}
-	switch p.Lifecycle {
-	case Archived:
+	if p.Lifecycle == Archived {
 		return jobs.Permanent(errors.New("the project is archived"))
-	case Active:
+	}
+	if why, err := s.mayNotSleep(ctx, p); err != nil {
+		return err
+	} else if why != "" {
+		if p.Lifecycle == Paused {
+			// An earlier attempt paused it: undo that, as a failed pause does.
+			if err := log.Info(ctx, "plan", "%s; waking it again", why); err != nil {
+				return err
+			}
+			return s.wake(ctx, p, log)
+		}
+		return log.Info(ctx, "done", "%s; not pausing", why)
+	}
+	if p.Lifecycle == Active {
 		if seen := lastActive(p); s.now().Sub(seen) < s.cfg.PauseAfter {
 			return log.Info(ctx, "done", "a client connected at %s; not pausing", seen.UTC().Format(time.RFC3339))
 		}
@@ -67,7 +102,7 @@ func (s *Service) runPause(ctx context.Context, op store.Operation, log *jobs.St
 		Title:     fmt.Sprintf("%s is paused", p.Name),
 		Blocks: []mail.Block{
 			mail.P("Hello,"),
-			mail.P(fmt.Sprintf("%s had no client connections for %d days, so we've paused it. Its data is kept safe.", p.Name, days(s.cfg.PauseAfter))),
+			mail.P(fmt.Sprintf("%s had no client connections for %d days, so we've paused it. Its data is kept safe.", mail.Inert(p.Name), days(s.cfg.PauseAfter))),
 			mail.P("It wakes up by itself the next time a client connects. The first connection is refused with a message, and a retry after about 30 seconds works. Or you can resume it now:"),
 			mail.Button("Resume the project", s.projectLink(p)),
 			mail.P(fmt.Sprintf("A Free project that stays paused for %d days is archived. Paid plans are never paused.", days(s.cfg.ArchiveAfter))),
@@ -129,22 +164,54 @@ func (s *Service) runArchive(ctx context.Context, op store.Operation, log *jobs.
 	case Active:
 		return jobs.Permanent(errors.New("the project is active again"))
 	}
+	if why, err := s.mayNotSleep(ctx, p); err != nil {
+		return err
+	} else if why != "" {
+		return log.Info(ctx, "done", "%s; not archiving, the project stays paused", why)
+	}
 	q := store.New(s.db)
 	opID := op.ID
 	b, err := q.BackupForOperation(ctx, store.BackupForOperationParams{OperationID: &opID, Kind: backup.Archive})
-	if errors.Is(err, pgx.ErrNoRows) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		// The route still points at the waker, so no client reaches the
 		// database while the dump runs.
 		if err := s.setConnections(ctx, p, true); err != nil {
 			return err
 		}
-		if b, err = s.backups.Archive(ctx, p, &opID, log); err != nil {
+		if b, err = s.archives.Archive(ctx, p, &opID, log); err != nil {
 			return err
 		}
-	} else if err != nil {
+	case err != nil:
 		return err
-	} else if err := log.Info(ctx, "backup", "archive backup already taken by an earlier attempt"); err != nil {
+	case b.VerifiedAt == nil:
+		// An earlier attempt stopped during the verification, or failed
+		// it and couldn't delete the backup: verify it before dropping.
+		if err := log.Info(ctx, "backup", "an earlier attempt's archive backup is not verified; verifying it again"); err != nil {
+			return err
+		}
+		if b, err = s.archives.VerifyArchive(ctx, p, b, log); err != nil {
+			return err
+		}
+	default:
+		if err := log.Info(ctx, "backup", "archive backup already taken and verified by an earlier attempt"); err != nil {
+			return err
+		}
+	}
+	if b.VerifiedAt == nil {
+		return fmt.Errorf("the archive backup %s is not verified; %s is kept", b.ID, p.DbName)
+	}
+	// The backup can take hours: the organisation may have upgraded since.
+	if why, err := s.mayNotSleep(ctx, p); err != nil {
 		return err
+	} else if why != "" {
+		if err := s.setConnections(ctx, p, false); err != nil {
+			return err
+		}
+		if err := q.ExpireBackupAt(ctx, store.ExpireBackupAtParams{ID: b.ID, ExpiresAt: ptr(s.now().Add(30 * 24 * time.Hour))}); err != nil {
+			return err
+		}
+		return log.Info(ctx, "done", "%s; not archiving, the project stays paused and its database is kept", why)
 	}
 	// Archived first: should the drop fail, a later unarchive recreates the
 	// database from the backup either way.
@@ -167,7 +234,7 @@ func (s *Service) runArchive(ctx context.Context, op store.Operation, log *jobs.
 		Title:     fmt.Sprintf("%s is archived", p.Name),
 		Blocks: []mail.Block{
 			mail.P("Hello,"),
-			mail.P(fmt.Sprintf("%s was paused for %d days, so we've archived it. Its data is in a verified backup and its database is removed. Its connection string and credentials are kept.", p.Name, days(s.cfg.ArchiveAfter))),
+			mail.P(fmt.Sprintf("%s was paused for %d days, so we've archived it. Its data is in a verified backup and its database is removed. Its connection string and credentials are kept.", mail.Inert(p.Name), days(s.cfg.ArchiveAfter))),
 			mail.P("The next connection restores it from the archive, which takes minutes rather than seconds. Or you can restore it now:"),
 			mail.Button("Restore the project", s.projectLink(p)),
 			mail.P(fmt.Sprintf("An archived Free project is deleted after %d days. We'll tell you %d and %d days before.", days(s.cfg.DeleteAfter), s.cfg.NoticeDays[0], s.cfg.NoticeDays[len(s.cfg.NoticeDays)-1])),
@@ -230,7 +297,7 @@ func (s *Service) runUnarchive(ctx context.Context, op store.Operation, log *job
 		Title:     fmt.Sprintf("%s is back", p.Name),
 		Blocks: []mail.Block{
 			mail.P("Hello,"),
-			mail.P(fmt.Sprintf("%s is restored from its archive and accepts connections again.", p.Name)),
+			mail.P(fmt.Sprintf("%s is restored from its archive and accepts connections again.", mail.Inert(p.Name))),
 			mail.Button("Open the project", s.projectLink(p)),
 		},
 		SignOff: mail.SignOff,

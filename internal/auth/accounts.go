@@ -278,6 +278,12 @@ func (s *Service) Signup(ctx context.Context, p SignupParams) error {
 	if err := s.checkTermsVersion(ctx, p.TermsVersion); err != nil {
 		return err
 	}
+	// Hashed whether or not the address has an account, so the answer takes
+	// as long either way: both then send one email.
+	hash, err := HashPassword(p.Password)
+	if err != nil {
+		return err
+	}
 	q := store.New(s.db)
 	if existing, err := q.GetUserByEmail(ctx, email); err == nil {
 		return s.sendContent(ctx, existing.Email, "You already have a Xenibase account", pgmail.Content{
@@ -292,10 +298,6 @@ func (s *Service) Signup(ctx context.Context, p SignupParams) error {
 			Note: "If this wasn't you, you can ignore this email. Nothing has changed on your account.",
 		})
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	hash, err := HashPassword(p.Password)
-	if err != nil {
 		return err
 	}
 	var u store.User
@@ -472,15 +474,17 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 			pgmail.P(pgmail.Hi(nameOf(u))),
 			pgmail.P("We got a request to reset the password on your Xenibase account. You can choose a new one here:"),
 			pgmail.Button("Choose a new password", s.cfg.PublicURL+"/reset-password?token="+token),
-			pgmail.P("For your security, the link works once and expires in one hour. Resetting your password signs you out everywhere."),
+			pgmail.P("For your security, the link works once and expires in one hour. Resetting your password signs you out everywhere and revokes your API tokens (the CLI's, CI's and connected apps'), so create new ones afterwards."),
 		},
 		SignOff: pgmail.SignOff,
 		Note:    "If you didn't ask for this, you can ignore this email. Your password stays as it is.",
 	})
 }
 
-// ResetPassword sets a new password from a reset link and ends every
-// session of the account. A reset also proves the address.
+// ResetPassword sets a new password from a reset link, ends every session
+// of the account and revokes its API tokens: a reset is how an account is
+// taken back, and a token minted with a stolen session must not outlive it.
+// A reset also proves the address.
 func (s *Service) ResetPassword(ctx context.Context, token, password string) error {
 	if err := CheckPasswordPolicy(password); err != nil {
 		return err
@@ -504,17 +508,24 @@ func (s *Service) ResetPassword(ctx context.Context, token, password string) err
 		if err := q.MarkEmailVerified(ctx, id); err != nil {
 			return err
 		}
+		if _, err := q.RevokeUserTokens(ctx, id); err != nil {
+			return err
+		}
 		return q.DeleteUserSessions(ctx, store.DeleteUserSessionsParams{UserID: id})
 	})
 }
 
 // ChangePassword sets a new password after checking the current one, and
-// ends the user's other sessions.
-func (s *Service) ChangePassword(ctx context.Context, sess Session, current, next string) error {
+// ends the user's other sessions; with revokeTokens, it also revokes every
+// API token the user has.
+func (s *Service) ChangePassword(ctx context.Context, sess Session, current, next string, revokeTokens bool) error {
 	q := store.New(s.db)
 	u, err := q.GetUser(ctx, sess.UserID)
 	if err != nil {
 		return err
+	}
+	if u.LockedUntil != nil && u.LockedUntil.After(s.cfg.Now()) {
+		return lockedError{until: *u.LockedUntil}
 	}
 	ok, err := VerifyPassword(current, u.PasswordHash)
 	if err != nil {
@@ -530,10 +541,18 @@ func (s *Service) ChangePassword(ctx context.Context, sess Session, current, nex
 	if err != nil {
 		return err
 	}
-	if err := q.SetUserPassword(ctx, store.SetUserPasswordParams{ID: u.ID, PasswordHash: hash}); err != nil {
-		return err
-	}
-	return q.DeleteUserSessions(ctx, store.DeleteUserSessionsParams{UserID: u.ID, Keep: &sess.ID})
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		if err := q.SetUserPassword(ctx, store.SetUserPasswordParams{ID: u.ID, PasswordHash: hash}); err != nil {
+			return err
+		}
+		if revokeTokens {
+			if _, err := q.RevokeUserTokens(ctx, u.ID); err != nil {
+				return err
+			}
+		}
+		return q.DeleteUserSessions(ctx, store.DeleteUserSessionsParams{UserID: u.ID, Keep: &sess.ID})
+	})
 }
 
 // ---- Terms -----------------------------------------------------------------------
@@ -670,7 +689,7 @@ func (s *Service) SetDisabled(ctx context.Context, id uuid.UUID, disabled bool) 
 
 // ResetTOTP removes a user's authenticator and recovery codes (after the
 // platform admin has confirmed who they are out of band). Their sessions
-// end, and they are emailed. Platform staff enrol a new authenticator at their
+// end, their API tokens are revoked, and they are emailed. Platform staff enrol a new authenticator at their
 // next sign-in; anyone else signs in with a password until they turn it on again.
 func (s *Service) ResetTOTP(ctx context.Context, id uuid.UUID) error {
 	q := store.New(s.db)
@@ -678,10 +697,16 @@ func (s *Service) ResetTOTP(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	if err := q.ResetUserTOTP(ctx, id); err != nil {
-		return err
-	}
-	if err := q.DeleteUserSessions(ctx, store.DeleteUserSessionsParams{UserID: id}); err != nil {
+	if err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		if err := q.ResetUserTOTP(ctx, id); err != nil {
+			return err
+		}
+		if _, err := q.RevokeUserTokens(ctx, id); err != nil {
+			return err
+		}
+		return q.DeleteUserSessions(ctx, store.DeleteUserSessionsParams{UserID: id})
+	}); err != nil {
 		return err
 	}
 	again := "The next time you sign in, you'll be asked to set up your authenticator app again."
@@ -693,7 +718,7 @@ func (s *Service) ResetTOTP(ctx context.Context, id uuid.UUID) error {
 		Title:     "Two-factor sign-in was reset",
 		Blocks: []pgmail.Block{
 			pgmail.P(pgmail.Hi(nameOf(u))),
-			pgmail.P("A Xenibase administrator reset two-factor authentication on your account. " + again),
+			pgmail.P("A Xenibase administrator reset two-factor authentication on your account. You were signed out everywhere, and your API tokens were revoked: create new ones once you're back in. " + again),
 			pgmail.P("If you didn't ask for this, please contact your administrator right away."),
 		},
 		Note: "We send this whenever two-factor sign-in changes on your account.",

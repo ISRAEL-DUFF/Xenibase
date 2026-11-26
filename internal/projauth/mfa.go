@@ -27,6 +27,9 @@ const (
 	MaxFactors = 10
 	// ChallengeTTL is how long a challenge can be answered.
 	ChallengeTTL = 5 * time.Minute
+	// FactorLockoutAfter wrong codes in a row, across challenges, lock a
+	// factor for a minute, doubling with each further one up to a day.
+	FactorLockoutAfter = 5
 )
 
 // Factor is one second factor (its secret is never in the JSON).
@@ -38,16 +41,21 @@ type Factor struct {
 	Phone        *string   `json:"phone,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// LockedUntil is set after FactorLockoutAfter wrong codes in a row.
+	LockedUntil *time.Time `json:"-"`
 
 	secret   *string
 	lastStep *int64
+	failed   int
 }
 
-const factorCols = `id, factor_type, friendly_name, status, phone, created_at, updated_at, secret, last_used_step`
+const factorCols = `id, factor_type, friendly_name, status, phone, created_at, updated_at, secret, last_used_step,
+  failed_attempts, locked_until`
 
 func scanFactor(row pgx.Row) (*Factor, error) {
 	var f Factor
-	err := row.Scan(&f.ID, &f.FactorType, &f.FriendlyName, &f.Status, &f.Phone, &f.CreatedAt, &f.UpdatedAt, &f.secret, &f.lastStep)
+	err := row.Scan(&f.ID, &f.FactorType, &f.FriendlyName, &f.Status, &f.Phone, &f.CreatedAt, &f.UpdatedAt, &f.secret, &f.lastStep,
+		&f.failed, &f.LockedUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -71,6 +79,9 @@ func Factors(ctx context.Context, q Querier, userID uuid.UUID) ([]Factor, error)
 	}
 	return out, rows.Err()
 }
+
+// Locked reports whether f is locked at now (too many wrong codes).
+func (f *Factor) Locked(now time.Time) bool { return f.LockedUntil != nil && f.LockedUntil.After(now) }
 
 // HasVerifiedFactor reports whether the user can step up to aal2.
 func HasVerifiedFactor(ctx context.Context, q Querier, userID uuid.UUID) (bool, error) {
@@ -174,9 +185,14 @@ func LastChallengeAt(ctx context.Context, q Querier, factorID uuid.UUID) (*time.
 }
 
 // VerifyChallenge checks code for challenge id of factor f. A right code
-// verifies the factor (if new) and uses the challenge up; a wrong one
-// counts against it. It reports whether the code was right.
+// verifies the factor (if new), uses the challenge up and clears the
+// factor's failures; a wrong one counts against the challenge and the
+// factor, which FactorLockoutAfter in a row lock (f.LockedUntil is set).
+// It reports whether the code was right. A locked factor checks nothing.
 func VerifyChallenge(ctx context.Context, q Querier, f *Factor, id uuid.UUID, code string, now time.Time) (bool, error) {
+	if f.Locked(now) {
+		return false, nil
+	}
 	var hash *string
 	var attempts int
 	var verified *time.Time
@@ -206,7 +222,17 @@ func VerifyChallenge(ctx context.Context, q Querier, f *Factor, id uuid.UUID, co
 		ok = hash != nil && subtle.ConstantTimeCompare([]byte(codeHash(id, strings.TrimSpace(code))), []byte(*hash)) == 1
 	}
 	if !ok {
-		_, err := q.Exec(ctx, `UPDATE xb_auth.mfa_challenges SET attempts = attempts + 1 WHERE id = $1`, id)
+		if _, err := q.Exec(ctx, `UPDATE xb_auth.mfa_challenges SET attempts = attempts + 1 WHERE id = $1`, id); err != nil {
+			return false, err
+		}
+		n := f.failed + 1
+		var until *time.Time
+		if n >= FactorLockoutAfter {
+			t := now.Add(min(time.Minute<<min(n-FactorLockoutAfter, 11), 24*time.Hour))
+			until = &t
+		}
+		_, err := q.Exec(ctx, `UPDATE xb_auth.mfa_factors SET failed_attempts = $2, locked_until = $3 WHERE id = $1`, f.ID, n, until)
+		f.failed, f.LockedUntil = n, until
 		return false, err
 	}
 	if _, err := q.Exec(ctx, `UPDATE xb_auth.mfa_challenges SET verified_at = now() WHERE id = $1`, id); err != nil {
@@ -217,7 +243,7 @@ func VerifyChallenge(ctx context.Context, q Querier, f *Factor, id uuid.UUID, co
 		stepArg = &step
 	}
 	_, err = q.Exec(ctx, `UPDATE xb_auth.mfa_factors SET status = 'verified', updated_at = now(),
-		last_used_step = coalesce($2, last_used_step) WHERE id = $1`, f.ID, stepArg)
+		last_used_step = coalesce($2, last_used_step), failed_attempts = 0, locked_until = NULL WHERE id = $1`, f.ID, stepArg)
 	return true, err
 }
 

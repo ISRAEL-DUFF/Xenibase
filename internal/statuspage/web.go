@@ -359,7 +359,9 @@ func (s *Service) signed(h func(http.ResponseWriter, *http.Request, []byte)) htt
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
 			return
 		}
-		if err := signature.Verify(s.cfg.PushSecret, r.Header.Get(signature.Header), body, s.Now(), 5*time.Minute); err != nil {
+		// The signature binds the method and path too: a body signed for
+		// one endpoint is refused at another.
+		if err := statusapi.VerifyPush(s.cfg.PushSecret, r.Header.Get(signature.Header), r.Method, r.URL.Path, body, s.Now(), 5*time.Minute); err != nil {
 			s.log.Warn("refused an unsigned or badly signed push", "path", r.URL.Path, "remote", r.RemoteAddr, "err", err)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bad signature"})
 			return
@@ -374,7 +376,11 @@ func (s *Service) pushHeartbeat(w http.ResponseWriter, r *http.Request, body []b
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.Heartbeat(r.Context(), hb); err != nil {
+	switch err := s.Heartbeat(r.Context(), hb); {
+	case errors.Is(err, errStaleHeartbeat):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	case err != nil:
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -59,6 +60,10 @@ type Pooler struct {
 	HostPooledPort  int
 	// FloatingIP is the edge pooler's floating IP, when there is one.
 	FloatingIP FloatingIP
+	// AdminAllow (XENIBASE_POOLER_ADMIN_ALLOW, comma-separated CIDRs) are
+	// the networks the poolers' admin consoles accept logins from. Empty:
+	// loopback and the private ranges (pooler.DefaultAdminNetworks).
+	AdminAllow []string
 }
 
 // FloatingIP configures the Hetzner floating IP in front of the pooler
@@ -182,6 +187,17 @@ func loadProvisioning(getenv func(string) string, readFile func(string) ([]byte,
 		p.AdminPassword = strings.TrimRight(string(b), "\r\n")
 	default:
 		errs = append(errs, errors.New("XENIBASE_POOLER_ADMIN_PASSWORD or _FILE is required with XENIBASE_POOLER_CONFIG_DIR"))
+	}
+	for _, c := range strings.Split(getenv("XENIBASE_POOLER_ADMIN_ALLOW"), ",") {
+		if c = strings.TrimSpace(c); c == "" {
+			continue
+		}
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil || pfx.Masked() != pfx {
+			errs = append(errs, fmt.Errorf("XENIBASE_POOLER_ADMIN_ALLOW: %q is not a network such as 10.0.0.0/16", c))
+			continue
+		}
+		p.AdminAllow = append(p.AdminAllow, pfx.String())
 	}
 	p.Local = getenv("XENIBASE_POOLER_LOCAL") != "false"
 	p.HostSessionPort = port("XENIBASE_POOLER_HOST_SESSION_PORT", 5432)

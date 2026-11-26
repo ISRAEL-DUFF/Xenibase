@@ -50,6 +50,15 @@ type Fake struct {
 	txns     []*FakeTxn
 	rate     fakeRate
 	lastHook []byte
+	hold     *transferHold
+}
+
+// transferHold keeps the next transfer waiting: before it reaches the
+// provider, or after it posted and before its answer is sent.
+type transferHold struct {
+	afterPosting bool
+	reached      chan struct{}
+	release      chan struct{}
 }
 
 type fakeWallet struct {
@@ -106,6 +115,31 @@ func (f *Fake) DropWebhooks(n int) { f.mu.Lock(); f.drop = n; f.mu.Unlock() }
 // LoseTransferResponses makes the next n transfers post and then fail with a
 // 500, as a proxy dropping the response would: the ambiguous case.
 func (f *Fake) LoseTransferResponses(n int) { f.mu.Lock(); f.lose = n; f.mu.Unlock() }
+
+// HoldNextTransfer keeps the next transfer request waiting until release is
+// called: before anything is posted or, with afterPosting, once the transfer
+// has posted (its idempotency key then answers) but before the caller gets
+// the answer. reached is closed when the request is being held. Other calls
+// are answered meanwhile, as on the real service.
+func (f *Fake) HoldNextTransfer(afterPosting bool) (reached <-chan struct{}, release func()) {
+	h := &transferHold{afterPosting: afterPosting, reached: make(chan struct{}), release: make(chan struct{})}
+	f.mu.Lock()
+	f.hold = h
+	f.mu.Unlock()
+	var once sync.Once
+	return h.reached, func() { once.Do(func() { close(h.release) }) }
+}
+
+// heldResponse buffers an answer that is sent once a hold is released.
+type heldResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (h *heldResponse) Header() http.Header         { return h.header }
+func (h *heldResponse) Write(b []byte) (int, error) { return h.body.Write(b) }
+func (h *heldResponse) WriteHeader(status int)      { h.status = status }
 
 // SetRate sets the market rate and spread. fetchedAt is when the rate was
 // "priced": the zero time means now, and the rate then moves with the clock.
@@ -230,6 +264,33 @@ func (f *Fake) walletJSON(w *fakeWallet) map[string]any {
 
 // ServeHTTP serves the API Xenibase uses.
 func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var h *transferHold
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/transfers" {
+		f.mu.Lock()
+		h, f.hold = f.hold, nil
+		f.mu.Unlock()
+	}
+	switch {
+	case h == nil:
+		f.serve(w, r)
+	case !h.afterPosting:
+		close(h.reached)
+		<-h.release
+		f.serve(w, r)
+	default:
+		res := &heldResponse{header: http.Header{}, status: http.StatusOK}
+		f.serve(res, r)
+		close(h.reached)
+		<-h.release
+		for k, v := range res.header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(res.status)
+		_, _ = w.Write(res.body.Bytes())
+	}
+}
+
+func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.down {

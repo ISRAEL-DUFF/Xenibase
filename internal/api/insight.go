@@ -305,6 +305,11 @@ func (s *Server) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	if err := metrics.WritePrometheus(r.Context(), w, s.db, s.metricsInterval); err != nil {
 		s.log.Error("prometheus metrics", "err", err)
 	}
+	// This process's own counters: they matter most while the database
+	// is refusing writes.
+	if s.audit != nil {
+		_ = s.audit.WritePrometheus(w)
+	}
 }
 
 func (s *Server) metricsAuthorized(r *http.Request) bool {

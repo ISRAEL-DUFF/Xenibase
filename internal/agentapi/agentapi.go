@@ -47,6 +47,10 @@ type PGConn struct {
 	Password string `json:"password"`
 	SSLMode  string `json:"sslmode,omitempty"`
 	Database string `json:"database"`
+	// HostAddr, when set, is the checked address to connect to (libpq's
+	// hostaddr); Host still names the server for TLS. A tenant-chosen
+	// source is pinned this way, so the agent's own lookup cannot rebind.
+	HostAddr string `json:"hostaddr,omitempty"`
 }
 
 // Redacted describes the connection without its password, for logs.

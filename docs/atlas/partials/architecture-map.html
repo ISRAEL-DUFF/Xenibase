@@ -1,0 +1,74 @@
+<figure class="diagram" aria-labelledby="cap-{{uid}}">
+<svg viewBox="0 0 1000 640" role="img" aria-labelledby="t-{{uid}}">
+  <title id="t-{{uid}}">Xenibase's architecture: who connects, the control plane and the two entry points for clients, the metadata database, and the nodes that hold project databases</title>
+  <defs>
+    <marker id="ah-{{uid}}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0L10 5L0 10z"/></marker>
+  </defs>
+
+  <text class="d-row" x="1" y="14">OUTSIDE</text>
+  <g><rect class="d-box" x="1" y="22" width="232" height="58" rx="7"/><text class="d-title" x="15" y="46">Operators and developers</text><text class="d-sub" x="15" y="65">web dashboard · xenibase CLI · tokens</text></g>
+  <g><rect class="d-box" x="256" y="22" width="232" height="58" rx="7"/><text class="d-title" x="270" y="46">App servers</text><text class="d-sub" x="270" y="65">any Postgres driver, TLS required</text></g>
+  <g><rect class="d-box" x="511" y="22" width="232" height="58" rx="7"/><text class="d-title" x="525" y="46">App users</text><text class="d-sub" x="525" y="65">SDKs over HTTPS: data, auth, files</text></g>
+  <g><rect class="d-box" x="766" y="22" width="232" height="58" rx="7"/><text class="d-title" x="780" y="46">The public</text><text class="d-sub" x="780" y="65">the status page</text></g>
+
+  <g>
+    <path class="d-line" d="M117 80V128" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line" d="M372 80V128" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line" d="M627 80V128" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line" d="M882 80V128" marker-end="url(#ah-{{uid}})"/>
+  </g>
+
+  <text class="d-row" x="1" y="124">ENTRY POINTS</text>
+  <g class="d-core" data-go="control-plane" aria-label="xenibase-server: open the page on the control plane"><rect class="d-box" x="1" y="132" width="232" height="76" rx="7"/><text class="d-title" x="15" y="157">xenibase-server</text><text class="d-sub" x="15" y="176">REST API · embedded UI · guard</text><text class="d-sub" x="15" y="192">operation workers · background loops</text></g>
+  <g class="d-core" data-go="connections" aria-label="Edge poolers: open the page on connections"><rect class="d-box" x="256" y="132" width="232" height="76" rx="7"/><text class="d-title" x="270" y="157">Edge poolers (PgBouncer)</text><text class="d-sub" x="270" y="176">:5432 session · :6543 transaction</text><text class="d-sub" x="270" y="192">routes by database name · HBA allowlists</text></g>
+  <g class="d-core" data-go="data-api" aria-label="xenibase-edge: open the page on the data API"><rect class="d-box" x="511" y="132" width="232" height="76" rx="7"/><text class="d-title" x="525" y="157">xenibase-edge</text><text class="d-sub" x="525" y="176">https://&lt;ref&gt;.&lt;domain&gt;, one per region</text><text class="d-sub" x="525" y="192">data · auth · storage · realtime</text></g>
+  <g class="d-core" data-go="operations" aria-label="xenibase-status: open the page on operations"><rect class="d-box" x="766" y="132" width="232" height="76" rx="7"/><text class="d-title" x="780" y="157">xenibase-status</text><text class="d-sub" x="780" y="176">hosted elsewhere, probes from outside</text><text class="d-sub" x="780" y="192">signed heartbeats and incidents</text></g>
+
+  <g>
+    <path class="d-line" d="M117 208V256" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line dash" d="M233 170H254" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line" d="M627 208V226H400V418" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line dash" d="M511 192H360V256" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line dash" d="M766 170H745" marker-end="url(#ah-{{uid}})"/>
+  </g>
+
+  <text class="d-row" x="1" y="252">STATE</text>
+  <g data-go="data-model" aria-label="Metadata database: open the page on the data model">
+    <rect class="d-band" x="1" y="260" width="320" height="120" rx="8"/>
+    <text class="d-title" x="17" y="285">Metadata Postgres</text>
+    <text class="d-sub" x="17" y="305">xenibase-server's own database</text>
+    <text class="d-mono" x="17" y="328">users · organizations · projects</text>
+    <text class="d-mono" x="17" y="346">nodes · instances · operations</text>
+    <text class="d-mono" x="17" y="364">backups · audit_log · settings</text>
+  </g>
+  <g data-go="connections" aria-label="Generated pooler files: open the page on connections">
+    <rect class="d-box" x="344" y="260" width="200" height="120" rx="7"/>
+    <text class="d-title" x="358" y="285">Pooler files</text>
+    <text class="d-mono" x="358" y="308">databases.ini</text>
+    <text class="d-mono" x="358" y="326">userlist.txt (SCRAM)</text>
+    <text class="d-mono" x="358" y="344">hba.conf</text>
+    <text class="d-sub" x="358" y="366">rendered by Sync, then RELOAD</text>
+  </g>
+  <g data-go="backups" aria-label="Object storage: open the page on backups"><rect class="d-box" x="766" y="260" width="232" height="120" rx="7"/><text class="d-title" x="780" y="285">S3-compatible storage</text><text class="d-sub" x="780" y="305">encrypted logical backups</text><text class="d-sub" x="780" y="322">WAL-G base backups and WAL</text><text class="d-sub" x="780" y="339">project files (buckets)</text></g>
+
+  <g>
+    <path class="d-line" d="M160 380V418" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line" d="M444 380V418" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line dash" d="M882 418V380" marker-end="url(#ah-{{uid}})"/>
+  </g>
+
+  <text class="d-row" x="1" y="414">NODES (PRIVATE NETWORK)</text>
+  <g class="d-core" data-go="nodes-agents" aria-label="xenibase-agent: open the page on nodes and agents"><rect class="d-box" x="1" y="422" width="300" height="88" rx="7"/><text class="d-title" x="15" y="447">xenibase-agent on every node</text><text class="d-sub" x="15" y="466">mutual TLS from xenibase-server</text><text class="d-sub" x="15" y="482">fixed commands: health, dump, restore,</text><text class="d-sub" x="15" y="498">copy, instances, pooler files</text></g>
+  <g class="d-core" data-go="control-plane" aria-label="Shared cluster: open the page on the control plane"><rect class="d-box" x="350" y="422" width="300" height="88" rx="7"/><text class="d-title" x="364" y="447">Shared cluster</text><text class="d-sub" x="364" y="466">one Postgres, a database per project</text><text class="d-sub" x="364" y="482">CONNECT revoked from PUBLIC</text><text class="d-sub" x="364" y="498">admin SQL from xenibase-server</text></g>
+  <g class="d-core" data-go="ha" aria-label="Dedicated instances: open the page on dedicated instances and HA"><rect class="d-box" x="699" y="422" width="300" height="88" rx="7"/><text class="d-title" x="713" y="447">Dedicated instances</text><text class="d-sub" x="713" y="466">one container per project, WAL-G</text><text class="d-sub" x="713" y="482">Patroni and etcd for HA</text><text class="d-sub" x="713" y="498">read replicas · moves</text></g>
+
+  <g>
+    <path class="d-line dash" d="M301 466H348" marker-end="url(#ah-{{uid}})"/>
+    <path class="d-line dash" d="M650 466H697" marker-end="url(#ah-{{uid}})"/>
+  </g>
+
+  <text class="d-row" x="1" y="546">LOOPS INSIDE XENIBASE-SERVER</text>
+  <g data-go="control-plane" aria-label="Background loops: open the page on the control plane"><rect class="d-box" x="1" y="554" width="998" height="72" rx="7"/><text class="d-title" x="15" y="579">Background services</text><text class="d-sub" x="15" y="598">operations runner · pooler arbiter · node health · backups · HA watcher · billing · tenancy · branches · Free tier · services feed</text><text class="d-sub" x="15" y="614">webhooks · scheduled jobs · isolation checks · alerts · metrics · insights · capacity · costs · Postgres versions · status heartbeats</text></g>
+</svg>
+<figcaption class="d-caption" id="cap-{{uid}}">Five binaries in <code>cmd/</code>: <code>xenibase-server</code>, <code>xenibase-agent</code>, <code>xenibase-edge</code>, <code>xenibase-status</code> and the <code>xenibase</code> CLI. PgBouncer, Caddy, Postgres and keepalived come from images in <code>deploy/</code>. Solid arrows carry requests; dashed ones carry configuration. Select a box to open its page.</figcaption>
+</figure>

@@ -1152,8 +1152,22 @@ function KeysTab({ p, admin }: { p: Project; admin: boolean }) {
     queryFn: () => api.signingKeys(p.id),
   });
   const [confirm, setConfirm] = useState(false);
+  const [revoking, setRevoking] = useState<S["SigningKey"] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const revoke = async (k: S["SigningKey"]) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.revokeSigningKey(p.id, k.id);
+      await qc.invalidateQueries({ queryKey: ["signing-keys", p.id] });
+      setRevoking(null);
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const rotate = async () => {
     setBusy(true);
     setErr(null);
@@ -1182,7 +1196,15 @@ function KeysTab({ p, admin }: { p: Project; admin: boolean }) {
       ) : keys.isError ? (
         <Alert>{errorMessage(keys.error)}</Alert>
       ) : (
-        <Table head={["Key id", "Status", "Created", "Verifies until"]}>
+        <Table
+          head={[
+            "Key id",
+            "Status",
+            "Created",
+            "Verifies until",
+            ...(admin ? [""] : []),
+          ]}
+        >
           {keys.data.items.map((k) => (
             <tr key={k.id} data-testid="signing-key-row">
               <td className="px-3 py-2 font-mono text-xs">{k.kid}</td>
@@ -1197,6 +1219,13 @@ function KeysTab({ p, admin }: { p: Project; admin: boolean }) {
               <td className="px-3 py-2 text-xs text-muted">
                 {k.verify_until ? formatDate(k.verify_until) : "—"}
               </td>
+              {admin && (
+                <td className="px-3 py-2 text-right">
+                  <Button variant="ghost" onClick={() => setRevoking(k)}>
+                    Revoke
+                  </Button>
+                </td>
+              )}
             </tr>
           ))}
         </Table>
@@ -1213,6 +1242,30 @@ function KeysTab({ p, admin }: { p: Project; admin: boolean }) {
             </Button>
             <Button variant="primary" busy={busy} onClick={() => void rotate()}>
               Rotate
+            </Button>
+          </>
+        }
+      />
+      <Dialog
+        open={revoking !== null}
+        onOpenChange={(o) => !o && setRevoking(null)}
+        title="Revoke this signing key?"
+        description={
+          revoking?.status === "active"
+            ? "For a key that leaked. Tokens it signed stop working within seconds, so every user is signed out, and a new key signs from now on."
+            : "For a key that leaked. Tokens it signed stop working within seconds instead of when they expire."
+        }
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setRevoking(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              busy={busy}
+              onClick={() => revoking && void revoke(revoking)}
+            >
+              Revoke
             </Button>
           </>
         }

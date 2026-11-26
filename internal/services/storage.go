@@ -73,6 +73,9 @@ func (s *Service) StorageSweep(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Ref, err))
 		}
 	}
+	if err := s.meterStorage(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	if err := s.storageLimits(ctx, ps); err != nil {
 		errs = append(errs, err)
 	}
@@ -80,6 +83,9 @@ func (s *Service) StorageSweep(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	if err := s.cleanupDeleted(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.RetryCDNPurges(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -102,19 +108,8 @@ func (s *Service) sweepProject(ctx context.Context, r store.StorageProjectsRow) 
 	if _, err := conn.Exec(ctx, `UPDATE xb_storage.usage SET bytes = $1, objects = $2 WHERE bytes <> $1 OR objects <> $2`, bytes, objects); err != nil {
 		return err
 	}
-	q := store.New(s.db)
-	if err := q.UpsertProjectStorage(ctx, store.UpsertProjectStorageParams{ProjectID: p.ID, Bytes: bytes, Objects: objects}); err != nil {
+	if err := store.New(s.db).UpsertProjectStorage(ctx, store.UpsertProjectStorageParams{ProjectID: p.ID, Bytes: bytes, Objects: objects}); err != nil {
 		return err
-	}
-	if bytes > 0 {
-		o, err := q.OrgWithPlan(ctx, p.OrgID)
-		if err != nil {
-			return err
-		}
-		if err := q.UpsertUsage(ctx, store.UpsertUsageParams{OrgID: p.OrgID, ProjectID: p.ID, Metric: tenancy.MetricStorageGBHours,
-			Granularity: "hour", PeriodStart: time.Now().UTC().Truncate(time.Hour), Quantity: gbNumeric(bytes), PlanID: o.PlanID}); err != nil {
-			return err
-		}
 	}
 	cl, err := s.filesClient(ctx, p.Region, p.DataResidency)
 	if err != nil {
@@ -146,12 +141,41 @@ func (s *Service) sweepProject(ctx context.Context, r store.StorageProjectsRow) 
 		gone = append(gone, x)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for _, x := range gone {
 		if err := cl.AbortMultipart(ctx, objectsKey(r.Ref, x.version), x.uploadID); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	// Signed upload URLs never used (schema version 8 on).
+	_, err = conn.Exec(ctx, `DO $$ BEGIN
+		IF to_regclass('xb_storage.upload_tokens') IS NOT NULL THEN DELETE FROM xb_storage.upload_tokens WHERE expires_at < now(); END IF;
+	END $$`)
+	return err
+}
+
+// meterStorage records this hour's storage_gb_hours for every live
+// project holding files, from its last measurement: the files and their
+// cached renders, whether or not its backend services are on (turning them
+// off keeps the files) and whether or not this sweep reached it. A replace,
+// so several servers meter an hour once.
+func (s *Service) meterStorage(ctx context.Context) error {
+	q := store.New(s.db)
+	rows, err := q.StorageToMeter(ctx)
+	if err != nil {
+		return err
+	}
+	hour := time.Now().UTC().Truncate(time.Hour)
+	var errs []error
+	for _, r := range rows {
+		if err := q.UpsertUsage(ctx, store.UpsertUsageParams{OrgID: r.OrgID, ProjectID: r.ProjectID, Metric: tenancy.MetricStorageGBHours,
+			Granularity: "hour", PeriodStart: hour, Quantity: gbNumeric(r.Bytes + r.TransformBytes), PlanID: r.PlanID}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // collectGarbage removes the bytes (and renders) of versions no row points
@@ -351,9 +375,25 @@ func (s *Service) cleanupDeleted(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// ReconcileStorageDue runs the reconciler when its last run, on any
+// server, is ReconcileStorageEvery old: the time is kept in the metadata
+// database, so restarts and deploys don't put it off. It reports whether
+// it ran.
+func (s *Service) ReconcileStorageDue(ctx context.Context) (bool, error) {
+	if s.Files == nil {
+		return false, nil
+	}
+	n, err := store.New(s.db).ClaimStorageReconcile(ctx, ReconcileStorageEvery.Seconds())
+	if err != nil || n == 0 {
+		return false, err
+	}
+	return true, s.ReconcileStorage(ctx)
+}
+
 // ReconcileStorage looks for bytes no row, upload or queued clean-up
 // points at (removed once a week old) and rows whose bytes are missing
-// (reported on the project's storage page).
+// (reported on the project's storage page), and measures what each
+// project's cached renders take.
 func (s *Service) ReconcileStorage(ctx context.Context) error {
 	if s.Files == nil {
 		return nil
@@ -377,11 +417,17 @@ func (s *Service) reconcileProject(ctx context.Context, r store.StorageProjectsR
 	if err != nil {
 		return err
 	}
+	return s.reconcileFiles(ctx, cl, p.ID, r.Ref, func() (*pgx.Conn, error) { return s.projects.AdminConn(ctx, p.InstanceID, p.DbName) }, minAge)
+}
+
+// reconcileFiles reconciles a project's files in cl with the rows in the
+// database connect reaches.
+func (s *Service) reconcileFiles(ctx context.Context, cl *storage.Client, projectID uuid.UUID, ref string, connect func() (*pgx.Conn, error), minAge time.Duration) error {
 	// The bytes there are, listed before the rows are read so an upload
 	// finishing in between is never taken for an orphan.
 	stored := map[string]storage.Entry{}
-	rendered := map[string][]string{} // version -> render keys
-	prefix := FilesPrefix(r.Ref)
+	rendered := map[string][]storage.Entry{} // version -> its renders
+	prefix := FilesPrefix(ref)
 	if err := cl.List(ctx, prefix, func(es []storage.Entry) error {
 		for _, e := range es {
 			rest := strings.TrimPrefix(e.Key, prefix)
@@ -390,14 +436,14 @@ func (s *Service) reconcileProject(ctx context.Context, r store.StorageProjectsR
 				stored[strings.TrimPrefix(rest, "objects/")] = e
 			case strings.HasPrefix(rest, "transforms/"):
 				v, _, _ := strings.Cut(strings.TrimPrefix(rest, "transforms/"), "/")
-				rendered[v] = append(rendered[v], e.Key)
+				rendered[v] = append(rendered[v], e)
 			}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	conn, err := s.projects.AdminConn(ctx, p.InstanceID, p.DbName)
+	conn, err := connect()
 	if err != nil {
 		return err
 	}
@@ -450,21 +496,26 @@ func (s *Service) reconcileProject(ctx context.Context, r store.StorageProjectsR
 		}
 		removed++
 	}
-	for v, keys := range rendered {
+	// What the kept renders take is metered with the files.
+	var renders int64
+	for v, es := range rendered {
 		if known[v] {
+			for _, e := range es {
+				renders += e.Size
+			}
 			continue
 		}
-		for _, k := range keys {
-			if err := cl.Delete(ctx, k); err != nil {
+		for _, e := range es {
+			if err := cl.Delete(ctx, e.Key); err != nil {
 				return err
 			}
 		}
 	}
 	if missing > 0 {
-		s.log.Warn("storage objects without their bytes", "project_id", p.ID, "count", missing)
+		s.log.Warn("storage objects without their bytes", "project_id", projectID, "count", missing)
 	}
-	return store.New(s.db).SetStorageReconciled(ctx, store.SetStorageReconciledParams{ProjectID: p.ID, MissingObjects: missing,
-		MissingSample: orEmpty(sample), OrphansRemoved: removed})
+	return store.New(s.db).SetStorageReconciled(ctx, store.SetStorageReconciledParams{ProjectID: projectID, MissingObjects: missing,
+		MissingSample: orEmpty(sample), OrphansRemoved: removed, TransformBytes: renders})
 }
 
 func orEmpty(s []string) []string {
@@ -489,11 +540,17 @@ func (s *Service) ReconcileStorageNow(ctx context.Context, projectID uuid.UUID) 
 	return ErrNotFound
 }
 
-// StorageEvent acts on an edge's storage change: a bucket made private
-// leaves the CDN's cache (V4 §5.4).
+// StorageEvent acts on an edge's storage change: what left a public
+// bucket's URLs (the bucket made private, deleted or emptied, objects
+// deleted, replaced or moved away) leaves the CDN's cache (V4 §5.4).
 func (s *Service) StorageEvent(ctx context.Context, ev edgeapi.StorageEvent) error {
-	if ev.Event != edgeapi.EventBucketPrivate {
+	switch ev.Event {
+	case edgeapi.EventBucketPrivate, edgeapi.EventBucketDeleted, edgeapi.EventBucketEmptied, edgeapi.EventObjectsChanged:
+	default:
 		return fmt.Errorf("%w: unknown storage event %q", ErrInvalid, ev.Event)
+	}
+	if !files.BucketRe.MatchString(ev.Bucket) {
+		return fmt.Errorf("%w: not a bucket: %q", ErrInvalid, ev.Bucket)
 	}
 	svc, err := store.New(s.db).ProjectServicesByRef(ctx, ev.Ref)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -506,23 +563,107 @@ func (s *Service) StorageEvent(ctx context.Context, ev edgeapi.StorageEvent) err
 	if err != nil {
 		return err
 	}
-	return s.PurgeBucket(ctx, ev.Ref, p.Region, ev.Bucket)
+	if ev.Event != edgeapi.EventObjectsChanged {
+		return s.PurgeBucket(ctx, p.ID, ev.Ref, p.Region, ev.Bucket)
+	}
+	for _, path := range ev.Paths {
+		if !files.ValidPath(path) {
+			return fmt.Errorf("%w: not an object path: %q", ErrInvalid, path)
+		}
+	}
+	return s.PurgeObjects(ctx, p.ID, ev.Ref, p.Region, ev.Bucket, ev.Paths)
 }
 
+// publicRoutes are the keyless routes a public bucket's files and renders
+// are served (and cached) at.
+var publicRoutes = []string{"public", "object/public", "render/public", "render/image/public", "render"}
+
+// purgeEachUpTo is the most objects purged one by one; more purge the
+// whole bucket (Cloudflare takes 30 prefixes a request).
+const purgeEachUpTo = 20
+
 // PurgeBucket removes a bucket's public files from the CDN's cache.
-func (s *Service) PurgeBucket(ctx context.Context, ref, region, bucket string) error {
-	if s.CDN == nil {
-		return nil
-	}
+func (s *Service) PurgeBucket(ctx context.Context, projectID uuid.UUID, ref, region, bucket string) error {
 	base := strings.TrimPrefix(s.URL(ref, region), "https://")
-	if base == "" {
+	if s.CDN == nil || base == "" {
 		return nil
 	}
 	var prefixes []string
-	for _, p := range []string{"public", "object/public", "render/public", "render/image/public", "render"} {
+	for _, p := range publicRoutes {
 		prefixes = append(prefixes, base+"/storage/v1/"+p+"/"+bucket+"/")
 	}
-	return s.CDN.PurgePrefixes(ctx, prefixes)
+	return s.purge(ctx, projectID, prefixes)
+}
+
+// PurgeObjects removes public files' URLs, and their renders', from the
+// CDN's cache: an object's path is a prefix of every URL it is served at.
+func (s *Service) PurgeObjects(ctx context.Context, projectID uuid.UUID, ref, region, bucket string, paths []string) error {
+	if len(paths) > purgeEachUpTo {
+		return s.PurgeBucket(ctx, projectID, ref, region, bucket)
+	}
+	base := strings.TrimPrefix(s.URL(ref, region), "https://")
+	if s.CDN == nil || base == "" || len(paths) == 0 {
+		return nil
+	}
+	var prefixes []string
+	for _, path := range paths {
+		for _, p := range publicRoutes {
+			prefixes = append(prefixes, base+"/storage/v1/"+p+"/"+bucket+"/"+files.EscapePath(path))
+		}
+	}
+	return s.purge(ctx, projectID, prefixes)
+}
+
+// purge queues prefixes for the CDN and tries them at once; one the CDN
+// doesn't take now stays queued for the sweep (RetryCDNPurges).
+func (s *Service) purge(ctx context.Context, projectID uuid.UUID, prefixes []string) error {
+	q := store.New(s.db)
+	id, err := q.EnqueueCDNPurge(ctx, store.EnqueueCDNPurgeParams{ProjectID: projectID, Prefixes: prefixes})
+	if err != nil {
+		return err
+	}
+	pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := s.CDN.PurgePrefixes(pctx, prefixes); err != nil {
+		s.log.Warn("CDN purge failed; the storage sweep retries it", "project_id", projectID, "err", err)
+		msg := err.Error()
+		return q.FailCDNPurge(context.WithoutCancel(ctx), store.FailCDNPurgeParams{ID: id, LastError: &msg})
+	}
+	return q.FinishCDNPurge(context.WithoutCancel(ctx), id)
+}
+
+// RetryCDNPurges tries the purges the CDN hasn't taken yet, each again
+// after a backoff of up to an hour, until it does.
+func (s *Service) RetryCDNPurges(ctx context.Context) error {
+	q := store.New(s.db)
+	if _, err := q.DropStaleCDNPurges(ctx); err != nil {
+		return err
+	}
+	if s.CDN == nil {
+		return nil
+	}
+	due, err := q.ClaimCDNPurges(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, p := range due {
+		pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := s.CDN.PurgePrefixes(pctx, p.Prefixes)
+		cancel()
+		if err != nil {
+			msg := err.Error()
+			errs = append(errs, fmt.Errorf("CDN purge (attempt %d): %w", p.Attempts+2, err))
+			if ferr := q.FailCDNPurge(ctx, store.FailCDNPurgeParams{ID: p.ID, LastError: &msg}); ferr != nil {
+				errs = append(errs, ferr)
+			}
+			continue
+		}
+		if err := q.FinishCDNPurge(ctx, p.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // CDNPurger removes cached URLs from the CDN in front of the edges.

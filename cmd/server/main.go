@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -31,6 +32,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/alerts"
 	"github.com/israel-duff/xenibase/internal/api"
 	"github.com/israel-duff/xenibase/internal/api/gen"
+	"github.com/israel-duff/xenibase/internal/auditlog"
 	"github.com/israel-duff/xenibase/internal/auth"
 	"github.com/israel-duff/xenibase/internal/backup"
 	"github.com/israel-duff/xenibase/internal/billing"
@@ -44,6 +46,7 @@ import (
 	"github.com/israel-duff/xenibase/internal/costs"
 	"github.com/israel-duff/xenibase/internal/crypto"
 	"github.com/israel-duff/xenibase/internal/dedicated"
+	"github.com/israel-duff/xenibase/internal/edgecred"
 	"github.com/israel-duff/xenibase/internal/floatip"
 	"github.com/israel-duff/xenibase/internal/freetier"
 	"github.com/israel-duff/xenibase/internal/ha"
@@ -110,6 +113,9 @@ func run() error {
 	healthcheck := flag.String("healthcheck", "", "GET this URL's /healthz and exit 0 if healthy (for container health checks)")
 	rotateKey := flag.Bool("rotate-master-key", false,
 		"re-encrypt every stored secret under XENIBASE_MASTER_KEY (old key in XENIBASE_MASTER_KEY_PREVIOUS), verify, and exit")
+	issueEdge := flag.String("issue-edge-credential", "", "print the credential of the xenibase-edge with this name, bound to -edge-region, and exit")
+	edgeRegion := flag.String("edge-region", "", "the region an edge credential serves (with -issue-edge-credential)")
+	revokeEdge := flag.String("revoke-edge-credential", "", "revoke the credential of the xenibase-edge with this name and exit")
 	flag.Parse()
 
 	v := version.Get()
@@ -159,6 +165,9 @@ func run() error {
 	if *rotateKey {
 		return rotateMasterKey(cfg, keyring, log)
 	}
+	if *issueEdge != "" || *revokeEdge != "" {
+		return edgeCredential(cfg, keyring, log, *issueEdge, *edgeRegion, *revokeEdge)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -171,11 +180,23 @@ func run() error {
 	if err := store.Migrate(ctx, pool, log); err != nil {
 		return err
 	}
+	// What Derive keys on (the backend services' and console logins'
+	// passwords, file URL keys, the pooler admin's salt): a sealed seed, so
+	// a rotation of the master key leaves them as they are.
+	if err := rotate.LoadDeriveSeed(ctx, pool, keyring, cfg.MasterKey); err != nil {
+		return err
+	}
 
 	// Background services stop when bgCtx is cancelled, after HTTP drains.
 	bgCtx, stopBG := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopBG()
 	var bg sync.WaitGroup
+
+	// Migrate refused a newer schema just now; a newer release migrating
+	// later (a rolling upgrade) is noticed here.
+	schema := store.NewSchemaWatcher(pool, log)
+	bg.Add(1)
+	go func() { defer bg.Done(); schema.Run(bgCtx, 30*time.Second) }()
 
 	settingsStore := settings.New(pool, cfg.Public.Host)
 	if err := settingsStore.Load(ctx); err != nil {
@@ -207,6 +228,7 @@ func run() error {
 	kinds := map[string]jobs.Kind{jobs.KindNoop: jobs.Noop()}
 	// Regions (V3 §6.1): the home region is where projects go by default.
 	regionSvc := regions.New(pool, cfg.Cloud.Region, log)
+	regionSvc.SetPlatformDomain(cfg.Edge.Domain)
 	if err := regionSvc.Ensure(ctx); err != nil {
 		return fmt.Errorf("regions: %w", err)
 	}
@@ -243,7 +265,8 @@ func run() error {
 		}
 		bg.Add(1)
 		go func() { defer bg.Done(); etcdSvc.Run(bgCtx, 30*time.Second) }()
-		// Follow each HA instance's leader (V3 §2.2 "Routing").
+		// Follow each HA instance's leader (V3 §2.2 "Routing"), on one
+		// server at a time (an advisory lock; the others wait for it).
 		bg.Add(1)
 		go func() { defer bg.Done(); backups.Dedicated.RunHAWatcher(bgCtx, time.Second) }()
 		// The standby edge pooler (V3 §2.1): push the configuration to the
@@ -260,11 +283,22 @@ func run() error {
 		// Postgres minor releases, one instance at a time in the weekly
 		// maintenance window (V3 §2.4).
 		go func() { defer bg.Done(); backups.Dedicated.RunMaintenance(bgCtx, 5*time.Minute) }()
+		// Replication objects a move's cleanup could not remove.
+		bg.Add(1)
+		go func() { defer bg.Done(); backups.Dedicated.RunMoveSweep(bgCtx, time.Hour) }()
+		// Databases and roles of deleted shared projects that a failed
+		// rollback left behind.
+		bg.Add(1)
+		go func() { defer bg.Done(); projects.RunOrphanSweep(bgCtx, time.Hour) }()
+		// Logins dedicated owners create with role management on (V4.2).
+		bg.Add(1)
+		go func() { defer bg.Done(); backups.Dedicated.RunOwnedRoles(bgCtx, 30*time.Second) }()
 	}
 
 	// Email carries the logo from, and links to, the web app.
 	mail.SetPublicURL(cfg.Insight.PublicURL)
 	orgSvc := orgs.New(pool, authSvc, projects, mailSvc, cfg.Insight.PublicURL, log)
+	orgSvc.SetInvitationLimits(cfg.Invitations.PerOrgDay, cfg.Invitations.PerUserDay)
 	authSvc.SetHooks(orgSvc.Hooks())
 
 	// Billing (V3 §3): price books, accounts, plan changes.
@@ -325,7 +359,7 @@ func run() error {
 		})
 	}
 
-	// Database branches and their hourly expiry (V2 §8).
+	// Database branches and their expiry, swept every 10 minutes (V2 §8, decision M13 #4).
 	var branchSvc *branching.Service
 	if backups != nil {
 		branchSvc = branching.New(pool, projects, backups, nodeSvc, mailSvc, branching.Config{PublicURL: cfg.Insight.PublicURL}, log)
@@ -354,6 +388,8 @@ func run() error {
 			}
 			pm.SetWaker(host, port)
 			ws := waker.New(freeSvc, log)
+			// It doesn't authenticate: admit only the poolers.
+			ws.Allow = waker.AllowList(func() []netip.Addr { return pm.PoolerAddrs(bgCtx) }, cfg.FreeTier.WakerAllow)
 			bg.Add(1)
 			go func() {
 				defer bg.Done()
@@ -391,7 +427,11 @@ func run() error {
 	// xenibase-edge follows.
 	var servicesSvc *services.Service
 	if projects != nil {
-		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, EdgeSecret: cfg.Edge.Secret}, log)
+		servicesSvc = services.New(pool, projects, services.Config{Domain: cfg.Edge.Domain, RegionDomain: regionSvc.APIDomain, EdgeSecret: cfg.Edge.Secret,
+			EdgeSecretAllRegions: cfg.Edge.SecretAllRegions}, log)
+		if cfg.Edge.SecretAllRegions {
+			log.Warn("XENIBASE_EDGE_SECRET_ALL_REGIONS is deprecated: the platform-wide edge secret serves every region; give each regional edge its own credential (xenibase-server -issue-edge-credential)")
+		}
 		if branchSvc != nil {
 			branchSvc.API = servicesSvc // branches get an API of their own (V4.1 §9.5)
 		}
@@ -416,6 +456,9 @@ func run() error {
 		servicesSvc.Phone = platformPhone(cfg, log)
 		if backups != nil {
 			servicesSvc.Files = backups.FilesTarget
+			// A Supabase migration's source passes the import's check,
+			// platform networks included.
+			servicesSvc.CheckSource = backups.CheckSource
 		}
 		if cfg.CDN.On() {
 			servicesSvc.CDN = cdn.Cloudflare{ZoneID: cfg.CDN.CloudflareZoneID, Token: cfg.CDN.CloudflareToken}
@@ -426,6 +469,7 @@ func run() error {
 	// Support (V3 §7.1): tickets from the dashboard, email and WhatsApp.
 	supportSvc := support.New(pool, mailSvc, support.Config{
 		Address: cfg.Support.Email, PublicURL: cfg.Insight.PublicURL, InboundSecret: cfg.Support.InboundSecret,
+		AuthservID: cfg.Support.AuthservID,
 	}, log)
 	if cfg.Support.WhatsAppOn() {
 		supportSvc.SetWhatsApp(support.CloudAPI{
@@ -466,7 +510,10 @@ func run() error {
 			Network: cfg.Cloud.HetznerNetworkID, PlacementGroup: cfg.Cloud.HetznerPlacementGroup, SSHKeys: cfg.Cloud.HetznerSSHKeys,
 			Bootstrap: cloud.Bootstrap{ServerURL: cfg.Cloud.ServerURL, ServerCA: cfg.Cloud.ServerCA, AgentImage: cfg.Cloud.AgentImage,
 				PGImage: cfg.Cloud.PGImage, PrivateCIDR: cfg.Cloud.PrivateCIDR},
-			Edge: edgeBoot,
+			Edge: edgeBoot, RegionAPIDomain: regionSvc.APIDomain,
+			EdgeCredential: func(ctx context.Context, name, region string) (string, error) {
+				return edgecred.Issue(ctx, pool, keyring, name, region, nil)
+			},
 		}, log)
 		for name, k := range capacitySvc.Kinds() {
 			kinds[name] = k
@@ -488,7 +535,14 @@ func run() error {
 		if servicesSvc != nil {
 			servicesSvc.Outbound = outboundSvc
 		}
-		webhookSvc = webhooks.New(pool, keyring, projects, outboundSvc, tenancySvc, mailSvc, webhooks.Config{PublicURL: cfg.Insight.PublicURL}, log)
+		listenMax := cfg.Insight.WebhookListenMax
+		if listenMax == 0 {
+			listenMax = -1 // none: every project is polled
+		}
+		webhookSvc = webhooks.New(pool, keyring, projects, outboundSvc, tenancySvc, mailSvc, webhooks.Config{
+			PublicURL: cfg.Insight.PublicURL, ListenMax: listenMax,
+			IdleAfter: cfg.Insight.WebhookIdleAfter, IdlePoll: cfg.Insight.WebhookIdlePoll,
+		}, log)
 		// SQL jobs run through the console's login (it holds no privileges
 		// of its own), whether or not the console itself is turned off.
 		jobConsole := console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
@@ -518,9 +572,16 @@ func run() error {
 		bg.Add(1)
 		go func() { defer bg.Done(); isoChecks.Run(bgCtx) }()
 		consoleSvc = console.New(pool, projects, keyring, cfg.Insight.ConsoleDisabled, log)
-		alertSvc = alerts.New(pool, keyring, alerts.Config{
+		alertCfg := alerts.Config{
 			Interval: cfg.Insight.AlertsInterval, PublicURL: cfg.Insight.PublicURL, Poolers: pm.Admins(), WakerAddr: pm.WakerAddr,
-		}, log)
+			PoolerSkipped: pm.Skipped,
+			// Every kind is in kinds by now; the runner below serves the same map.
+			OperationClass: jobs.Classifier(kinds),
+		}
+		if nodeSvc != nil {
+			alertCfg.ClientCertExpiry = nodeSvc.ClientCertExpiry
+		}
+		alertSvc = alerts.New(pool, keyring, alertCfg, log)
 		bg.Add(1)
 		go func() { defer bg.Done(); alertSvc.Run(bgCtx) }()
 		collector := metrics.NewCollector(pool, projects, pm, nodeSvc, cfg.Insight.MetricsInterval, log)
@@ -537,8 +598,9 @@ func run() error {
 	}
 
 	var certs *tlscert.Manager
+	var regionCerts *tlscert.Regions // regions with their own pooler hostname
 	if pm != nil {
-		if certs, err = setupPoolerTLS(cfg, pm, settingsStore, log); err != nil {
+		if certs, regionCerts, err = setupPoolerTLS(cfg, pm, settingsStore, regionSvc, log); err != nil {
 			return err
 		}
 	}
@@ -553,11 +615,7 @@ func run() error {
 	if backups != nil && backups.Dedicated != nil {
 		backups.Dedicated.SetProposer(incidentSvc)
 	}
-	if cfg.Status.URL != "" {
-		log.Info("pushing heartbeats and incidents to the status page", "url", cfg.Status.URL)
-		bg.Add(1)
-		go func() { defer bg.Done(); incidentSvc.Run(bgCtx, time.Minute) }()
-	}
+	startIncidents(bgCtx, &bg, incidentSvc.Run, cfg.Status.URL, log)
 	// SLA probes of HA projects, from here and, through the status page,
 	// from outside (V3 §2.7).
 	if backups != nil && backups.Dedicated != nil {
@@ -570,7 +628,9 @@ func run() error {
 	}
 
 	notifier := jobs.NewNotifier(pool, log)
-	runner := jobs.NewRunner(pool, notifier, log, jobs.RunnerConfig{Concurrency: cfg.Workers}, kinds)
+	runner := jobs.NewRunner(pool, notifier, log, jobs.RunnerConfig{
+		Concurrency: cfg.Workers, Paused: func() bool { return schema.Err() != nil },
+	}, kinds)
 	bg.Add(2)
 	go func() { defer bg.Done(); notifier.Run(bgCtx) }()
 	go func() { defer bg.Done(); runner.Run(bgCtx) }()
@@ -588,9 +648,14 @@ func run() error {
 	if certs != nil {
 		tlsStatus = func() gen.TlsStatus { return toAPITLS(certs.Status()) }
 	}
+	auditWriter := auditlog.New(pool, log, auditlog.Config{})
+	bg.Add(1)
+	go func() { defer bg.Done(); auditWriter.Run(bgCtx) }()
 	handler := api.NewHandler(api.Options{
 		Logger:       log,
 		DB:           pool,
+		Audit:        auditWriter,
+		Schema:       schema.Err,
 		Notifier:     notifier,
 		DevEndpoints: cfg.DevEndpoints,
 		StreamCtx:    bgCtx,
@@ -636,7 +701,7 @@ func run() error {
 		MetricsToken:    cfg.Insight.MetricsToken,
 	})
 	if certs != nil {
-		handler = certs.HTTPChallengeHandler(handler)
+		handler = regionCerts.HTTPChallengeHandler(certs.HTTPChallengeHandler(handler))
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -655,6 +720,8 @@ func run() error {
 		// Only once listening: ACME challenges are answered by this server.
 		bg.Add(1)
 		go func() { defer bg.Done(); certs.Run(bgCtx) }()
+		bg.Add(1)
+		go func() { defer bg.Done(); regionCerts.Run(bgCtx, 30*time.Second) }()
 	}
 
 	errc := make(chan error, 1)
@@ -678,6 +745,10 @@ func run() error {
 	}
 	stopBG()
 	bg.Wait()
+	// Requests have drained: write the audit rows still waiting for a retry.
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 10*time.Second)
+	auditWriter.Close(closeCtx)
+	cancelClose()
 
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
@@ -731,12 +802,13 @@ func sweepAuth(ctx context.Context, svc *auth.Service, log *slog.Logger) {
 	}
 }
 
-// setupPoolerTLS builds the certificate manager for the poolers and makes
-// sure a certificate exists before they need one.
-func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, log *slog.Logger) (*tlscert.Manager, error) {
+// setupPoolerTLS builds the certificate managers for the poolers, the home
+// region's and one per region with its own pooler hostname, and makes sure
+// a certificate exists before they need one.
+func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, rs *regions.Service, log *slog.Logger) (*tlscert.Manager, *tlscert.Regions, error) {
 	mode, err := tlscert.ParseMode(cfg.PoolerTLS.Mode)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tc := tlscert.Config{
 		Mode: mode, Dir: pm.Dir(), FileMode: pm.FileMode(), Reload: pm.Reload,
@@ -749,23 +821,41 @@ func setupPoolerTLS(cfg config.Config, pm *pooler.Manager, st *settings.Store, l
 	if path := cfg.PoolerTLS.ACMECARoots; path != "" {
 		pemBytes, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: %w", err)
+			return nil, nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: %w", err)
 		}
 		tc.ACMERoots = x509.NewCertPool()
 		if !tc.ACMERoots.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: no certificates in %s", path)
+			return nil, nil, fmt.Errorf("XENIBASE_ACME_CA_ROOTS: no certificates in %s", path)
 		}
 	}
 	m, err := tlscert.New(tc, st.DBHost())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := m.Bootstrap(); err != nil {
-		return nil, fmt.Errorf("pooler TLS: %w", err)
+		return nil, nil, fmt.Errorf("pooler TLS: %w", err)
 	}
 	st.OnDBHostChange(m.SetHost)
 	log.Info("pooler TLS", "mode", mode, "host", st.DBHost())
-	return m, nil
+	regionCerts := tlscert.NewRegions(tc, pm.RegionDir, func(ctx context.Context) (map[string]string, error) {
+		list, err := rs.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		hosts := map[string]string{}
+		for _, r := range list {
+			if r.ID != rs.Home() && r.PoolerHost != "" {
+				hosts[r.ID] = r.PoolerHost
+			}
+		}
+		return hosts, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := regionCerts.Sync(ctx); err != nil {
+		log.Warn("pooler TLS for regions", "err", err)
+	}
+	return m, regionCerts, nil
 }
 
 func toAPITLS(s tlscert.Status) gen.TlsStatus {
@@ -829,6 +919,7 @@ func setupProvisioning(ctx context.Context, cfg config.Config, pool *pgxpool.Poo
 		return nil, nil, err
 	}
 	pm.SetHome(rs.Home())
+	pm.SetAdminNetworks(pc.AdminAllow)
 	// Bring the poolers in line with the metadata DB (e.g. after a restore
 	// or a lost reload). Failure is not fatal: every flow syncs again.
 	syncCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -894,11 +985,21 @@ func setupBackups(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, ke
 	ns, err := nodes.NewService(pool, ca, cfg.Backups.AgentBootstrapToken, log)
 	if err == nil {
 		ns.SetHomeRegion(cfg.Cloud.Region)
+		ns.SetBootstrapNode(cfg.Shared.NodeName)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
 	bc := backup.Config{Hour: cfg.Backups.Hour, Jitter: cfg.Backups.Jitter}
+	// Import sources may never be the platform's own networks: the
+	// operator's XENIBASE_OUTBOUND_BLOCK and, with machines Xenibase
+	// creates, their private network.
+	bc.SourceInternal = append(bc.SourceInternal, cfg.Insight.OutboundBlock...)
+	if cfg.Cloud.CanCreate() {
+		if pfx, err := netip.ParsePrefix(cfg.Cloud.PrivateCIDR); err == nil {
+			bc.SourceInternal = append(bc.SourceInternal, pfx)
+		}
+	}
 	if u := cfg.Backups.MetadataURL; u != "" {
 		pg, err := agentapi.ParseURL(u)
 		if err != nil {
@@ -928,8 +1029,8 @@ func connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		pcfg.ConnConfig.RuntimeParams["application_name"] = "xenibase-server"
 	}
 	// pgx's default (4 on a small box) is too few: the webhook and job
-	// schedulers each keep a connection for their lock, and a burst of
-	// requests and workers then queue behind each other.
+	// schedulers and the HA watcher each keep a connection for their lock,
+	// and a burst of requests and workers then queue behind each other.
 	if !strings.Contains(url, "pool_max_conns") {
 		pcfg.MaxConns = max(pcfg.MaxConns, defaultMaxConns)
 	}
@@ -947,8 +1048,8 @@ func connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 }
 
 // rotateMasterKey implements -rotate-master-key (spec §7.3): re-encrypt
-// everything under the primary key, then prove the primary key alone opens
-// it all.
+// everything under the primary key, the derive seed included, then prove
+// the primary key alone opens it all. Derived values do not change.
 func rotateMasterKey(cfg config.Config, keyring *crypto.Keyring, log *slog.Logger) error {
 	if len(cfg.PreviousMasterKeys) == 0 {
 		return errors.New("set the old key in XENIBASE_MASTER_KEY_PREVIOUS and the new one in XENIBASE_MASTER_KEY")
@@ -962,6 +1063,11 @@ func rotateMasterKey(cfg config.Config, keyring *crypto.Keyring, log *slog.Logge
 	defer pool.Close()
 	if err := store.Migrate(ctx, pool, log); err != nil {
 		return err
+	}
+	// An install that never started this release has no derive seed yet:
+	// make it from the old key first, so the derived passwords stay.
+	if err := rotate.PrepareDeriveSeed(ctx, pool, cfg.PreviousMasterKeys); err != nil {
+		return fmt.Errorf("rotation not started: %w", err)
 	}
 	res, err := rotate.Run(ctx, pool, keyring)
 	if err != nil {
@@ -1046,4 +1152,16 @@ func platformPhone(cfg config.Config, log *slog.Logger) services.PlatformPhone {
 			AccessToken: cfg.Support.WhatsAppAccessToken, Template: a.WhatsAppTemplate, Language: a.WhatsAppLanguage}
 	}
 	return p
+}
+
+// startIncidents starts the incidents loop whether or not there is a status
+// page: with one it pushes incidents, heartbeats and subscribers; without
+// one it still ends announced maintenance whose window is over and lapses
+// unconfirmed drafts.
+func startIncidents(ctx context.Context, bg *sync.WaitGroup, run func(context.Context, time.Duration), statusURL string, log *slog.Logger) {
+	if statusURL != "" {
+		log.Info("pushing heartbeats and incidents to the status page", "url", statusURL)
+	}
+	bg.Add(1)
+	go func() { defer bg.Done(); run(ctx, time.Minute) }()
 }

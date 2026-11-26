@@ -142,7 +142,7 @@ func (q *Queries) DeleteRegionEtcdMembers(ctx context.Context, region string) er
 }
 
 const etcdRegionInstances = `-- name: EtcdRegionInstances :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days FROM instances WHERE patroni AND deleted_at IS NULL AND etcd_region = $1 ORDER BY created_at
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections, switchover_started_at FROM instances WHERE patroni AND deleted_at IS NULL AND etcd_region = $1 ORDER BY created_at
 `
 
 // tenant: system - the instances under Patroni whose state is in a region's etcd cluster.
@@ -188,6 +188,8 @@ func (q *Queries) EtcdRegionInstances(ctx context.Context, region *string) ([]In
 			&i.PatroniSecret,
 			&i.EtcdRegion,
 			&i.PitrDays,
+			&i.MaxConnections,
+			&i.SwitchoverStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -388,7 +390,7 @@ func (q *Queries) InsertInstanceMember(ctx context.Context, arg InsertInstanceMe
 }
 
 const latestRegionOperation = `-- name: LatestRegionOperation :one
-SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at FROM operations WHERE kind = $1 AND project_id IS NULL AND params->>'region' = $2::text
+SELECT id, kind, project_id, params, status, attempts, run_after, locked_by, locked_at, log, error, created_by, created_at, finished_at, exclusive FROM operations WHERE kind = $1 AND project_id IS NULL AND params->>'region' = $2::text
 ORDER BY created_at DESC LIMIT 1
 `
 
@@ -416,6 +418,7 @@ func (q *Queries) LatestRegionOperation(ctx context.Context, arg LatestRegionOpe
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.FinishedAt,
+		&i.Exclusive,
 	)
 	return i, err
 }
@@ -600,7 +603,7 @@ func (q *Queries) ListInstanceMembers(ctx context.Context, instanceID uuid.UUID)
 }
 
 const listPatroniInstances = `-- name: ListPatroniInstances :many
-SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days FROM instances WHERE patroni AND deleted_at IS NULL ORDER BY created_at
+SELECT id, node_id, kind, pg_version, port, container_id, cpu_limit, mem_limit_mb, volume_gb, status, created_at, admin_host, admin_port, host, admin_secret, profile, walg_prefix, error, deleted_at, org_id, walg_target_id, walg_key_id, pg_release, pg_release_available, release_checked_at, ha_enabled, sync_replication, patroni, leader_member, patroni_secret, etcd_region, pitr_days, max_connections, switchover_started_at FROM instances WHERE patroni AND deleted_at IS NULL ORDER BY created_at
 `
 
 // tenant: system - the HA leader watcher.
@@ -646,6 +649,8 @@ func (q *Queries) ListPatroniInstances(ctx context.Context) ([]Instance, error) 
 			&i.PatroniSecret,
 			&i.EtcdRegion,
 			&i.PitrDays,
+			&i.MaxConnections,
+			&i.SwitchoverStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -750,7 +755,7 @@ func (q *Queries) PoolerProbeUsers(ctx context.Context) ([]PoolerProbeUsersRow, 
 }
 
 const projectOnInstance = `-- name: ProjectOnInstance :one
-SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles FROM projects WHERE instance_id = $1 AND deleted_at IS NULL ORDER BY created_at LIMIT 1
+SELECT id, name, slug, db_name, owner_role, scram_verifier, tier, instance_id, status, settings, storage_target_id, extensions, description, created_by, created_at, deleted_at, org_id, alias_db_name, legacy_owner_role, legacy_scram_verifier, legacy_until, storage_state, storage_state_at, backup_key_id, parent_project_id, branch_source, branch_schema_only, expires_at, expiry_notified_at, branch_backups, sensitive_data, probe_verifier, lifecycle, last_active_at, pause_warned_at, paused_at, archived_at, archive_backup_id, archive_notice_days, region, data_residency, forward_region, forward_until, integrator_roles, manage_roles, allowed_cidrs, branch_copy_files FROM projects WHERE instance_id = $1 AND deleted_at IS NULL ORDER BY created_at LIMIT 1
 `
 
 // tenant: system - the HA leader watcher (one project per dedicated instance).
@@ -802,6 +807,9 @@ func (q *Queries) ProjectOnInstance(ctx context.Context, instanceID uuid.UUID) (
 		&i.ForwardRegion,
 		&i.ForwardUntil,
 		&i.IntegratorRoles,
+		&i.ManageRoles,
+		&i.AllowedCidrs,
+		&i.BranchCopyFiles,
 	)
 	return i, err
 }
@@ -879,7 +887,7 @@ func (q *Queries) RecordAvailability(ctx context.Context, arg RecordAvailability
 }
 
 const regionPoolerHosts = `-- name: RegionPoolerHosts :many
-SELECT id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group FROM nodes WHERE role = 'pooler' AND status <> 'removed' AND region = $1 ORDER BY name
+SELECT id, name, private_addr, agent_port, role, agent_cert_fp, pg_admin_secret, capacity, status, last_heartbeat, created_at, agent_host, agent_version, registration_token, registration_expires_at, last_reachable_at, provider_server_id, pooler_generation, pooler_hash, pooler_vrrp_state, pooler_ready, pooler_checked_at, provider, region, server_type, monthly_cost_minor, cost_currency, lifecycle, empty_since, keep, failure_domain, placement_group, retiring_at, retiring_from FROM nodes WHERE role = 'pooler' AND status <> 'removed' AND region = $1 ORDER BY name
 `
 
 // tenant: system - platform infrastructure (a region's pooler hosts).
@@ -925,6 +933,8 @@ func (q *Queries) RegionPoolerHosts(ctx context.Context, region string) ([]Node,
 			&i.Keep,
 			&i.FailureDomain,
 			&i.PlacementGroup,
+			&i.RetiringAt,
+			&i.RetiringFrom,
 		); err != nil {
 			return nil, err
 		}
@@ -937,7 +947,7 @@ func (q *Queries) RegionPoolerHosts(ctx context.Context, region string) ([]Node,
 }
 
 const sLAProbeTargets = `-- name: SLAProbeTargets :many
-SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, i.patroni_secret, o.status AS org_status
+SELECT p.id, p.name, p.slug, p.db_name, p.owner_role, p.scram_verifier, p.tier, p.instance_id, p.status, p.settings, p.storage_target_id, p.extensions, p.description, p.created_by, p.created_at, p.deleted_at, p.org_id, p.alias_db_name, p.legacy_owner_role, p.legacy_scram_verifier, p.legacy_until, p.storage_state, p.storage_state_at, p.backup_key_id, p.parent_project_id, p.branch_source, p.branch_schema_only, p.expires_at, p.expiry_notified_at, p.branch_backups, p.sensitive_data, p.probe_verifier, p.lifecycle, p.last_active_at, p.pause_warned_at, p.paused_at, p.archived_at, p.archive_backup_id, p.archive_notice_days, p.region, p.data_residency, p.forward_region, p.forward_until, p.integrator_roles, p.manage_roles, p.allowed_cidrs, p.branch_copy_files, i.patroni_secret, o.status AS org_status
 FROM projects p JOIN instances i ON i.id = p.instance_id JOIN organizations o ON o.id = p.org_id
 WHERE p.deleted_at IS NULL AND i.ha_enabled AND p.probe_verifier IS NOT NULL
 ORDER BY p.id
@@ -988,6 +998,9 @@ type SLAProbeTargetsRow struct {
 	ForwardRegion       *string
 	ForwardUntil        *time.Time
 	IntegratorRoles     []string
+	ManageRoles         bool
+	AllowedCidrs        []string
+	BranchCopyFiles     bool
 	PatroniSecret       []byte
 	OrgStatus           string
 }
@@ -1047,6 +1060,9 @@ func (q *Queries) SLAProbeTargets(ctx context.Context) ([]SLAProbeTargetsRow, er
 			&i.ForwardRegion,
 			&i.ForwardUntil,
 			&i.IntegratorRoles,
+			&i.ManageRoles,
+			&i.AllowedCidrs,
+			&i.BranchCopyFiles,
 			&i.PatroniSecret,
 			&i.OrgStatus,
 		); err != nil {
@@ -1163,6 +1179,21 @@ func (q *Queries) SetInstancePatroni(ctx context.Context, arg SetInstancePatroni
 		arg.PatroniSecret,
 		arg.ID,
 	)
+	return err
+}
+
+const setInstanceSwitchover = `-- name: SetInstanceSwitchover :exec
+UPDATE instances SET switchover_started_at = $1 WHERE id = $2
+`
+
+type SetInstanceSwitchoverParams struct {
+	StartedAt *time.Time
+	ID        uuid.UUID
+}
+
+// tenant: system - a switchover of an instance the caller already resolved.
+func (q *Queries) SetInstanceSwitchover(ctx context.Context, arg SetInstanceSwitchoverParams) error {
+	_, err := q.db.Exec(ctx, setInstanceSwitchover, arg.StartedAt, arg.ID)
 	return err
 }
 

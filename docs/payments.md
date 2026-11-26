@@ -129,7 +129,10 @@ Billing asks an owner to agree to:
 
 Xenibase stores who agreed, when, and which version of the wording
 (`DebitTermsVersion`; changing the wording asks every owner again).
-Without consent Xenibase never debits automatically. The owner can still pay
+Without consent Xenibase never debits automatically, and a consent to an
+older version of the wording counts as none: until an owner agrees to the
+new one, nothing is debited automatically, the Billing page asks for the
+new terms, and each invoice's email says it won't be debited. The owner can still pay
 one invoice from the wallet by pressing **Pay from wallet** on it, which
 needs no standing consent, and can turn automatic debits off again at any
 time. If a customer disputes a charge, Xenibase's own record of the consent
@@ -157,10 +160,16 @@ owes, **all of it or nothing**:
 
 **An unanswered debit is never repeated.** If the call timed out or came
 back with a server error, Xenibase looks the key up at the provider before
-doing anything else: found, the debit happened and is booked; not found,
-nothing was posted and it is safe to try again with a new key. A charge
+doing anything else: found and completed, the debit happened and is
+booked; found and failed, nothing moved and it counts as a decline; not
+found, nothing was posted and it is safe to try again with a new key. A
+request the provider has finished in a state Xenibase doesn't know is
+neither booked nor retried: it waits for a person, with an error logged. A charge
 still unresolved blocks the next attempt on the same invoice (the database
-allows one in flight per invoice). The provider replays an answer for 24
+allows one in flight per invoice), and each attempt reads what the invoice
+owes again, under the invoice's lock, as it records its charge: one that
+started while another debited and settled the invoice debits only what is
+still owed, usually nothing. The provider replays an answer for 24
 hours; a pending charge older than that is escalated by hand, never
 retried automatically.
 
@@ -188,7 +197,7 @@ matter more than the API:
   answers with its last rate, however old. Xenibase checks the time the rate
   was set and refuses to issue an invoice on one older than the billing
   setting `fx_max_age_hours` (4 hours): the invoice stays a draft and is
-  tried again each hour.
+  tried again on every billing run (every 10 minutes) until it issues.
 
 Xenibase holds naira and prices in dollars, so the exchange exposure is
 Xenibase's: it is paid in naira and pays its hosts in dollars. The provider
@@ -225,7 +234,11 @@ corrected with a credit note, which becomes credit toward the next invoice.
    signature (HMAC-SHA256 over the timestamp and the raw body, within five
    minutes) before parsing anything.
 2. Xenibase stores the event once. A repeated event, or the same deposit
-   delivered twice, is acknowledged and ignored.
+   delivered twice, is acknowledged and ignored, unless processing it
+   failed (the provider couldn't be asked, the database refused): then
+   Xenibase answers `500` so the provider sends it again, and processes it
+   again when it does. Nothing is booked twice: a deposit is recorded once
+   per transaction, with its ledger posting.
 3. Xenibase never trusts the webhook body. It reads the transaction back
    from the wallet and posts only what the provider confirms: the amount
    credited to the wallet, net of the collection fee.
@@ -237,7 +250,10 @@ corrected with a credit note, which becomes credit toward the next invoice.
 
 Missed webhooks are not lost. Every hour Xenibase lists the last two hours
 of transactions at the provider, and every night the previous day, and
-records anything it hasn't seen.
+records anything it hasn't seen. Each hourly run also processes again every
+event of the last 30 days that failed (or whose processing was cut off),
+whether or not the provider still retries it; Admin → Billing → Events
+shows what is still `failed`.
 
 ## Withholding tax
 

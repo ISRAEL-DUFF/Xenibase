@@ -92,7 +92,7 @@ func (s *Server) MinorUpgradeInstance(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	auditFrom(r.Context()).target("instance", id.String())
-	m, err := ds.MinorUpgradeNow(r.Context(), id)
+	m, err := ds.MinorUpgradeNow(r.Context(), id, userID(r.Context()))
 	switch {
 	case errors.Is(err, provision.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "instance not found")

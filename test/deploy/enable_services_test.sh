@@ -63,6 +63,16 @@ sh ./enable-services.sh --config-only api.example.test desec >/dev/null
 check "desec: the token block" has caddy.d/api.caddy "token {env.DESEC_TOKEN}"
 check "desec: the challenge is delegated" has caddy.d/api.caddy "dns_challenge_override_domain acme.example.org"
 
+# --- a co-hosted app's files in caddy.d (docs/cohosting.md) are left alone.
+fresh CLOUDFLARE_API_TOKEN=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN
+printf 'app.taskiem.test {\n\treverse_proxy taskiem:8080\n}\n' > caddy.d/taskiem.caddy
+printf 'on_demand_tls {\n\task http://taskiem-public:9090/tls/ask\n}\n' > caddy.d/taskiem.global
+cp caddy.d/taskiem.caddy "$work/t.caddy"; cp caddy.d/taskiem.global "$work/t.global"
+sh ./enable-services.sh --config-only api.example.test cloudflare >/dev/null
+check "co-hosting: taskiem.caddy is untouched" cmp caddy.d/taskiem.caddy "$work/t.caddy"
+check "co-hosting: taskiem.global is untouched" cmp caddy.d/taskiem.global "$work/t.global"
+check "co-hosting: api.caddy is written beside them" test -s caddy.d/api.caddy
+
 # --- the script refuses what it should.
 fresh
 check "no provider credentials: refused" sh -c '! sh ./enable-services.sh --config-only api.example.test cloudflare'
@@ -81,9 +91,13 @@ check "compose: every XENIBASE_EDGE_TRUSTED_PROXIES is a CIDR range ($bad)" sh -
 cd "$repo"
 inst=$(mktemp -d); mkdir -p "$inst/bin" "$inst/deploy/compose"
 cp deploy/compose/install.sh "$inst/deploy/compose/"
+mkdir -p "$inst/deploy/images/postgres"
+cp deploy/images/postgres/build.sh "$inst/deploy/images/postgres/"
+# build.sh reads the release an image holds back from its PG_VERSION.
 cat > "$inst/bin/docker" <<'D'
 #!/bin/sh
 echo "docker $*" >> "$CALLS"
+if [ "$1 $2" = "image inspect" ]; then echo "PG_VERSION=18.6-1.pgdg13+1"; fi
 D
 chmod +x "$inst/bin/docker"
 run_install() { # run_install <.env contents>
@@ -93,6 +107,7 @@ run_install() { # run_install <.env contents>
 run_install 'XENIBASE_UI_DOMAIN=app.example.test
 COMPOSE_PROFILES=services'
 check "install: builds the edge image when services are on" grep -q 'build.*-t xenibase-edge:local' "$inst/calls"
+check "install: builds and tags the instance image by its release" grep -q 'tag xenibase-postgres:18-walg3.0.9 xenibase-postgres:18.6-walg3.0.9' "$inst/calls"
 run_install 'XENIBASE_UI_DOMAIN=app.example.test'
 check "install: leaves the edge alone when services are off" sh -c '! grep -q xenibase-edge "$1"' _ "$inst/calls"
 

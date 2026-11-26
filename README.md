@@ -56,17 +56,17 @@ database, the shared PostgreSQL 18 cluster, the two PgBouncers on
 | `make dev-up` / `make dev-down` | Start/stop the dev environment: metadata PG (`:5440`), shared PG 18 (`:5441`), PgBouncer session (`:6432`) and transaction (`:6543`) poolers. |
 | `make dev` | Go server with live reload plus the Vite dev server (proxies `/api` to Go), wired to the dev environment. |
 | `make generate` | Regenerates Go server interfaces and TypeScript types from `api/openapi.yaml`. |
-| `make test` | Go unit tests, frontend type-check and unit tests. Postgres-backed tests skip unless `XENIBASE_TEST_DATABASE_URL` is set. |
+| `make test` | Go unit tests, frontend type-check and unit tests. Postgres-backed tests skip unless `XENIBASE_TEST_DATABASE_URL` is set; `TestDumpRestoreCopy` needs `XENIBASE_TEST_PG_BIN` (a directory with `pg_dump` and `pg_restore` of the server's major version) and `docker.TestAgainstDaemon` needs `XENIBASE_TEST_DOCKER=1`. `make test-go` (and `make test-integration`) end with the counts and every skipped test with its reason; tests named in `XENIBASE_TEST_MUST_RUN` (comma-separated) fail the run if they skipped. |
 | `make test-db` | Go tests including the Postgres-backed ones, against the dev environment. |
 | `make test-integration` | Provisioning, backups, restores, imports, dedicated instances with point-in-time recovery, promotion with live writers (and its rollback), multi-node placement, the SQL console's role scoping and read-only mode, the table browser's keyset pages, extensions, and metrics end to end, plus the tenant-isolation suite, against real Postgres 18 and PgBouncer (agents run in containers and create instances through the host's Docker; S3 is faked; import sources are `supabase/postgres` and Postgres 15). |
-| `make pg-image` | Builds `xenibase-postgres:18-walg3.0.9`, the image dedicated instances run. |
+| `make pg-image` | Builds `xenibase-postgres:{17,18}-walg3.0.9`, the images dedicated instances run, each from a pinned minor release and also tagged with it (`xenibase-postgres:18.6-walg3.0.9`). |
 | `make test-acme` | Obtains a real certificate over HTTP-01 from Pebble (Let's Encrypt's test CA). |
 | `make test-e2e` | Installs the compose bundle from scratch and drives a browser from a fresh install to a working database, then backs up, deletes data, restores and verifies, imports a Supabase-shaped project and serves its app, creates a dedicated project and restores it to a point in time, promotes a hobby project while a writer runs, checking the URL is unchanged and no commits are lost, and queries, browses, and charts a project from the SQL console, table browser, and metrics pages (Playwright). |
 | `make test-sdk` | The SDKs' unit tests (TypeScript, Go, and Dart when installed); `TestSDKs` runs them live in `make test-integration`. |
 | `make docs-site` | Renders docs/ into `dist/docs` (navigation, search) and fails on broken links. |
 | `make test-docs` | Follows `docs/install.md` in a scratch clone (its marked commands, as written), then drives a browser from the fresh install to a working database. |
 | `make test-load` | 150 shared projects, pgbench on 10: create latency, pooler overhead, noisy neighbour; writes `tmp/load-report.md` (needs `pgbench`). |
-| `make release` | linux/amd64 and arm64 binaries, the source bundle, and checksums in `dist/` (CI does it on `v*` tags). |
+| `make release` | linux/amd64 and arm64 binaries, the source bundle, and checksums in `dist/`. On a pushed `v*` tag, the `release` job in `.github/workflows/ci.yml` runs it and publishes the GitHub release, once `ci`, `e2e`, `docs-install`, `audit` and `upgrade` have passed on the tag. |
 | `make run-dev` | Runs the built `bin/xenibase-server` against the dev environment (`deploy/dev/server.env`). |
 | `make lint` | `golangci-lint`. |
 | `make release-check` | Fails if the server binary embeds only the placeholder UI. |
@@ -88,7 +88,7 @@ ID=$(curl -s -X POST localhost:8080/api/v1/dev/operations \
 curl -N localhost:8080/api/v1/operations/$ID/stream
 ```
 
-Migrations run automatically on start. The dev server prints the first-run
+Migrations run automatically on start (writing one: [docs/migrations.md](docs/migrations.md)). The dev server prints the first-run
 setup code in its log; `XENIBASE_SETUP_CODE` fixes it instead.
 
 ## Operator authentication
@@ -275,14 +275,17 @@ with `NOTIFY`, which wakes idle workers and drives the SSE stream at
 | `XENIBASE_DATA_DIR` | `/var/lib/xenibase` | ACME account and certificate storage |
 | `XENIBASE_ACME_EMAIL` / `_CA` / `_CA_ROOTS` | Let's Encrypt | ACME account email, directory URL, extra trusted roots |
 | `XENIBASE_POOLER_TLS_CERT` / `_KEY` | | Certificate files for mode `files` |
-| `XENIBASE_AGENT_BOOTSTRAP_TOKEN` | | Lets the bundled agent register the local node without an operator (24+ characters) |
+| `XENIBASE_AGENT_BOOTSTRAP_TOKEN` | | Lets the bundled agent register the local node (`XENIBASE_SHARED_NODE_NAME`) without an operator, once (24+ characters) |
 | `XENIBASE_BACKUP_HOUR` | `2` | UTC hour the nightly backup window opens |
 | `XENIBASE_BACKUP_JITTER` | `2h` | How widely projects are spread over the window |
 | `XENIBASE_METADATA_BACKUP_URL` | `XENIBASE_DATABASE_URL` | The metadata DB as the agent reaches it, for self-backups; `off` disables them |
 | `XENIBASE_SHARED_NODE_ROLE` | `both` | Role of the node registered from `XENIBASE_SHARED_ADMIN_URL`, when first registered |
 | `XENIBASE_DEDICATED_ADMIN_VIA` | `network` | How xenibase-server reaches dedicated instances: `network` (the agent's Docker network) or `published` (the port published on the node) |
 | `XENIBASE_CONSOLE_DISABLED` | `false` | Turns the SQL console and table browser off for every project |
-| `XENIBASE_METRICS_INTERVAL` | `1m` | How often project and node metrics are sampled |
+| `XENIBASE_METRICS_INTERVAL` | `1m` | How often project and node metrics are sampled (by one server at a time) |
+| `XENIBASE_WEBHOOK_LISTEN_MAX` | `50` | Most direct `LISTEN` connections webhook delivery holds to one instance, outside the poolers; projects past it are polled. `0`: none, every project is polled |
+| `XENIBASE_WEBHOOK_IDLE_AFTER` | `10m` | A project's `LISTEN` connection is released once its outbox has had nothing to send this long |
+| `XENIBASE_WEBHOOK_IDLE_POLL` | `30s` | How often the outbox of a project without a `LISTEN` connection is read |
 | `XENIBASE_METRICS_TOKEN` | | Bearer token for scraping `/metrics` (24+ characters); without it only signed-in operators can read it |
 | `XENIBASE_ALERTS_INTERVAL` | `30s` | How often alert conditions are checked |
 | `XENIBASE_PUBLIC_URL` | | The web UI's address, for links in alerts (`install.sh` sets it) |

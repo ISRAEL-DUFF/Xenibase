@@ -198,6 +198,18 @@ func (s *Server) ListOrgMembers(w http.ResponseWriter, r *http.Request, org gen.
 	writeJSON(w, http.StatusOK, out)
 }
 
+// refuseBreakGlass answers 403 for a membership change made through a
+// break-glass session (V2 §2.4): the session is time-limited access, so it
+// may not hand out roles, its admin's own included, that would outlive it.
+// It writes the refusal and returns true.
+func refuseBreakGlass(w http.ResponseWriter, acc access) bool {
+	if !acc.BreakGlass {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "break_glass", "invitations, role changes and ownership transfers can't be made under break-glass; ask an owner of the organisation")
+	return true
+}
+
 func genInvitation(inv store.Invitation, inviter string) gen.Invitation {
 	out := gen.Invitation{
 		Id: inv.ID, Email: inv.Email, Kind: gen.InvitationKind(inv.Kind), OrgId: inv.OrgID, InvitedBy: inviter,
@@ -235,6 +247,9 @@ func (s *Server) InviteOrgMember(w http.ResponseWriter, r *http.Request, org gen
 	a := auditFrom(r.Context())
 	a.set("email", string(req.Email))
 	a.set("role", string(req.Role))
+	if refuseBreakGlass(w, acc) {
+		return
+	}
 	if req.Role == gen.OrgRoleOwner && acc.OrgRole != authz.OrgOwner {
 		writeError(w, http.StatusForbidden, "forbidden", "only owners can invite owners")
 		return
@@ -275,7 +290,11 @@ func (s *Server) UpdateOrgMember(w http.ResponseWriter, r *http.Request, org gen
 	a := auditFrom(r.Context())
 	a.target("user", user.String())
 	a.set("role", string(req.Role))
-	if err := s.orgs.SetMemberRole(r.Context(), org, accessFrom(r.Context()).OrgRole, user, string(req.Role)); err != nil {
+	acc := accessFrom(r.Context())
+	if refuseBreakGlass(w, acc) {
+		return
+	}
+	if err := s.orgs.SetMemberRole(r.Context(), org, acc.OrgRole, user, string(req.Role)); err != nil {
 		s.orgError(w, "change role", err)
 		return
 	}
@@ -292,9 +311,15 @@ func (s *Server) RemoveOrgMember(w http.ResponseWriter, r *http.Request, org gen
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// LeaveOrg implements POST /api/v1/orgs/{org}/leave.
+// LeaveOrg implements POST /api/v1/orgs/{org}/leave. The route is
+// org.view, so billing members can leave; a token also needs the write
+// scope, since leaving revokes every token and login its user has there.
 func (s *Server) LeaveOrg(w http.ResponseWriter, r *http.Request, org gen.OrgID) {
 	sess, _ := sessionFrom(r.Context())
+	if sess.Token != nil && !authz.HasScope(sess.Token.Scopes, authz.ScopeWrite) {
+		writeScopeError(w, authz.ScopeWrite)
+		return
+	}
 	if err := s.orgs.Leave(r.Context(), org, sess.UserID); err != nil {
 		s.orgError(w, "leave", err)
 		return
@@ -310,6 +335,9 @@ func (s *Server) TransferOrgOwnership(w http.ResponseWriter, r *http.Request, or
 	}
 	sess, _ := sessionFrom(r.Context())
 	auditFrom(r.Context()).target("user", req.UserId.String())
+	if refuseBreakGlass(w, accessFrom(r.Context())) {
+		return
+	}
 	if sess.Token != nil {
 		o, err := store.New(s.db).GetOrg(r.Context(), org)
 		if err != nil {
@@ -498,6 +526,9 @@ func (s *Server) AddProjectMember(w http.ResponseWriter, r *http.Request, _ gen.
 	a := auditFrom(r.Context())
 	a.set("email", string(req.Email))
 	a.set("role", string(req.Role))
+	if refuseBreakGlass(w, acc) {
+		return
+	}
 	p, err := s.tenantProject(r.Context())
 	if err != nil {
 		s.internalError(w, "add member", err)
@@ -546,6 +577,9 @@ func (s *Server) UpdateProjectMember(w http.ResponseWriter, r *http.Request, id 
 	a := auditFrom(r.Context())
 	a.target("user", user.String())
 	a.set("role", string(req.Role))
+	if refuseBreakGlass(w, accessFrom(r.Context())) {
+		return
+	}
 	p, err := s.tenantProject(r.Context())
 	if err != nil {
 		s.internalError(w, "change member role", err)

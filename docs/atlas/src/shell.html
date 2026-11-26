@@ -1,0 +1,48 @@
+<title>{{title}}</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="{{tagline}}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+{{css}}
+</style>
+<!-- body -->
+<a class="skip" href="#main">Skip to the page</a>
+<header class="topbar">
+  <div class="topbar-in">
+    <button class="menu" type="button" id="menu-button" aria-controls="nav" aria-expanded="false">Contents</button>
+    <a class="brand" href="#home" aria-label="{{title}}, start page">
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><path d="M12 30a20 20 0 0 1 40 0v23a5 5 0 0 1-5 5H17a5 5 0 0 1-5-5z" fill="none" stroke="currentColor" stroke-width="4"/><rect x="21" y="30" width="22" height="5.5" rx="2.75" fill="currentColor"/><rect x="21" y="40" width="22" height="5.5" rx="2.75" fill="currentColor" opacity=".75"/><rect x="21" y="50" width="22" height="5.5" rx="2.75" fill="currentColor" opacity=".5"/><circle cx="32" cy="18" r="3.2" fill="currentColor"/></svg>
+      <span class="brand-name">{{brandName}} <span>{{brandSuffix}}</span></span>
+    </a>
+    <div class="search" role="search">
+      <label class="sr" for="search-input">Search the atlas</label>
+      <input id="search-input" type="search" placeholder="Search the atlas" autocomplete="off" spellcheck="false" aria-controls="search-results" aria-expanded="false">
+      <kbd class="search-key" aria-hidden="true">/</kbd>
+      <ol id="search-results" class="search-results" hidden></ol>
+    </div>
+    <button class="theme" type="button" id="theme-button" aria-label="Colour theme: system">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>
+      <span id="theme-label">System</span>
+    </button>
+  </div>
+</header>
+<div class="layout">
+  <nav class="nav" id="nav" aria-label="Atlas contents">
+    {{nav}}
+    <p class="build">Built from <a href="{{commitURL}}"><code>{{commit}}</code></a> · {{date}}</p>
+  </nav>
+  <main id="main" tabindex="-1">
+{{articles}}
+  </main>
+  <aside class="toc" aria-label="On this page">
+    <p class="toc-title">On this page</p>
+    <ol id="toc-list"></ol>
+  </aside>
+</div>
+<div class="scrim" id="scrim" hidden></div>
+<script type="application/json" id="atlas-data">{{data}}</script>
+<script>
+{{js}}
+</script>

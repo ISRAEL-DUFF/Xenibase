@@ -102,7 +102,7 @@ func (s *Service) Sweep(ctx context.Context) (Swept, error) {
 					Blocks: []mail.Block{
 						mail.P("Hello,"),
 						mail.P(fmt.Sprintf("%s hasn't had a client connection since %s. Free projects are paused after %d days without one, so it will be paused in about %s.",
-							p.Name, lastActive(p).UTC().Format("2 January 2006"), days(s.cfg.PauseAfter), hours(s.cfg.Warn))),
+							mail.Inert(p.Name), lastActive(p).UTC().Format("2 January 2006"), days(s.cfg.PauseAfter), hours(s.cfg.Warn))),
 						mail.P("Connecting to it before then keeps it active. And if it does pause, nothing is lost: it keeps its data and wakes up on the next connection."),
 						mail.Button("Open the project", s.projectLink(p)),
 					},
@@ -165,7 +165,7 @@ func (s *Service) sweepArchived(ctx context.Context, p store.Project, now time.T
 			Blocks: []mail.Block{
 				mail.P("Hello,"),
 				mail.P(fmt.Sprintf("%s has been archived since %s. Archived Free projects are deleted after %d days, so it will be deleted on %s.",
-					p.Name, p.ArchivedAt.UTC().Format("2 January 2006"), days(s.cfg.DeleteAfter), due.UTC().Format("2 January 2006"))),
+					mail.Inert(p.Name), p.ArchivedAt.UTC().Format("2 January 2006"), days(s.cfg.DeleteAfter), due.UTC().Format("2 January 2006"))),
 				mail.P("If you still want it, connect to it or restore it from the dashboard before then, and it stays."),
 				mail.Button("Restore the project", s.projectLink(p)),
 			},

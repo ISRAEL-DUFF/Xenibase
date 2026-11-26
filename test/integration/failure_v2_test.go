@@ -279,6 +279,7 @@ func TestFailureMemberRevokedMidSession(t *testing.T) {
 		t.Fatalf("credentials: %d", code)
 	}
 	var tok gen.CreatedToken
+	dave.Reauth()
 	if code := dave.Do("POST", "/api/v1/tokens", map[string]any{"name": "laptop", "org_id": e.OrgID, "scopes": []string{"write"}, "expires_in_days": 30}, &tok); code != http.StatusCreated {
 		t.Fatalf("token: %d", code)
 	}

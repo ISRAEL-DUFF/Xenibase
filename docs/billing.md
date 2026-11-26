@@ -171,7 +171,8 @@ effective rate it is given. It is asked for **fresh** when an invoice is
 issued and refuses one older than `fx_max_age_hours` (4 by default, in
 the billing settings): a provider that can't price the pair keeps
 answering with its last rate, however old. The invoice then stays a draft,
-the failure is logged, and the next hourly run tries again. Drafts,
+the failure is logged, and the next billing run (every 10 minutes) tries
+again, until it is issued or held. Drafts,
 forecasts and estimates accept an older rate: an estimate is better than
 none.
 
@@ -179,7 +180,11 @@ none.
 as it runs. Once the month's usage is recorded (the hourly recorder has
 passed midnight on the 1st), drafts are re-rated with the full month and
 **issued**, unless the platform admin holds one (Admin → Billing →
-Invoices → Hold). Issuing:
+Invoices → Hold). The month counts as drafted only once every
+organisation's draft was made; until then each run drafts it again. A
+draft that fails to issue (a stale rate, a provider outage, a database
+error) stays a draft and every run tries it again, with the status page
+showing "Last month's invoices are late" from the 2nd. Issuing:
 
 - numbers it `XB-YYYY-NNNNNN`, sequential per year and never reused;
 - freezes the customer's business details and Xenibase's (Admin → Billing →
@@ -199,8 +204,10 @@ Invoices download as PDF from the Billing page, the admin console, and
 **Automatic issue is off by default.** Until payments are live (M21),
 drafts are generated for review and the admin issues them. Turn on
 Admin → Billing → Settings → *Issue each month's drafts automatically*
-when you are ready. Billing starts with the month the server first ran
-V3: usage from before is never invoiced.
+when you are ready. Turning it on issues every draft of a past month that
+isn't held, so hold any you mean to issue by hand first. Billing starts
+with the month the server first ran V3: usage from before is never
+invoiced.
 
 ## The ledger
 

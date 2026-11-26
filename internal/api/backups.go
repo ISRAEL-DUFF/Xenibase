@@ -489,7 +489,22 @@ func (s *Server) ImportPreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
-	pf, err := s.backups.Preflight(ctx, req.SourceUrl)
+	// The source must pass an organisation's outbound rules: the token's,
+	// or any the user belongs to (a preflight names none).
+	var orgs []uuid.UUID
+	if sess, ok := sessionFrom(r.Context()); ok {
+		if sess.Token != nil {
+			orgs = []uuid.UUID{sess.Token.OrgID}
+		} else if rows, err := store.New(s.db).ListUserOrgs(ctx, sess.UserID); err == nil {
+			for _, o := range rows {
+				orgs = append(orgs, o.ID)
+			}
+		} else {
+			s.internalError(w, "import preflight", err)
+			return
+		}
+	}
+	pf, err := s.backups.Preflight(ctx, orgs, req.SourceUrl)
 	if err != nil {
 		s.backupError(w, "import preflight", err)
 		return
@@ -688,25 +703,39 @@ func (s *Server) DownloadBackup(w http.ResponseWriter, r *http.Request, id gen.B
 		s.exporting[org]--
 		s.exportMu.Unlock()
 	}()
-	cw := &startWriter{w: w, start: func() {
+	start := func() {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="xenibase-%s-%s.dump"`, b.ID, b.StartedAt.UTC().Format("20060102-1504")))
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
-	}}
-	if err := s.backups.Export(r.Context(), b, cw); err != nil {
-		if cw.started {
-			// Mid-stream: the archive is cut short, which pg_restore reports.
-			s.log.Warn("backup download interrupted", "backup_id", b.ID, "err", err)
-			a.set("error", err.Error())
-			return
-		}
+	}
+	export := func(cw io.Writer) error { return s.backups.Export(r.Context(), b, cw) }
+	if err := streamDownload(w, start, export, func(err error) {
+		s.log.Warn("backup download interrupted", "backup_id", b.ID, "err", err)
+		a.set("error", err.Error())
+	}); err != nil {
 		if errors.Is(err, backup.ErrNotExportable) {
 			writeError(w, http.StatusConflict, "not_exportable", err.Error())
 			return
 		}
 		s.backupError(w, "download backup", err)
 	}
+}
+
+// streamDownload sends what export writes as the response, the headers
+// (start) with its first byte. An error before that is returned, for a
+// proper error response. An error after it goes to interrupted and then
+// aborts the response (http.ErrAbortHandler): the connection closes
+// without the final chunk, so the client reports a failed download. Ending
+// the response normally would make a truncated archive look complete.
+func streamDownload(w http.ResponseWriter, start func(), export func(io.Writer) error, interrupted func(error)) error {
+	cw := &startWriter{w: w, start: start}
+	err := export(cw)
+	if err != nil && cw.started {
+		interrupted(err)
+		panic(http.ErrAbortHandler)
+	}
+	return err
 }
 
 // startWriter sends the response's headers on the first write, so an error

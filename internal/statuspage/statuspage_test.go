@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/israel-duff/xenibase/internal/signature"
 	"github.com/israel-duff/xenibase/internal/statusapi"
 	"github.com/israel-duff/xenibase/test/testenv"
 )
@@ -331,7 +330,7 @@ func TestServiceEndToEnd(t *testing.T) {
 	if err := client.Heartbeat(ctx, statusapi.Heartbeat{SentAt: *now, Components: []statusapi.ComponentState{{ID: "backups", Status: "operational"}}}); err == nil {
 		t.Fatal("heartbeat signed with the real clock was accepted against a test clock far away")
 	}
-	push(t, svc, ts, "POST", statusapi.PathHeartbeat, statusapi.Heartbeat{Components: []statusapi.ComponentState{{ID: "backups", Status: "operational"}}})
+	push(t, svc, ts, "POST", statusapi.PathHeartbeat, statusapi.Heartbeat{SentAt: *now, Components: []statusapi.ComponentState{{ID: "backups", Status: "operational"}}})
 	tick()
 	var st apiStatus
 	getJSON(t, ts.URL+"/api/v1/status", &st)
@@ -388,7 +387,7 @@ func TestServiceEndToEnd(t *testing.T) {
 	if code := push(t, svc, ts, "PUT", statusapi.PathIncidents+"inc-1", manual); code != http.StatusNoContent {
 		t.Fatalf("push incident: %d", code)
 	}
-	push(t, svc, ts, "POST", statusapi.PathHeartbeat, statusapi.Heartbeat{Components: []statusapi.ComponentState{{ID: "backups", Status: "operational"}}})
+	push(t, svc, ts, "POST", statusapi.PathHeartbeat, statusapi.Heartbeat{SentAt: *now, Components: []statusapi.ComponentState{{ID: "backups", Status: "operational"}}})
 	tick()
 	getJSON(t, ts.URL+"/api/v1/status", &st)
 	if s, _ := st.component("backups"); s != statusapi.Degraded {
@@ -501,7 +500,7 @@ func push(t *testing.T, svc *Service, ts *httptest.Server, method, path string, 
 	// Signed with the service's clock.
 	body, _ := json.Marshal(v)
 	req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(string(body)))
-	req.Header.Set("Xenibase-Signature", signature.Sign(secret, svc.Now(), body))
+	req.Header.Set("Xenibase-Signature", statusapi.SignPush(secret, svc.Now(), method, path, body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

@@ -197,21 +197,6 @@ func (q *Queries) ListSavedQueries(ctx context.Context, arg ListSavedQueriesPara
 	return items, nil
 }
 
-const moveProjectSavedQueries = `-- name: MoveProjectSavedQueries :exec
-UPDATE saved_queries SET org_id = $1 WHERE project_id = $2 AND org_id = $3
-`
-
-type MoveProjectSavedQueriesParams struct {
-	NewOrgID  uuid.UUID
-	ProjectID uuid.UUID
-	OrgID     uuid.UUID
-}
-
-func (q *Queries) MoveProjectSavedQueries(ctx context.Context, arg MoveProjectSavedQueriesParams) error {
-	_, err := q.db.Exec(ctx, moveProjectSavedQueries, arg.NewOrgID, arg.ProjectID, arg.OrgID)
-	return err
-}
-
 const moveProjectSavedQueryFavorites = `-- name: MoveProjectSavedQueryFavorites :exec
 UPDATE saved_query_favorites f SET org_id = $1
 WHERE f.org_id = $2 AND f.query_id IN (SELECT q.id FROM saved_queries q WHERE q.project_id = $3)

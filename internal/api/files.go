@@ -225,13 +225,16 @@ func (s *Server) SignStorageObject(w http.ResponseWriter, r *http.Request, id ge
 
 // EdgeStorageEvent implements POST /api/v1/edge/storage-event.
 func (s *Server) EdgeStorageEvent(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.edgeAuth(w, r)
+	body, scope, ok := s.edgeAuth(w, r)
 	if !ok {
 		return
 	}
 	var ev edgeapi.StorageEvent
 	if err := json.Unmarshal(body, &ev); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "not a storage event")
+		return
+	}
+	if !s.edgeRef(w, r, scope, ev.Ref, "storage event") {
 		return
 	}
 	if err := s.services.StorageEvent(r.Context(), ev); err != nil {

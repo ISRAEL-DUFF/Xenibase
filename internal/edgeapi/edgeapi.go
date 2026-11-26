@@ -1,16 +1,18 @@
 // Package edgeapi is the contract between xenibase-server and xenibase-edge
 // (V4 §2.1): the configuration feed the edge keeps its per-project cache
 // from, and the reports it sends back (usage, request logs, keys in use,
-// projects to wake). Every request is signed with the shared edge secret
-// (the Xenibase-Signature scheme over the method, path and body), so only an
-// edge can read project configuration, which includes the edge login's
-// password.
+// projects to wake). Every request is signed with the edge's credential or
+// the platform-wide edge secret (the Xenibase-Signature scheme over the
+// method, path and body), so only an edge can read project configuration,
+// which includes the edge login's password.
 package edgeapi
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -152,7 +154,8 @@ type Project struct {
 	SpendCapped bool `json:"spend_capped,omitempty"`
 	// RequestsBlocked says the organisation's plan's monthly data API
 	// requests are used up (V4.1 §3): data, storage and realtime answer
-	// 429 plan_limit_reached until the month ends; sign-in carries on.
+	// 429 plan_limit_reached until the month ends, and open realtime
+	// connections are closed; sign-in carries on.
 	RequestsBlocked bool `json:"requests_blocked,omitempty"`
 	// MAUBlocked says the plan's monthly active users are used up: users in
 	// MAUCounted (a bloom filter of this month's counted users) still sign
@@ -170,8 +173,8 @@ type RealtimeConfig struct {
 	// MaxConnections is concurrent WebSocket connections per edge process
 	// (0: unlimited).
 	MaxConnections int `json:"max_connections,omitempty"`
-	// MessagesBlocked refuses new connections and stops delivery: the
-	// month's messages are used up.
+	// MessagesBlocked refuses new connections and HTTP broadcasts and
+	// closes open connections: the month's messages are used up.
 	MessagesBlocked bool `json:"messages_blocked,omitempty"`
 	// MaxChangesPerSecond is the database changes delivered per second
 	// before they are coalesced into a resync signal; MaxGroups the
@@ -211,8 +214,9 @@ type AuthConfig struct {
 	// SiteURL is where links go when a request names no redirect.
 	SiteURL string `json:"site_url"`
 	// RedirectURLs are the allowed redirect_to values: exact, or with
-	// "*" (any characters but "/") and "**" (anything) when
-	// AllowWildcardRedirects is on.
+	// AllowWildcardRedirects on, patterns matched part by part: "*" in the
+	// host within one label, in the path any characters but "/", and "**"
+	// in the path anything.
 	RedirectURLs           []string `json:"redirect_urls"`
 	AllowWildcardRedirects bool     `json:"allow_wildcard_redirects"`
 	SignupEnabled          bool     `json:"signup_enabled"`
@@ -412,6 +416,39 @@ func Signed(method, requestURI string, body []byte) []byte {
 	return append(b, body...)
 }
 
+// CredentialPrefix starts an edge's own credential, "xbedge_<id>_<secret>",
+// which xenibase-server binds to one region (XENIBASE_EDGE_SECRET may hold
+// either it or the platform-wide edge secret).
+const CredentialPrefix = "xbedge_"
+
+// HeaderCredential carries the id of the credential a request is signed
+// with; a request without it is signed with the platform-wide secret.
+const HeaderCredential = "Xenibase-Edge-Credential"
+
+// NewCredential returns a new credential with id.
+func NewCredential(id uuid.UUID) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return CredentialPrefix + id.String() + "_" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// CredentialID is the id in an edge's own credential; false for the
+// platform-wide secret.
+func CredentialID(secret string) (uuid.UUID, bool) {
+	rest, ok := strings.CutPrefix(secret, CredentialPrefix)
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	id, _, ok := strings.Cut(rest, "_")
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	u, err := uuid.Parse(id)
+	return u, err == nil
+}
+
 // Verify checks a request's signature (the server's side).
 func Verify(secret string, r *http.Request, body []byte, now time.Time) error {
 	return signature.Verify(secret, r.Header.Get(signature.Header), Signed(r.Method, r.URL.RequestURI(), body), now, Tolerance)
@@ -430,6 +467,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if id, ok := CredentialID(c.Secret); ok {
+		req.Header.Set(HeaderCredential, id.String())
+	}
 	req.Header.Set(signature.Header, signature.Sign(c.Secret, time.Now(), Signed(method, req.URL.RequestURI(), body)))
 	res, err := c.http().Do(req)
 	if err != nil {
@@ -509,13 +549,21 @@ const (
 	// EventBucketPrivate: a public bucket went private; its files leave
 	// the CDN's cache.
 	EventBucketPrivate = "bucket_private"
+	// EventBucketDeleted and EventBucketEmptied: a public bucket was
+	// deleted or emptied; its files leave the CDN's cache.
+	EventBucketDeleted = "bucket_deleted"
+	EventBucketEmptied = "bucket_emptied"
+	// EventObjectsChanged: objects of a public bucket were deleted,
+	// replaced or moved away (Paths); their URLs leave the CDN's cache.
+	EventObjectsChanged = "objects_changed"
 )
 
 // StorageEvent is a storage change for xenibase-server.
 type StorageEvent struct {
-	Ref    string `json:"ref"`
-	Event  string `json:"event"`
-	Bucket string `json:"bucket"`
+	Ref    string   `json:"ref"`
+	Event  string   `json:"event"`
+	Bucket string   `json:"bucket"`
+	Paths  []string `json:"paths,omitempty"`
 }
 
 // StorageEvent sends a storage change.

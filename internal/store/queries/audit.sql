@@ -1,8 +1,11 @@
 -- name: InsertAudit :exec
+-- created_at is set when a row is retried after a failed write, so it
+-- keeps the time of the request; NULL means now.
 INSERT INTO audit_log (user_id, action, target_type, target_id, detail, ip, user_agent, outcome,
-                       actor_kind, token_id, org_id, project_id, break_glass)
+                       actor_kind, token_id, org_id, project_id, break_glass, created_at)
 VALUES (sqlc.narg(user_id), @action, sqlc.narg(target_type), sqlc.narg(target_id), @detail, sqlc.narg(ip),
-        sqlc.narg(user_agent), @outcome, @actor_kind, sqlc.narg(token_id), sqlc.narg(org_id), sqlc.narg(project_id), @break_glass);
+        sqlc.narg(user_agent), @outcome, @actor_kind, sqlc.narg(token_id), sqlc.narg(org_id), sqlc.narg(project_id), @break_glass,
+        COALESCE(sqlc.narg(created_at)::timestamptz, now()));
 
 -- name: ListAudit :many
 -- One scope at a time: an org's log (@org_id), a project's slice of it

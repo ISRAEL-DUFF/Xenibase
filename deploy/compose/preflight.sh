@@ -10,6 +10,13 @@
 #   XENIBASE_S3_ENDPOINT  the backup bucket's endpoint URL, to check it is reachable
 #   XENIBASE_SMTP_HOST    your mail server, with XENIBASE_SMTP_PORT (default 587)
 #
+# The memory check reads the settings install.sh will use, from the
+# environment or an .env here: SHARED_PG_SHARED_BUFFERS and
+# SHARED_PG_EFFECTIVE_CACHE_SIZE, COMPOSE_PROFILES (the edge's
+# XENIBASE_EDGE_MEMORY), and co-hosting (COMPOSE_FILE with
+# compose.cohost.yaml), for which it sets aside XENIBASE_COHOST_RESERVE_MB
+# (default 8192) for the other app (docs/cohosting.md).
+#
 # It changes nothing. Each line is PASS, WARN (works, but look at it) or FAIL
 # (the install will not work until this is fixed); the exit status is 1 if
 # anything FAILed.
@@ -61,9 +68,11 @@ if have nproc; then
 	cpus=$(nproc)
 	if [ "$cpus" -ge 2 ]; then pass "$cpus CPUs"; else warn "$cpus CPU: 2 or more recommended (builds the images, runs Postgres, PgBouncer and the control plane)"; fi
 fi
-if [ -r /proc/meminfo ]; then
-	mem_mb=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
-	swap_mb=$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo)
+meminfo=${PREFLIGHT_MEMINFO:-/proc/meminfo} # a test can point it elsewhere
+mem_mb=
+if [ -r "$meminfo" ]; then
+	mem_mb=$(awk '/^MemTotal:/ {print int($2/1024)}' "$meminfo")
+	swap_mb=$(awk '/^SwapTotal:/ {print int($2/1024)}' "$meminfo")
 	if [ "$mem_mb" -ge 7000 ]; then
 		pass "${mem_mb} MB RAM"
 	elif [ "$mem_mb" -ge 3500 ]; then
@@ -73,6 +82,53 @@ if [ -r /proc/meminfo ]; then
 	else
 		fail "${mem_mb} MB RAM: at least 4 GB is needed (the image build alone can use 2 GB)"
 	fi
+fi
+
+# setting <NAME>: from the environment, else from .env here (quotes dropped).
+setting() {
+	eval "v=\${$1:-}"
+	if [ -z "$v" ] && [ -f .env ]; then
+		v=$(grep "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"'")
+	fi
+	printf '%s' "$v"
+}
+# to_mb <postgres size>: 2GB, 768MB, 524288kB, or a bare number of 8 kB pages.
+to_mb() {
+	printf '%s' "$1" | awk '{
+		n = $0 + 0; u = $0; sub(/^[0-9.]+ */, "", u); u = tolower(u)
+		if (u == "tb") n *= 1048576; else if (u == "gb") n *= 1024; else if (u == "kb") n /= 1024
+		else if (u == "") n = n * 8 / 1024; else if (u != "mb") { print ""; exit }
+		print int(n) }'
+}
+# What the configured services take, roughly: the shared cluster's buffers
+# plus 2 GB for its connections, the metadata database, xenibase-server, the
+# agent, the poolers, Caddy and the OS; the edge's limit when backend services
+# are on; and what a co-hosted app needs. Advisory only: it never FAILs.
+if [ -n "$mem_mb" ]; then
+	sb=$(setting SHARED_PG_SHARED_BUFFERS); sb_mb=$(to_mb "${sb:-2GB}")
+	ec=$(setting SHARED_PG_EFFECTIVE_CACHE_SIZE); ec_mb=$(to_mb "${ec:-6GB}")
+	need=$(( ${sb_mb:-2048} + 2048 ))
+	parts="shared_buffers ${sb:-2GB} + 2 GB for the rest of Xenibase"
+	case ",$(setting COMPOSE_PROFILES)," in
+	*,services,*)
+		em=$(setting XENIBASE_EDGE_MEMORY); em_mb=$(to_mb "$(printf '%s' "${em:-1g}" | sed 's/[gG]$/GB/; s/[mM]$/MB/')")
+		need=$((need + ${em_mb:-1024})); parts="$parts + the edge ${em:-1g}" ;;
+	esac
+	case ":$(setting COMPOSE_FILE):" in
+	*:compose.cohost.yaml:* | *:./compose.cohost.yaml:*)
+		rs=$(setting XENIBASE_COHOST_RESERVE_MB); rs=${rs:-8192}
+		case "$rs" in *[!0-9]* | "") rs=8192 ;; esac
+		need=$((need + rs)); parts="$parts + ${rs} MB for the co-hosted app (XENIBASE_COHOST_RESERVE_MB)" ;;
+	esac
+	if [ "$mem_mb" -ge "$need" ]; then
+		pass "memory: the configured services need about ${need} MB (${parts}); ${mem_mb} MB here"
+	else
+		warn "memory: the configured services need about ${need} MB (${parts}) but this server has ${mem_mb} MB: lower SHARED_PG_SHARED_BUFFERS and SHARED_PG_EFFECTIVE_CACHE_SIZE in .env (docs/cohosting.md has profiles)"
+	fi
+	if [ -n "$ec_mb" ] && [ "$ec_mb" -gt "$mem_mb" ]; then
+		warn "memory: SHARED_PG_EFFECTIVE_CACHE_SIZE (${ec:-6GB}) is more than this server's RAM: set it to what the shared cluster can really expect to have cached"
+	fi
+	note "dedicated instances need their own size on top (1 GB for the smallest)"
 fi
 free_gb=$(df -Pk "${PWD}" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
 if [ -n "${free_gb:-}" ]; then

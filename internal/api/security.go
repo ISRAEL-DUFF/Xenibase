@@ -180,6 +180,7 @@ var auditActions = map[string]string{
 	"POST /api/v1/orgs/{org}/support/tickets":                      "support.ticket_open",
 	"POST /api/v1/orgs/{org}/support/tickets/{ticket_id}/messages": "support.ticket_reply",
 	"POST /api/v1/orgs/{org}/support/phones":                       "support.phone_add",
+	"POST /api/v1/billing/contacts/confirm":                        "billing.contact_confirm",
 	"DELETE /api/v1/orgs/{org}/support/phones/{phone}":             "support.phone_remove",
 	"PATCH /api/v1/admin/support/tickets/{ticket_id}":              "support.ticket_update",
 	"POST /api/v1/admin/support/tickets/{ticket_id}/messages":      "support.staff_reply",
@@ -201,9 +202,13 @@ var auditActions = map[string]string{
 	"POST /api/v1/nodes":                                           "node.create",
 	"DELETE /api/v1/nodes/{id}":                                    "node.remove",
 	"PATCH /api/v1/nodes/{id}":                                     "node.update",
+	"POST /api/v1/admin/agent-client-certs/revoke":                 "node.client_cert_revoke",
 	"PUT /api/v1/admin/capacity/settings":                          "capacity.settings",
 	"PUT /api/v1/admin/regions/{region_id}":                        "region.save",
 	"PUT /api/v1/projects/{id}/residency":                          "project.residency",
+	"PUT /api/v1/projects/{id}/manage-roles":                       "project.manage_roles",
+	"PUT /api/v1/projects/{id}/network":                            "project.network",
+	"PATCH /api/v1/projects/{id}/replicas/{replica_id}":            "project.replica_settings",
 	"POST /api/v1/admin/capacity/evaluate":                         "capacity.evaluate",
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/approve":  "capacity.approve",
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/reject":   "capacity.reject",
@@ -369,12 +374,10 @@ func (s *Server) writeAudit(r *http.Request, action string, status int, info *au
 	if ua != "" {
 		params.UserAgent = &ua
 	}
-	// The audit row must outlive a client that hung up.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	defer cancel()
-	if err := store.New(s.db).InsertAudit(ctx, params); err != nil {
-		s.log.Error("write audit log", "action", action, "err", err)
-	}
+	// After the response, outside the handler's transaction: a row the
+	// database refuses is retried, counted and, if given up on, logged in
+	// full (internal/auditlog).
+	s.audit.Write(r.Context(), params)
 }
 
 // ---- Middleware --------------------------------------------------------------
@@ -411,6 +414,7 @@ var reauthRequired = map[string]bool{
 	"POST /api/v1/admin/capacity/proposals/{proposal_id}/approve": true,
 	"PUT /api/v1/admin/capacity/settings":                         true,
 	"PUT /api/v1/projects/{id}/residency":                         true,
+	"PUT /api/v1/projects/{id}/manage-roles":                      true,
 	// Moving money or changing what is owed (M27 security review).
 	"POST /api/v1/admin/payments/{payment_id}/refund":        true,
 	"POST /api/v1/admin/payments":                            true,
@@ -426,10 +430,14 @@ var reauthRequired = map[string]bool{
 	"POST /api/v1/admin/orgs/{org}/break-glass":              true,
 	"POST /api/v1/admin/orgs/{org}/suspend":                  true,
 	"GET /api/v1/projects/{id}/backup-key/download":          true,
-	// Handing a third-party app a token, and creating roles on an instance.
+	// Handing a third-party app a token, creating one from a session (a
+	// stolen cookie must not mint a year's access), and creating roles on
+	// an instance.
 	"POST /api/v1/oauth/authorize":                   true,
+	"POST /api/v1/tokens":                            true,
 	"POST /api/v1/admin/projects/{project_id}/roles": true,
-	// POST /api/v1/backups/{id}/restore checks it for mode in_place only.
+	// POST /api/v1/backups/{id}/restore checks it for mode in_place only;
+	// POST /api/v1/auth/device/approve for an approval (not a denial).
 }
 
 func isMutating(method string) bool {

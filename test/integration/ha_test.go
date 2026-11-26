@@ -215,9 +215,19 @@ func TestHASwitchoverAndFailover(t *testing.T) {
 		t.Fatalf("enable twice: %d", code)
 	}
 
-	// Planned switchover: test -> node-b.
+	// Planned switchover: test -> node-b, once Patroni reports the standby
+	// streaming as the synchronous one (on a busy host that can trail the
+	// enable by a few seconds, and a switchover refuses until then).
 	w := startWriter(t, e, c.Connection.PooledUrl)
 	time.Sleep(2 * time.Second)
+	waitFor(t, 60*time.Second, "a streaming synchronous standby", func() bool {
+		for _, m := range haStatus(t, e, c.Project.Id).Members {
+			if m.Role == "sync_standby" && m.State != nil && *m.State == "streaming" {
+				return true
+			}
+		}
+		return false
+	})
 	if code := e.Do("POST", "/api/v1/projects/"+c.Project.Id.String()+"/switchover", gen.SwitchoverRequest{}, &op); code != http.StatusAccepted {
 		t.Fatalf("switchover: %d", code)
 	}

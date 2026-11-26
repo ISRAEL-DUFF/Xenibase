@@ -114,6 +114,8 @@ export function ProjectComputePage() {
       {p.tier === "dedicated" && p.instance && (
         <InstancePanel projectId={p.id} instance={p.instance} />
       )}
+      {p.tier === "dedicated" && <ManageRolesPanel p={p} />}
+      <NetworkPanel p={p} />
       <ResizeCard p={p} />
       <HACard p={p} />
       <ReplicasCard p={p} />
@@ -227,6 +229,178 @@ function GeneralPanel({ p }: { p: Project }) {
         </FormRow>
       </Panel>
     </form>
+  );
+}
+
+/** The project's IP allowlist: the addresses its poolers accept the
+ * project's own logins from. Xenibase's services connect from anywhere. */
+function NetworkPanel({ p }: { p: Project }) {
+  const qc = useQueryClient();
+  const key = ["project", p.id, "network"];
+  const net = useQuery({
+    queryKey: key,
+    queryFn: () => api.projectNetwork(p.id),
+  });
+  const [text, setText] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (net.data) setText(net.data.allowed_cidrs.join("\n"));
+  }, [net.data]);
+  const entries = text.split(/[\s,]+/).filter(Boolean);
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setErr(null);
+    setSaving(true);
+    try {
+      const res = await api.setProjectNetwork(p.id, entries);
+      qc.setQueryData(key, res);
+      await qc.invalidateQueries({ queryKey: ["project", p.id] });
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const d = net.data;
+  return (
+    <Panel title="Network access">
+      <form onSubmit={save}>
+        <FormRow
+          label="Allowed IP addresses"
+          htmlFor="allowed-cidrs"
+          description="One address or CIDR range per line, up to 50. Empty accepts connections from anywhere. Applies to the poolers within seconds; connections already open stay open."
+        >
+          <div className="flex flex-col gap-2 text-[13px]">
+            <textarea
+              id="allowed-cidrs"
+              rows={4}
+              value={text}
+              placeholder="203.0.113.10\n198.51.100.0/24"
+              onChange={(e) => {
+                setText(e.target.value);
+                setErr(null);
+              }}
+              disabled={net.isLoading || saving}
+              data-testid="allowed-cidrs"
+              className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-fg focus:border-accent focus:outline-none disabled:opacity-50"
+            />
+            {d?.your_ip && (
+              <span
+                className={
+                  d.your_ip_allowed ? "text-fg-muted" : "text-warn-text"
+                }
+              >
+                Your address is <span className="font-mono">{d.your_ip}</span>
+                {d.your_ip_allowed
+                  ? "; it is allowed."
+                  : "; it is not on the list, so you can't connect from here."}
+              </span>
+            )}
+            <div>
+              <Button type="submit" disabled={saving || net.isLoading}>
+                Save
+              </Button>
+            </div>
+          </div>
+        </FormRow>
+      </form>
+      {err && <Alert>{err}</Alert>}
+    </Panel>
+  );
+}
+
+/** Role management on a dedicated project: the owner role's CREATEROLE,
+ * for applications whose migrations create roles, and the logins it
+ * created that the poolers accept. */
+function ManageRolesPanel({ p }: { p: Project }) {
+  const qc = useQueryClient();
+  const { org } = useCurrentOrg();
+  const owner = org?.role === "owner";
+  const key = ["project", p.id, "manage-roles"];
+  const mr = useQuery({ queryKey: key, queryFn: () => api.manageRoles(p.id) });
+  const stepUp = useStepUp(
+    "Role management lets this project's owner create database roles: confirm with your password.",
+  );
+  const [err, setErr] = useState<string | null>(null);
+  const [skipped, setSkipped] = useState<{ name: string; reason: string }[]>(
+    [],
+  );
+  const toggle = async (on: boolean) => {
+    setErr(null);
+    try {
+      await stepUp.run(async () => {
+        await api.setManageRoles(p.id, on);
+        await qc.invalidateQueries({ queryKey: key });
+        await qc.invalidateQueries({ queryKey: ["project", p.id] });
+      });
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
+  const sync = async () => {
+    setErr(null);
+    try {
+      const res = await api.syncManageRoles(p.id);
+      setSkipped(res.skipped ?? []);
+      await qc.invalidateQueries({ queryKey: key });
+    } catch (e) {
+      setErr(errorMessage(e));
+    }
+  };
+  const logins = mr.data?.logins ?? [];
+  return (
+    <Panel title="Database roles">
+      <FormRow
+        label="Let the owner create roles"
+        description={
+          owner
+            ? `Gives the owner role CREATEROLE, for migrations that create their own roles. It can manage only the roles it creates. Logins named ${p.db_name}_<name> connect through the poolers within 30 seconds.`
+            : "Only organisation owners can change this."
+        }
+      >
+        <Switch
+          checked={!!mr.data?.enabled}
+          disabled={!owner || mr.isLoading}
+          onCheckedChange={(v) => void toggle(v)}
+          aria-label="Let the owner create roles"
+          data-testid="manage-roles"
+        />
+      </FormRow>
+      {(mr.data?.enabled || logins.length > 0) && (
+        <FormRow
+          label="Logins the poolers accept"
+          description="Created by the owner. Each gets the project's connection limit."
+        >
+          <div className="flex flex-col gap-2 text-[13px]">
+            {logins.length === 0 ? (
+              <span className="text-fg-muted">None yet.</span>
+            ) : (
+              <ul className="font-mono">
+                {logins.map((l) => (
+                  <li key={l.name}>{l.name}</li>
+                ))}
+              </ul>
+            )}
+            {skipped.length > 0 && (
+              <ul className="text-fg-muted">
+                {skipped.map((s) => (
+                  <li key={s.name}>
+                    <span className="font-mono">{s.name}</span>: not synced (
+                    {s.reason})
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div>
+              <Button onClick={() => void sync()}>Sync now</Button>
+            </div>
+          </div>
+        </FormRow>
+      )}
+      {err && <Alert>{err}</Alert>}
+      {stepUp.dialog}
+    </Panel>
   );
 }
 
@@ -442,7 +616,11 @@ function GuardrailsPanel({ p }: { p: Project }) {
       >
         <FormRow
           label="Max backend connections"
-          description="Connections Postgres accepts for this database."
+          description={
+            p.instance?.connection_limit_max != null
+              ? `Connections Postgres accepts for this database: up to ${p.instance.connection_limit_max} on this instance (max_connections ${p.instance.max_connections}; Xenibase keeps ${(p.instance.max_connections ?? 0) - p.instance.connection_limit_max} for backups, replication and backend services). A larger instance allows more. Clients beyond it wait in the pooler.`
+              : "Connections Postgres accepts for this database."
+          }
           htmlFor="g-conn"
         >
           <Input
@@ -450,7 +628,7 @@ function GuardrailsPanel({ p }: { p: Project }) {
             aria-label="Max backend connections"
             type="number"
             min={1}
-            max={1000}
+            max={p.instance?.connection_limit_max ?? 1000}
             value={form.connection_limit}
             onChange={set("connection_limit")}
           />

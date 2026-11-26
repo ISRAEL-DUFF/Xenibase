@@ -38,13 +38,14 @@ GROUP BY region ORDER BY region;
 
 -- name: ProviderUnavailableSince :many
 -- tenant: system - payment providers whose last automatic charge since a time hit an outage.
-SELECT DISTINCT ON (provider) provider, (error LIKE 'provider unavailable%')::bool AS unavailable
+-- A succeeded charge has no error: coalesce, or the NULL fails the scan into a bool.
+SELECT DISTINCT ON (provider) provider, coalesce(error LIKE 'provider unavailable%', false)::bool AS unavailable
 FROM payment_intents WHERE automatic AND created_at > @since AND status IN ('succeeded', 'failed')
 ORDER BY provider, created_at DESC;
 
 -- name: UnissuedDrafts :one
--- tenant: system - drafts of a month that aren't held and haven't been issued.
-SELECT count(*)::int FROM invoices WHERE status = 'draft' AND NOT held AND period_start = @period_start;
+-- tenant: system - drafts of a month or an earlier one that aren't held and haven't been issued.
+SELECT count(*)::int FROM invoices WHERE status = 'draft' AND NOT held AND period_start <= @period_start;
 
 -- name: OrgOpenIncidents :many
 -- Open incidents that affect one of the org's projects: named in their

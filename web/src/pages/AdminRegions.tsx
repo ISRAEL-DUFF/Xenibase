@@ -66,6 +66,7 @@ export function AdminRegionsPage() {
             "Hostname",
             "Backups",
             "Copies to",
+            "Files",
             "Residency",
             "Nodes",
             "Projects",
@@ -103,6 +104,13 @@ export function AdminRegionsPage() {
                   targetName(r.copy_target_id)
                 ) : (
                   <span className="text-muted">No copies</span>
+                )}
+              </td>
+              <td className="px-3 py-2">
+                {r.files_target_id ? (
+                  targetName(r.files_target_id)
+                ) : (
+                  <Badge tone="warn">In the backup target</Badge>
                 )}
               </td>
               <td className="px-3 py-2">
@@ -169,14 +177,19 @@ function RegionPanel({
     name: r?.name ?? "",
     country: r?.country ?? "",
     pooler_host: r?.pooler_host ?? "",
+    api_domain: r?.api_domain ?? "",
     provider: r?.provider ?? "manual",
     location: r?.location ?? "",
     storage_target_id: r?.storage_target_id ?? null,
     copy_target_id: r?.copy_target_id ?? null,
+    files_target_id: r?.files_target_id ?? null,
     floating_ip_id: r?.floating_ip_id ?? null,
     residency: r?.residency ?? false,
     hidden: r?.status === "hidden",
   });
+  const [early, setEarly] = useState(
+    (r?.early_access_org_ids ?? []).join("\n"),
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const set = (k: keyof AdminRegionRequest, v: unknown) =>
@@ -186,7 +199,10 @@ function RegionPanel({
     setBusy(true);
     setErr(null);
     try {
-      await api.saveRegion(id, f);
+      await api.saveRegion(id, {
+        ...f,
+        early_access_org_ids: early.split(/[\s,]+/).filter(Boolean),
+      });
       await qc.invalidateQueries({ queryKey: ["admin", "regions"] });
       await qc.invalidateQueries({ queryKey: ["regions"] });
       onClose();
@@ -196,11 +212,16 @@ function RegionPanel({
       setBusy(false);
     }
   };
+  const targetLabel = {
+    storage_target_id: "Backup target",
+    copy_target_id: "Copy target",
+    files_target_id: "Files target",
+  };
   const targetSelect = (
-    k: "storage_target_id" | "copy_target_id",
+    k: "storage_target_id" | "copy_target_id" | "files_target_id",
     none: string,
   ) => (
-    <Field label={k === "storage_target_id" ? "Backup target" : "Copy target"}>
+    <Field label={targetLabel[k]}>
       {(fid) => (
         <Select
           id={fid}
@@ -281,6 +302,19 @@ function RegionPanel({
             />
           )}
         </Field>
+        <Field
+          label="API domain"
+          hint="Optional. Projects here serve their backend services at <ref>.<this domain>, from this region's edge, so API traffic stays in the region. Empty is the platform's API domain."
+        >
+          {(fid) => (
+            <Input
+              id={fid}
+              placeholder="ng.api.example.com"
+              value={f.api_domain ?? ""}
+              onChange={(e) => set("api_domain", e.target.value)}
+            />
+          )}
+        </Field>
         <Field label="Provider">
           {(fid) => (
             <Select
@@ -318,6 +352,13 @@ function RegionPanel({
         </Field>
         {targetSelect("storage_target_id", "Platform default")}
         {targetSelect("copy_target_id", "No cross-region copies")}
+        {targetSelect("files_target_id", "The backup target (not recommended)")}
+        <p className="text-xs text-muted">
+          Every edge holds the files target's credentials: give files a bucket,
+          or credentials limited to files/, that can't reach the backups. Copy
+          the files/ prefix there first; files already stored don't move
+          (docs/regions.md).
+        </p>
         <label className="flex items-start gap-2 text-[13px]">
           <input
             type="checkbox"
@@ -339,8 +380,25 @@ function RegionPanel({
             checked={!!f.hidden}
             onChange={(e) => set("hidden", e.target.checked)}
           />
-          <span>Hidden: no new projects (existing ones keep running).</span>
+          <span>
+            Hidden: no new projects except from early-access organisations
+            (existing ones keep running).
+          </span>
         </label>
+        <Field
+          label="Early-access organisations"
+          hint="Organisation IDs, one per line, that may create projects here while the region is hidden: your own for a rehearsal, or a first customer."
+        >
+          {(fid) => (
+            <textarea
+              id={fid}
+              rows={3}
+              className="h-20 rounded-md border border-line-strong bg-surface-2 p-2 font-mono text-xs focus:border-accent focus:outline-none"
+              value={early}
+              onChange={(e) => setEarly(e.target.value)}
+            />
+          )}
+        </Field>
         {err && <Alert>{err}</Alert>}
       </form>
     </SidePanel>

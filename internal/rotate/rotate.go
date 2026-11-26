@@ -1,6 +1,7 @@
 // Package rotate re-encrypts every secret Xenibase stores under the primary
 // master key (spec §7.3: "The master key can be rotated with a CLI command
-// that re-encrypts the stored secrets").
+// that re-encrypts the stored secrets"), and keeps the derive seed (seed.go)
+// that the derived passwords come from.
 //
 // Rotation: start xenibase-server once with -rotate-master-key, the new key
 // as XENIBASE_MASTER_KEY and the old one in XENIBASE_MASTER_KEY_PREVIOUS. When
@@ -21,20 +22,68 @@ import (
 	"github.com/israel-duff/xenibase/internal/crypto"
 )
 
-// The associated data each secret is sealed with. They must match the
-// packages that seal them (auth, backup, provision, agentca, alerts, mail);
-// TestRotation decrypts everything with the new key alone to prove it.
-func totpAAD(id uuid.UUID) []byte     { return []byte("operators.totp_secret:" + id.String()) }
-func recoveryAAD(id uuid.UUID) []byte { return []byte("users.recovery_codes:" + id.String()) }
-func storageAAD(id uuid.UUID) []byte  { return []byte("storage_targets.credentials:" + id.String()) }
-func nodeAAD(id uuid.UUID) []byte     { return []byte("nodes.pg_admin_secret:" + id.String()) }
-func instanceAAD(id uuid.UUID) []byte { return []byte("instances.admin_secret:" + id.String()) }
-
-// jwtKeyAAD matches services.JWTKeyAAD.
-func jwtKeyAAD(id uuid.UUID) []byte { return []byte("project_jwt_keys.private_enc:" + id.String()) }
-func opAAD(kind string, p uuid.UUID) []byte {
-	return []byte("operations.secrets.password:" + kind + ":" + p.String())
+// A sealed column: every non-null value in table.col was sealed with the
+// associated data aad followed by the row's key. The prefixes must match
+// the packages that seal them: TestEveryEncryptIsRotated reads every
+// Encrypt call in the module and fails on one rotate does not cover, and
+// TestRotateEveryKind opens one of each with the new key alone.
+type column struct {
+	what, table, key, col, aad string
+	// uuidKey: key is a uuid column (otherwise text).
+	uuidKey bool
 }
+
+var columns = []column{
+	// The V1 label is kept (auth.totpAAD).
+	{"user TOTP secret", "users", "id", "totp_secret", "operators.totp_secret:", true},
+	{"recovery codes", "users", "id", "recovery_codes", "users.recovery_codes:", true},
+	{"storage credentials", "storage_targets", "id", "credentials", "storage_targets.credentials:", true},
+	{"node admin credential", "nodes", "id", "pg_admin_secret", "nodes.pg_admin_secret:", true},
+	{"instance admin credential", "instances", "id", "admin_secret", "instances.admin_secret:", true},
+	{"instance Patroni secret", "instances", "id", "patroni_secret", "instances.patroni_secret:", true},
+	{"project signing key", "project_jwt_keys", "id", "private_enc", "project_jwt_keys.private_enc:", true},
+	{"project backup key", "backup_keys", "id", "key_enc", "backup_keys.key_enc:", true},
+	// Both of a webhook's signing secrets use one label.
+	{"webhook secret", "webhooks", "id", "secret_enc", "webhooks.secret:", true},
+	{"webhook previous secret", "webhooks", "id", "previous_secret_enc", "webhooks.secret:", true},
+	{"webhook headers", "webhooks", "id", "headers_enc", "webhooks.headers:", true},
+	{"scheduled job", "scheduled_jobs", "id", "spec_enc", "scheduled_jobs.spec:", true},
+	{"project auth SMTP settings", "project_auth_config", "project_id", "providers_enc", "project_auth_config.providers_enc:", true},
+	{"queued auth message", "auth_message_outbox", "id", "message_enc", "auth_email_outbox.message_enc:", true},
+	{"device sign-in token", "device_auth_requests", "device_code_hash", "sealed_token", "device:", false},
+	{"edge credential", "edge_credentials", "id", "secret_enc", "edge_credentials.secret_enc:", true},
+}
+
+// Settings rows hold sealed blobs inside JSON (JSON encodes []byte as
+// base64).
+type setting struct {
+	what, key, aad string
+	path           []string
+}
+
+var settingBlobs = []setting{
+	{"agent CA key", "agent_ca", "settings.agent_ca.key", []string{"key_sealed"}},
+	{"etcd CA key", "etcd_ca", "settings.etcd_ca.key", []string{"key_sealed"}},
+	{"backup key", "backup_key", "settings.backup_key", []string{"sealed"}},
+	{"alert webhook secret", "alerts", "settings.alerts.webhook_secret", []string{"webhook_secret"}},
+	{"alert SMTP password", "alerts", "settings.alerts.smtp_password", []string{"smtp", "password"}},
+	{"SMTP password", "mail", "settings.mail.password", []string{"password"}},
+	// What Derive keys on (seed.go): re-sealed, never replaced, so the
+	// derived passwords and URL keys survive the rotation.
+	{"derive seed", deriveSeedKey, deriveSeedAAD, []string{"sealed"}},
+}
+
+// opAADPrefix starts the operation password handoff's associated data
+// (provision.passwordAAD): prefix, then kind, ":" and the project.
+const opAADPrefix = "operations.secrets.password:"
+
+func opAAD(kind string, p uuid.UUID) []byte {
+	return []byte(opAADPrefix + kind + ":" + p.String())
+}
+
+// clearedAADPrefix starts the sign-in challenges' associated data. A
+// rotation deletes them instead of re-encrypting them.
+const clearedAADPrefix = "auth_challenges."
 
 // Result counts what was looked at and rewritten, per kind of secret.
 type Result struct {
@@ -60,7 +109,9 @@ func Run(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring) (Result, erro
 }
 
 // Verify decrypts every stored secret with k and fails on the first one it
-// cannot open (run it with only the new key after a rotation).
+// cannot open (run it with only the new key after a rotation). It also
+// fails when projects exist but the derive seed does not, since the
+// servers would then derive their passwords from the new key.
 func Verify(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring) (Result, error) {
 	return walk(ctx, db, k, verify)
 }
@@ -78,6 +129,11 @@ func walk(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring, m mode) (Res
 		secrets, err := collect(ctx, tx)
 		if err != nil {
 			return err
+		}
+		if m == verify {
+			if err := seedPresent(ctx, tx); err != nil {
+				return err
+			}
 		}
 		for _, s := range secrets {
 			res.Checked[s.what]++
@@ -111,64 +167,49 @@ func walk(ctx context.Context, db *pgxpool.Pool, k *crypto.Keyring, m mode) (Res
 	return res, err
 }
 
+func seedPresent(ctx context.Context, tx pgx.Tx) error {
+	var projects, seed bool
+	// Platform-wide: the seed is one row for every organisation.
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM projects),
+		EXISTS (SELECT 1 FROM settings WHERE key = $1)`, deriveSeedKey).Scan(&projects, &seed); err != nil {
+		return err
+	}
+	if projects && !seed {
+		return errors.New("derive seed: missing, so the backend services' passwords would change with the master key")
+	}
+	return nil
+}
+
 func collect(ctx context.Context, tx pgx.Tx) ([]secret, error) {
 	var out []secret
-	add := func(what, query string, aad func(uuid.UUID) []byte, update string) error {
-		rows, err := tx.Query(ctx, query)
+	for _, c := range columns {
+		key, param := c.key, "$1"
+		if c.uuidKey {
+			key, param = c.key+"::text", "$1::text::uuid"
+		}
+		rows, err := tx.Query(ctx, fmt.Sprintf(`SELECT %s, %s FROM %s WHERE %s IS NOT NULL FOR UPDATE`, key, c.col, c.table, c.col))
 		if err != nil {
-			return fmt.Errorf("%s: %w", what, err)
+			return nil, fmt.Errorf("%s: %w", c.what, err)
 		}
 		type row struct {
-			ID   uuid.UUID
+			Key  string
 			Blob []byte
 		}
 		rs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[row])
 		if err != nil {
-			return fmt.Errorf("%s: %w", what, err)
+			return nil, fmt.Errorf("%s: %w", c.what, err)
 		}
+		update := fmt.Sprintf(`UPDATE %s SET %s = $2 WHERE %s = %s`, c.table, c.col, c.key, param)
 		for _, r := range rs {
-			id := r.ID
-			out = append(out, secret{what: what, blob: r.Blob, aad: aad(id), save: func(tx pgx.Tx, b []byte) error {
-				_, err := tx.Exec(ctx, update, id, b)
+			k := r.Key
+			out = append(out, secret{what: c.what, blob: r.Blob, aad: []byte(c.aad + k), save: func(tx pgx.Tx, b []byte) error {
+				_, err := tx.Exec(ctx, update, k, b)
 				return err
 			}})
 		}
-		return nil
-	}
-	for _, c := range []struct {
-		what, query string
-		aad         func(uuid.UUID) []byte
-		update      string
-	}{
-		{"user TOTP secret", `SELECT id, totp_secret FROM users WHERE totp_secret IS NOT NULL FOR UPDATE`, totpAAD,
-			`UPDATE users SET totp_secret = $2 WHERE id = $1`},
-		{"recovery codes", `SELECT id, recovery_codes FROM users WHERE recovery_codes IS NOT NULL FOR UPDATE`, recoveryAAD,
-			`UPDATE users SET recovery_codes = $2 WHERE id = $1`},
-		{"storage credentials", `SELECT id, credentials FROM storage_targets WHERE credentials IS NOT NULL FOR UPDATE`, storageAAD,
-			`UPDATE storage_targets SET credentials = $2 WHERE id = $1`},
-		{"node admin credential", `SELECT id, pg_admin_secret FROM nodes WHERE pg_admin_secret IS NOT NULL FOR UPDATE`, nodeAAD,
-			`UPDATE nodes SET pg_admin_secret = $2 WHERE id = $1`},
-		{"instance admin credential", `SELECT id, admin_secret FROM instances WHERE admin_secret IS NOT NULL FOR UPDATE`, instanceAAD,
-			`UPDATE instances SET admin_secret = $2 WHERE id = $1`},
-		{"project signing key", `SELECT id, private_enc FROM project_jwt_keys FOR UPDATE`, jwtKeyAAD,
-			`UPDATE project_jwt_keys SET private_enc = $2 WHERE id = $1`},
-	} {
-		if err := add(c.what, c.query, c.aad, c.update); err != nil {
-			return nil, err
-		}
 	}
 
-	// Settings rows hold sealed blobs inside JSON.
-	for _, f := range []struct {
-		what, key, aad string
-		path           []string
-	}{
-		{"agent CA key", "agent_ca", "settings.agent_ca.key", []string{"key_sealed"}},
-		{"backup key", "backup_key", "settings.backup_key", []string{"sealed"}},
-		{"alert webhook secret", "alerts", "settings.alerts.webhook_secret", []string{"webhook_secret"}},
-		{"alert SMTP password", "alerts", "settings.alerts.smtp_password", []string{"smtp", "password"}},
-		{"SMTP password", "mail", "settings.mail.password", []string{"password"}},
-	} {
+	for _, f := range settingBlobs {
 		s, err := settingSecret(ctx, tx, f.what, f.key, f.aad, f.path)
 		if err != nil {
 			return nil, err
@@ -212,6 +253,67 @@ func collect(ctx context.Context, tx pgx.Tx) ([]secret, error) {
 				id, base64.StdEncoding.EncodeToString(b))
 			return err
 		}})
+	}
+	more, err := opSecrets(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, more...), nil
+}
+
+// opSecretAADPrefix starts the associated data of the other secrets an
+// in-flight operation carries (backup.SealOpSecret): prefix, purpose, ":"
+// and the operation's reference.
+const opSecretAADPrefix = "operations.secrets."
+
+// opSecrets are the sealed secrets in operations' params.secrets besides
+// the password: an import's source URL (bound to params.import.source_ref)
+// and a Supabase migration step's credentials (bound to params.secret_ref).
+func opSecrets(ctx context.Context, tx pgx.Tx) ([]secret, error) {
+	type kind struct{ what, key, purpose, ref string }
+	var out []secret
+	for _, k := range []kind{
+		{"import source", "source_url", "import_source", `params->'import'->>'source_ref'`},
+		{"Supabase migration credentials", "supabase_source", "supabase_source", `params->>'secret_ref'`},
+	} {
+		rows, err := tx.Query(ctx, `SELECT id, `+k.ref+`, params->'secrets'->>'`+k.key+`' FROM operations
+			WHERE coalesce(params->'secrets'->>'`+k.key+`', '') <> '' FOR UPDATE`)
+		if err != nil {
+			return nil, err
+		}
+		type row struct {
+			id       uuid.UUID
+			ref, sec string
+		}
+		var found []row
+		for rows.Next() {
+			var r row
+			var ref *string
+			if err := rows.Scan(&r.id, &ref, &r.sec); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if ref != nil {
+				r.ref = *ref
+			}
+			found = append(found, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for _, r := range found {
+			blob, err := base64.StdEncoding.DecodeString(r.sec)
+			if err != nil {
+				return nil, fmt.Errorf("operation %s: %s: %w", r.id, k.what, err)
+			}
+			id, key := r.id, k.key
+			out = append(out, secret{what: k.what, blob: blob, aad: []byte(opSecretAADPrefix + k.purpose + ":" + r.ref), save: func(tx pgx.Tx, b []byte) error {
+				_, err := tx.Exec(ctx, `UPDATE operations SET params = jsonb_set(params, ARRAY['secrets', $3::text], to_jsonb($2::text)) WHERE id = $1`,
+					id, base64.StdEncoding.EncodeToString(b), key)
+				return err
+			}})
+		}
 	}
 	return out, nil
 }

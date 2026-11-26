@@ -9,6 +9,7 @@ RETURNING *;
 UPDATE nodes SET pg_admin_secret = @pg_admin_secret WHERE id = @id;
 
 -- name: UpsertSharedInstance :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 INSERT INTO instances (node_id, kind, pg_version, port, admin_host, admin_port, status)
 VALUES (@node_id, 'shared', @pg_version, @port, sqlc.narg(admin_host), sqlc.narg(admin_port), 'running')
 ON CONFLICT (node_id) WHERE kind = 'shared' AND deleted_at IS NULL DO UPDATE
@@ -35,6 +36,7 @@ LIMIT 1;
 -- defaults to the node's private address; the admin credential is the
 -- instance's own (dedicated) or the node's (registered shared cluster).
 -- name: GetInstanceTarget :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT i.id, i.kind, i.port, i.admin_host, i.admin_port, i.status,
        COALESCE(i.host, n.private_addr)::text AS host, i.admin_secret,
        n.id AS node_id, n.name AS node_name, n.private_addr, n.pg_admin_secret
@@ -42,26 +44,33 @@ FROM instances i JOIN nodes n ON n.id = i.node_id
 WHERE i.id = @id;
 
 -- name: GetInstance :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT * FROM instances WHERE id = @id;
 
 -- name: InsertInstance :one
-INSERT INTO instances (id, node_id, kind, pg_version, port, cpu_limit, mem_limit_mb, volume_gb, profile, walg_prefix, status)
-VALUES (@id, @node_id, @kind, @pg_version, 5432, @cpu_limit, @mem_limit_mb, @volume_gb, @profile, sqlc.narg(walg_prefix), 'provisioning')
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
+INSERT INTO instances (id, node_id, kind, pg_version, port, cpu_limit, mem_limit_mb, volume_gb, profile, walg_prefix, status, max_connections)
+VALUES (@id, @node_id, @kind, @pg_version, 5432, @cpu_limit, @mem_limit_mb, @volume_gb, @profile, sqlc.narg(walg_prefix), 'provisioning',
+  COALESCE(sqlc.narg(max_connections)::int, 100))
 RETURNING *;
 
 -- name: SetInstanceAdminSecret :exec
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 UPDATE instances SET admin_secret = @admin_secret WHERE id = @id;
 
 -- name: SetInstanceRunning :exec
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 UPDATE instances
 SET status = 'running', container_id = @container_id, host = @host, port = @port,
     admin_host = sqlc.narg(admin_host), admin_port = sqlc.narg(admin_port), error = NULL
 WHERE id = @id;
 
 -- name: SetInstanceStatus :exec
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 UPDATE instances SET status = @status, error = sqlc.narg(error) WHERE id = @id;
 
 -- name: MarkInstanceDeleted :exec
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 UPDATE instances SET status = 'deleted', deleted_at = now() WHERE id = @id;
 
 -- name: ListNodeInstances :many
@@ -74,6 +83,7 @@ ORDER BY i.created_at;
 -- PickDedicatedNode chooses the healthy node with an agent that allows
 -- dedicated instances and runs the fewest.
 -- name: PickDedicatedNode :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT n.* FROM nodes n
 WHERE n.role IN ('dedicated', 'both') AND n.status = 'healthy' AND n.lifecycle = 'active' AND n.agent_cert_fp IS NOT NULL
   AND n.region = @region
@@ -85,26 +95,36 @@ LIMIT 1;
 -- clusters whose failed creation could not be rolled back (status 'error',
 -- see rollbackSharedCluster). Both are what a rollback leaves when it could
 -- not reach the node. The grace period keeps it clear of instances a create
--- or restore is still setting up.
+-- or restore is still setting up. A move, promotion or major upgrade inserts
+-- its target when it is queued, and the project points at it only from the
+-- cutover, so a target named by a queued or running operation is never an
+-- orphan; nor is an upgrade preflight's scratch instance in its first hour
+-- (scratchTrial removes it itself). With id set it checks that one instance
+-- again, just before the reaper destroys it.
 -- name: ListOrphanedInstances :many
 -- tenant: system - platform infrastructure (nodes, instances, placement).
 SELECT i.* FROM instances i
 WHERE i.deleted_at IS NULL
+  AND (sqlc.narg(id)::uuid IS NULL OR i.id = sqlc.narg(id)::uuid)
   AND i.created_at < now() - interval '5 minutes'
   AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.instance_id = i.id AND p.deleted_at IS NULL)
   -- A demoted project's stopped instance, kept as a rollback option.
   AND NOT EXISTS (SELECT 1 FROM retired_databases r WHERE r.instance_id = i.id AND r.dropped_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.status IN ('queued', 'running') AND o.params->>'target_instance' = i.id::text)
+  AND NOT (i.profile IS NOT DISTINCT FROM 'scratch' AND i.created_at > now() - interval '1 hour')
   AND (i.kind = 'dedicated' OR (i.kind = 'shared' AND i.status = 'error'))
 ORDER BY i.created_at;
 
 -- name: ListInstanceSummaries :many
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT i.id, i.kind, i.profile, i.cpu_limit, i.mem_limit_mb, i.volume_gb, i.status, i.error, i.pg_version,
-       i.pg_release, i.pg_release_available, i.ha_enabled, i.pitr_days,
+       i.pg_release, i.pg_release_available, i.ha_enabled, i.pitr_days, i.max_connections,
        n.id AS node_id, n.name AS node_name
 FROM instances i JOIN nodes n ON n.id = i.node_id
 WHERE i.deleted_at IS NULL;
 
 -- name: SharedInstanceOnNode :one
+-- tenant: system - provisioning workers and the agents' infrastructure; instances are resolved from a project the request already authorized.
 SELECT * FROM instances WHERE node_id = @node_id AND kind = 'shared' AND deleted_at IS NULL;
 
 -- name: SetInstanceOrg :execrows

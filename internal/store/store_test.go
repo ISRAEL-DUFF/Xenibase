@@ -45,13 +45,17 @@ func TestClaimSkipsLockedAndFiltersKinds(t *testing.T) {
 	}
 
 	// Only the lock holder may write.
-	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w2"}); n != 0 {
+	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w2", Attempt: 1}); n != 0 {
 		t.Fatal("non-owner completed the operation")
 	}
-	if n, _ := q.AppendOperationLog(ctx, store.AppendOperationLogParams{ID: a.ID, Worker: "w1", Entry: json.RawMessage(`{"msg":"hi"}`)}); n != 1 {
+	// Nor may an earlier attempt of the same worker.
+	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w1", Attempt: 0}); n != 0 {
+		t.Fatal("a stale attempt completed the operation")
+	}
+	if n, _ := q.AppendOperationLog(ctx, store.AppendOperationLogParams{ID: a.ID, Worker: "w1", Attempt: 1, Entry: json.RawMessage(`{"msg":"hi"}`)}); n != 1 {
 		t.Fatal("owner could not append log")
 	}
-	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w1"}); n != 1 {
+	if n, _ := q.SucceedOperation(ctx, store.SucceedOperationParams{ID: a.ID, Worker: "w1", Attempt: 1}); n != 1 {
 		t.Fatal("owner could not complete")
 	}
 	done, err := q.GetOperation(ctx, a.ID)
@@ -72,7 +76,7 @@ func TestReclaimStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := q.ReclaimStaleOperations(ctx, time.Now().Add(time.Minute))
+	ids, err := q.ReclaimStaleOperations(ctx, -60)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +86,35 @@ func TestReclaimStale(t *testing.T) {
 	got, _ := q.GetOperation(ctx, op.ID)
 	if got.Status != "queued" || got.LockedBy != nil || string(got.Log) == "[]" {
 		t.Fatalf("unexpected state after reclaim: %+v log=%s", got, got.Log)
+	}
+}
+
+// The lease cutoff is measured on the database's clock, which wrote
+// locked_at, so a worker whose clock runs ahead reclaims nothing early.
+func TestReclaimUsesDatabaseClock(t *testing.T) {
+	ctx := context.Background()
+	pool := storetest.New(t)
+	q := store.New(pool)
+	lease := (30 * time.Second).Seconds()
+
+	op, _ := q.EnqueueOperation(ctx, store.EnqueueOperationParams{Kind: "noop", Params: json.RawMessage(`{}`)})
+	if _, err := q.ClaimOperation(ctx, store.ClaimOperationParams{Worker: "w", Kinds: []string{"noop"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		age  string
+		want int
+	}{{"10 seconds", 0}, {"40 seconds", 1}} {
+		if _, err := pool.Exec(ctx, `UPDATE operations SET locked_at = now() - $2::interval WHERE id = $1`, op.ID, c.age); err != nil {
+			t.Fatal(err)
+		}
+		ids, err := q.ReclaimStaleOperations(ctx, lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != c.want {
+			t.Fatalf("lease held for %s: reclaimed %d, want %d", c.age, len(ids), c.want)
+		}
 	}
 }
 
@@ -104,6 +137,22 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'test.append'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("audit rows: %d %v", n, err)
+	}
+
+	// What the triggers don't do, as migration 00009 and
+	// docs/security-review.md §7.5 say: the role xenibase-server connects as
+	// owns the table and can switch them off. If this ever fails (the
+	// server runs as a role that can only SELECT and INSERT), update both.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update_delete`); err != nil {
+		t.Fatalf("the owner could not disable the trigger (update the docs): %v", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM audit_log`); err != nil {
+		t.Fatalf("delete with the trigger disabled: %v", err)
 	}
 }
 
