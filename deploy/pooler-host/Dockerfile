@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w -X github.com/israel-duff/xenibase/internal/version.Version=${VERSION} -X github.com/israel-duff/xenibase/internal/version.Commit=${COMMIT}" \
       -o /out/xenibase-agent ./cmd/agent
 
-FROM edoburu/pgbouncer:v1.25.1-p0
+FROM edoburu/pgbouncer:v1.26.1-p0
 # Everything runs as the image's postgres user (uid 70): the agent writes
 # the PgBouncer files and signals the PgBouncers, so they share a user.
 USER root
